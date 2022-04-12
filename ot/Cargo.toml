@@ -1,0 +1,12 @@
+[package]
+name = "ot"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+non-committing-encryption = { path = "../non-committing-encryption" }
+curve25519-dalek = "3"
+blake3 = "1"
+rand_core = { version="^0.5", features=["getrandom"], default-features=false}
