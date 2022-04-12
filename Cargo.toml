@@ -1,0 +1,7 @@
+[workspace]
+members = [
+	"pprf",
+	"ot",
+	"non-committing-encryption",
+	"pcg"
+]
