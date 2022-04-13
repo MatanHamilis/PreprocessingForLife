@@ -5,47 +5,45 @@ use curve25519_dalek::scalar::Scalar;
 use non_committing_encryption::{COSchemeKey, NonCommittingKey};
 use rand_core::OsRng;
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 enum State {
     Initialized,
     FirstMessageSent,
     FinalMessageSent,
 }
 
+pub type FirstMessage = RistrettoPoint;
+pub type SecondMessage<const KEY_SIZE: usize> = ([u8; KEY_SIZE], [u8; KEY_SIZE]);
+#[derive(Clone, Copy)]
 pub struct OTSender<const MSG_SIZE: usize> {
-    messages: ([u8; MSG_SIZE], [u8; MSG_SIZE]),
     random_scalar: Scalar,
     random_point: RistrettoPoint,
     state: State,
 }
 
 impl<const MSG_SIZE: usize> OTSender<MSG_SIZE> {
-    pub(crate) fn new(messages: ([u8; MSG_SIZE], [u8; MSG_SIZE])) -> Self {
+    pub fn new() -> Self {
         let mut csprng = OsRng;
         let random_scalar = Scalar::random(&mut csprng);
         OTSender {
-            messages,
             random_scalar,
             random_point: &RISTRETTO_BASEPOINT_TABLE * &random_scalar,
             state: State::Initialized,
         }
     }
 
-    pub(crate) fn gen_first_message(&mut self) -> Option<RistrettoPoint> {
-        if (self.state != State::Initialized) {
-            return None;
-        }
+    pub fn gen_first_message(&mut self) -> FirstMessage {
+        assert!(self.state == State::Initialized);
         self.state = State::FirstMessageSent;
-        Some(self.random_point)
+        self.random_point
     }
 
-    pub(crate) fn handle_receiver_message<const KEY_SIZE: usize>(
+    pub fn handle_receiver_message<const KEY_SIZE: usize>(
         &mut self,
         receiver_point: RistrettoPoint,
-    ) -> Option<([u8; KEY_SIZE], [u8; KEY_SIZE])> {
-        if self.state != State::FirstMessageSent {
-            return None;
-        }
+        messages: &([u8; MSG_SIZE], [u8; MSG_SIZE]),
+    ) -> SecondMessage<KEY_SIZE> {
+        assert!(self.state == State::FirstMessageSent);
         // K_0 = H(B*a)
         let key_0: COSchemeKey<KEY_SIZE> =
             expand_key::<KEY_SIZE>((receiver_point * self.random_scalar).compress().as_bytes());
@@ -57,11 +55,11 @@ impl<const MSG_SIZE: usize> OTSender<MSG_SIZE> {
                 .as_bytes(),
         );
         self.state = State::FinalMessageSent;
-        Some((
+        (
             // E_K_0(M_0)
-            key_0.encrypt(self.messages.0),
+            key_0.encrypt(messages.0),
             // E_K_1(M_1)
-            key_1.encrypt(self.messages.1),
-        ))
+            key_1.encrypt(messages.1),
+        )
     }
 }
