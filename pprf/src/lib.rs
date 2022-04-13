@@ -1,6 +1,8 @@
 //! # Punctured PseudoRandom Functions (PPRF) Implementation
 //!
 
+mod distributed_generation;
+
 use std::convert::{From, Into};
 
 use rand::{RngCore, SeedableRng};
