@@ -103,11 +103,11 @@ mod tests {
     #[test]
     fn check_large_domain() {
         let prf_key = [11u8; 32];
-        let puncture_num = 0b010101010101;
-        let puncture_point = int_to_bool_array::<20>(puncture_num);
+        let puncture_num = 0b0101010101;
+        let puncture_point = int_to_bool_array::<10>(puncture_num);
         let punctured_key = PuncturedKey::puncture(prf_key, puncture_point);
         for i in 0..1 << puncture_point.len() {
-            let prf_input = int_to_bool_array::<20>(i);
+            let prf_input = int_to_bool_array::<10>(i);
             if i != puncture_num {
                 assert_eq!(
                     punctured_key.try_eval(prf_input).unwrap(),
