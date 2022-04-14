@@ -9,7 +9,7 @@ pub type COSchemeKey<const KEY_SIZE: usize> = [u8; KEY_SIZE];
 
 impl<const KEY_SIZE: usize> NonCommittingKey<KEY_SIZE> for COSchemeKey<KEY_SIZE> {
     fn encrypt<const MSG_SIZE: usize>(&self, msg: [u8; MSG_SIZE]) -> [u8; KEY_SIZE] {
-        assert!(MSG_SIZE < KEY_SIZE);
+        assert!(MSG_SIZE <= KEY_SIZE);
         let mut output = self.clone();
         msg.iter()
             .enumerate()
