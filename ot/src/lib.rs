@@ -1,3 +1,9 @@
+//! # Oblivious Transfer Implementation
+//!
+//! This crate implements an Oblivious Transfer protocol.
+//! Namely, it implements the "Simplest OT" by [Chou and Orlandi](https://eprint.iacr.org/2015/267.pdf)
+
+//TODO: Revise the protocol.
 pub mod receiver;
 pub mod sender;
 use blake3::Hasher;
