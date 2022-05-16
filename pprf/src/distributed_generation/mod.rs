@@ -4,7 +4,7 @@
 //! One party knows the puncturing point, while the other knows the value at the puncturing point.
 //! This is the most common setting to establish the "sparse VOLE" correlation.
 //! In the Sparse-VOLE correlation one party ($P_1$) will be holding a value $x$.
-//! The other party ($P_2$) is holding a point $i \in [N]$.
+//! The other party ($P_2$) is holding a point $i \in \[N\]$.
 
 use crate::double_prg;
 use crate::Direction;

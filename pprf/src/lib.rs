@@ -1,6 +1,5 @@
 //! # Punctured PseudoRandom Functions (PPRF) Implementation
 //!
-
 mod distributed_generation;
 
 use std::convert::{From, Into};
@@ -22,6 +21,7 @@ impl From<bool> for Direction {
     }
 }
 
+// TODO: AES-NI.
 pub fn double_prg<const SEED_SIZE: usize>(input: [u8; SEED_SIZE]) -> [[u8; SEED_SIZE]; 2] {
     let mut seed: [u8; 32] = [0; 32];
     input
