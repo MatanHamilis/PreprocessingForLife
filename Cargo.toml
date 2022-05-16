@@ -3,5 +3,6 @@ members = [
 	"pprf",
 	"ot",
 	"non-committing-encryption",
-	"pcg"
+	"pcg",
+	"fields"
 ]
