@@ -11,3 +11,10 @@ rand = { version="^0.7", features=["alloc", "getrandom"], default-features=false
 rand_chacha = "^0.2"
 fields = {path = "../fields"}
 pprf = {path = "../pprf"}
+
+[dev-dependencies]
+criterion = "0.3"
+
+[[bench]]
+name = "sparse_vole"
+harness = false
