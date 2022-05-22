@@ -1,5 +1,8 @@
 /target
 Cargo.lock
+*.svg
+*.data
+*.old
 
 
 # Added by cargo
