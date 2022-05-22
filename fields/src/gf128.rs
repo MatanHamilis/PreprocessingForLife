@@ -1,10 +1,12 @@
 use core::arch::x86_64::{__m128i, _mm_clmulepi64_si128, _mm_lzcnt_epi64, _mm_xor_si128};
 use core::simd::u64x2;
 use rand_core::{CryptoRng, RngCore};
+use std::iter::Sum;
 use std::mem::transmute;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, ShlAssign, Sub, SubAssign};
 use std::ops::{Not, Shl};
 
+use crate::gf2::GF2;
 use crate::FieldElement;
 
 /// This is the irreducible polynomial $x^128 + x^7 + x^2 + x + 1$.
@@ -14,6 +16,11 @@ const IRREDUCIBLE_POLYNOMIAL: u64x2 = u64x2::from_array([IRREDUCIBLE_POLYNOMIAL_
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct GF128(u64x2);
 
+impl Sum for GF128 {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(GF128::zero(), |acc, v| acc + v)
+    }
+}
 impl Neg for GF128 {
     type Output = Self;
     fn neg(self) -> Self::Output {
@@ -44,6 +51,25 @@ impl Sub for GF128 {
 impl SubAssign for GF128 {
     fn sub_assign(&mut self, rhs: Self) {
         *self += rhs
+    }
+}
+
+impl Mul<GF2> for GF128 {
+    type Output = Self;
+    fn mul(self, rhs: GF2) -> Self::Output {
+        if rhs.is_one() {
+            self
+        } else {
+            GF128::zero()
+        }
+    }
+}
+
+impl MulAssign<GF2> for GF128 {
+    fn mul_assign(&mut self, rhs: GF2) {
+        if rhs.is_zero() {
+            *self = GF128::zero();
+        }
     }
 }
 
@@ -83,27 +109,42 @@ impl From<u64x2> for GF128 {
     }
 }
 
-impl FieldElement for GF128 {}
+impl From<[u8; 16]> for GF128 {
+    fn from(v: [u8; 16]) -> Self {
+        GF128(u64x2::from([
+            u64::from_le_bytes(v[0..8].try_into().expect("Shouldn't fail")),
+            u64::from_le_bytes(v[8..16].try_into().expect("Shouldn't fail")),
+        ]))
+    }
+}
+
+impl Into<[u8; 16]> for GF128 {
+    fn into(self) -> [u8; 16] {
+        unsafe { transmute(self.0.to_array()) }
+    }
+}
+
+impl FieldElement for GF128 {
+    fn one() -> Self {
+        GF128(GF128::U64X2_ONE)
+    }
+
+    fn is_one(&self) -> bool {
+        self.0 == GF128::U64X2_ONE
+    }
+
+    fn zero() -> Self {
+        GF128(GF128::U64X2_ZERO)
+    }
+
+    fn is_zero(&self) -> bool {
+        self.0 == GF128::U64X2_ZERO
+    }
+}
 
 impl GF128 {
     const U64X2_ZERO: u64x2 = u64x2::from_array([0u64, 0u64]);
     const U64X2_ONE: u64x2 = u64x2::from_array([1u64, 0u64]);
-
-    pub fn one() -> Self {
-        GF128(GF128::U64X2_ONE)
-    }
-
-    pub fn is_one(&self) -> bool {
-        self.0 == GF128::U64X2_ONE
-    }
-
-    pub fn zero() -> Self {
-        GF128(GF128::U64X2_ZERO)
-    }
-
-    pub fn is_zero(&self) -> bool {
-        self.0 == GF128::U64X2_ZERO
-    }
 
     // #[inline]
     pub fn get_deg(v: &u64x2) -> u32 {
@@ -233,6 +274,7 @@ impl GF128 {
 
 #[cfg(test)]
 mod tests {
+    use crate::FieldElement;
     use std::simd::u64x2;
 
     use crate::gf128::{GF128, IRREDUCIBLE_POLYNOMIAL, IRREDUCIBLE_POLYNOMIAL_U64};
@@ -290,5 +332,13 @@ mod tests {
             let y = x * x_inv;
             assert!(y.is_one());
         }
+    }
+
+    #[test]
+    pub fn test_from_into() {
+        let element = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let e = GF128::from(element);
+        let new_element: [u8; 16] = e.into();
+        assert_eq!(element, new_element);
     }
 }

@@ -14,6 +14,3 @@ criterion = "0.3"
 [[bench]]
 name = "mul_benchmark"
 harness = false
-
-[profile.bench]
-debug = true

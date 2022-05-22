@@ -45,8 +45,8 @@ pub fn inv_benchmark(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    // mul_benchmark_with_mem,
-    // mul_benchmark,
+    mul_benchmark_with_mem,
+    mul_benchmark,
     inv_benchmark,
 );
 criterion_main!(benches);
