@@ -96,11 +96,12 @@ impl<const KEY_SIZE: usize, const INPUT_BITLEN: usize> PuncturedKey<KEY_SIZE, IN
         None
     }
 
-    pub fn full_eval_with_punctured_point(
+    pub fn full_eval_with_punctured_point_into_slice(
         &self,
-        punctured_point_val: &[u8; KEY_SIZE],
-    ) -> Vec<[u8; KEY_SIZE]> {
-        let mut output = vec![[0u8; KEY_SIZE]; 1 << INPUT_BITLEN];
+        leaf_sum_plus_punctured_point_val: &[u8; KEY_SIZE],
+        output: &mut [[u8; KEY_SIZE]],
+    ) {
+        assert_eq!(output.len(), 1 << INPUT_BITLEN);
         let mut top = 1 << INPUT_BITLEN;
         let mut bottom = 0;
         let mut mid = 1 << (INPUT_BITLEN - 1);
@@ -118,7 +119,22 @@ impl<const KEY_SIZE: usize, const INPUT_BITLEN: usize> PuncturedKey<KEY_SIZE, IN
             }
             mid = (bottom + top) >> 1;
         }
-        output[mid] = *punctured_point_val;
+        let mut punctured_point_val: [u8; KEY_SIZE] = *leaf_sum_plus_punctured_point_val;
+        for v in output.iter() {
+            xor_arrays(&mut punctured_point_val, v)
+        }
+        output[mid] = punctured_point_val;
+    }
+
+    pub fn full_eval_with_punctured_point(
+        &self,
+        leaf_sum_plus_punctured_point_val: &[u8; KEY_SIZE],
+    ) -> Vec<[u8; KEY_SIZE]> {
+        let mut output = vec![[0u8; KEY_SIZE]; 1 << INPUT_BITLEN];
+        self.full_eval_with_punctured_point_into_slice(
+            leaf_sum_plus_punctured_point_val,
+            &mut output,
+        );
         output
     }
 }
@@ -205,5 +221,11 @@ mod tests {
         let puncture_point_arr = usize_to_bits::<12>(puncture_point);
         let point = bits_to_usize(&puncture_point_arr);
         assert_eq!(puncture_point, point);
+    }
+}
+
+pub(crate) fn xor_arrays<const LENGTH: usize>(a: &mut [u8; LENGTH], b: &[u8; LENGTH]) {
+    for i in 0..LENGTH {
+        a[i] ^= b[i];
     }
 }

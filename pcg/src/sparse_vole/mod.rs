@@ -16,10 +16,12 @@ mod tests {
 
     use crate::{
         codes::EACode,
+        pprf_aggregator::{RandomErrorPprfAggregator, RegularErrorPprfAggregator},
         sparse_vole::{
             scalar_party::SparseVolePcgScalarKeyGenState,
             vector_party::SparseVolePcgVectorKeyGenStateInitial,
         },
+        KEY_SIZE,
     };
 
     use fields::{FieldElement, GF128};
@@ -28,29 +30,28 @@ mod tests {
     #[test]
     fn test_full_correlation() {
         // Define constants
-        const WEIGHT: usize = 10;
+        const WEIGHT: usize = 128;
         const CODE_WEIGHT: usize = 10;
-        const INPUT_BITLEN: usize = 20;
+        const INPUT_BITLEN: usize = 10;
         let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
-        let prf_keys = {
-            let mut i: u8 = 0;
-            [0; WEIGHT].map(|_| {
-                i += 1;
-                [i; 16]
+        let prf_keys = (0..WEIGHT)
+            .map(|num| {
+                let mut output = [0u8; KEY_SIZE];
+                let bits = usize_to_bits::<KEY_SIZE>(num);
+                for (i, b) in bits.iter().enumerate() {
+                    if *b {
+                        output[i] = 1;
+                    }
+                }
+                output
             })
-        };
+            .collect();
 
         // Define Gen State
         let mut scalar_keygen_state =
-            SparseVolePcgScalarKeyGenState::<INPUT_BITLEN, WEIGHT>::new(scalar.clone(), prf_keys);
+            SparseVolePcgScalarKeyGenState::<INPUT_BITLEN>::new(scalar.clone(), prf_keys);
 
-        let puncturing_points = {
-            let mut i = 0;
-            [0; WEIGHT].map(|_| {
-                i += 1;
-                usize_to_bits(i * 100)
-            })
-        };
+        let puncturing_points = (0..WEIGHT).map(|i| usize_to_bits(i * 100)).collect();
 
         let mut vector_keygen_state_init =
             SparseVolePcgVectorKeyGenStateInitial::new(puncturing_points);
@@ -63,13 +64,16 @@ mod tests {
             vector_keygen_state_init.handle_second_message(scalar_second_message);
 
         // Create Offline Keys
-        let scalar_offline_key = scalar_keygen_state.keygen_offline();
-        let vector_offline_key = vector_keygen_state_final.keygen_offline();
+        let scalar_offline_key = scalar_keygen_state.keygen_offline::<RegularErrorPprfAggregator>();
+        let vector_offline_key =
+            vector_keygen_state_final.keygen_offline::<RegularErrorPprfAggregator>();
 
         // Create code
         let code_seed = [0; 32];
-        let scalar_code = EACode::<CODE_WEIGHT>::new(1 << INPUT_BITLEN, 100, code_seed);
-        let vector_code = EACode::<CODE_WEIGHT>::new(1 << INPUT_BITLEN, 100, code_seed);
+        let scalar_code =
+            EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), 100, code_seed);
+        let vector_code =
+            EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), 100, code_seed);
 
         // Create online keys
         let scalar_online_key = scalar_offline_key.provide_online_key(scalar_code);

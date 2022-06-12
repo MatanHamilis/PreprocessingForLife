@@ -1,4 +1,5 @@
 use super::vector_party::VectorFirstMessage;
+use crate::pprf_aggregator::PprfAggregator;
 use crate::{codes::EACode, xor_arrays, KEY_SIZE};
 use fields::{FieldElement, GF128};
 use pprf::{
@@ -6,10 +7,10 @@ use pprf::{
     prf_eval_all,
 };
 
-pub struct SparseVolePcgScalarKeyGenState<const INPUT_BITLEN: usize, const WEIGHT: usize> {
-    prf_keys: [[u8; KEY_SIZE]; WEIGHT],
+pub struct SparseVolePcgScalarKeyGenState<const INPUT_BITLEN: usize> {
+    prf_keys: Vec<[u8; KEY_SIZE]>,
     scalar: GF128,
-    puncturers: [Puncturer<KEY_SIZE, INPUT_BITLEN>; WEIGHT],
+    puncturers: Vec<Puncturer<KEY_SIZE, INPUT_BITLEN>>,
 }
 
 pub struct OfflineSparseVoleKey {
@@ -22,60 +23,51 @@ pub struct OnlineSparseVoleKey<const CODE_WEIGHT: usize> {
     code: EACode<CODE_WEIGHT>,
 }
 
-pub type ScalarFirstMessage<const WEIGHT: usize, const INPUT_BITLEN: usize> =
-    [[SenderFirstMessage; INPUT_BITLEN]; WEIGHT];
+pub type ScalarFirstMessage<const INPUT_BITLEN: usize> = Vec<[SenderFirstMessage; INPUT_BITLEN]>;
 
-pub type ScalarSecondMessage<const WEIGHT: usize, const INPUT_BITLEN: usize> =
-    [([SenderSecondMessage<KEY_SIZE>; INPUT_BITLEN], GF128); WEIGHT];
+pub type ScalarSecondMessage<const INPUT_BITLEN: usize> = Vec<(
+    [SenderSecondMessage<KEY_SIZE>; INPUT_BITLEN],
+    [u8; KEY_SIZE],
+)>;
 
-impl<const INPUT_BITLEN: usize, const WEIGHT: usize>
-    SparseVolePcgScalarKeyGenState<INPUT_BITLEN, WEIGHT>
-{
+impl<const INPUT_BITLEN: usize> SparseVolePcgScalarKeyGenState<INPUT_BITLEN> {
     /// Generates the first message of the Scalar party
-    pub fn new(scalar: GF128, prf_keys: [[u8; KEY_SIZE]; WEIGHT]) -> Self {
-        let mut i = 0;
+    pub fn new(scalar: GF128, prf_keys: Vec<[u8; KEY_SIZE]>) -> Self {
+        let puncturers = prf_keys
+            .iter()
+            .map(|prf_key| Puncturer::<KEY_SIZE, INPUT_BITLEN>::new(&prf_key))
+            .collect();
         Self {
             prf_keys,
             scalar,
-            puncturers: [0; WEIGHT].map(|_| {
-                i += 1;
-                Puncturer::<KEY_SIZE, INPUT_BITLEN>::new(&prf_keys[i - 1])
-            }),
+            puncturers,
         }
     }
 
-    pub fn create_first_message(&mut self) -> ScalarFirstMessage<WEIGHT, INPUT_BITLEN> {
-        let mut i = 0;
-        [0; WEIGHT].map(|_| {
-            i += 1;
-            self.puncturers[i - 1].make_first_msg()
-        })
+    pub fn create_first_message(&mut self) -> ScalarFirstMessage<INPUT_BITLEN> {
+        self.puncturers
+            .iter_mut()
+            .map(|puncturer| puncturer.make_first_msg())
+            .collect()
     }
 
     pub fn create_second_message(
         &mut self,
-        vector_msg: &VectorFirstMessage<WEIGHT, INPUT_BITLEN>,
-    ) -> ScalarSecondMessage<WEIGHT, INPUT_BITLEN> {
-        let mut i = 0;
-        [0; WEIGHT].map(|_| {
-            i += 1;
-            (
-                self.puncturers[i - 1].make_second_msg(vector_msg[i - 1]),
-                GF128::from(self.puncturers[i - 1].get_full_sum()) + self.scalar,
-            )
-        })
+        vector_msg: &VectorFirstMessage<INPUT_BITLEN>,
+    ) -> ScalarSecondMessage<INPUT_BITLEN> {
+        self.puncturers
+            .iter_mut()
+            .enumerate()
+            .map(|(i, puncturer)| {
+                let mut s = puncturer.get_full_sum();
+                xor_arrays(&mut s, &self.scalar.into());
+                (puncturer.make_second_msg(vector_msg[i]), s)
+            })
+            .collect()
     }
 
-    pub fn keygen_offline(&self) -> OfflineSparseVoleKey {
-        let mut accumulated_vector = prf_eval_all(&self.prf_keys[0], INPUT_BITLEN);
-        self.prf_keys[1..].iter().for_each(|k| {
-            prf_eval_all(k, INPUT_BITLEN)
-                .iter()
-                .zip(accumulated_vector.iter_mut())
-                .for_each(|(tmp_vec, acc_vec)| {
-                    xor_arrays(acc_vec, tmp_vec);
-                })
-        });
+    pub fn keygen_offline<T: PprfAggregator<KEY_SIZE>>(&self) -> OfflineSparseVoleKey {
+        let accumulated_vector = T::aggregate(&self.prf_keys, INPUT_BITLEN);
         let mut sum = GF128::zero();
         OfflineSparseVoleKey {
             scalar: self.scalar.clone(),
@@ -99,6 +91,9 @@ impl OfflineSparseVoleKey {
             accumulated_vector: self.accumulated_vector,
             code,
         }
+    }
+    pub fn vector_length(&self) -> usize {
+        self.accumulated_vector.len()
     }
 }
 
