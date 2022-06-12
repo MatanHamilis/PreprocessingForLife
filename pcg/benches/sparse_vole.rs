@@ -1,6 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use fields::GF128;
 use pcg::codes::EACode;
+use pcg::pprf_aggregator::RegularErrorPprfAggregator;
 use pcg::sparse_vole::scalar_party::SparseVolePcgScalarKeyGenState;
 use pcg::sparse_vole::vector_party::SparseVolePcgVectorKeyGenStateInitial;
 use pprf::usize_to_bits;
@@ -11,30 +12,30 @@ pub fn full_pcg_bench(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for i in 0..iters as usize {
-                const PRF_KEYS_NUM: usize = 10;
+                const PRF_KEYS_NUM: usize = 128;
                 const CODE_WEIGHT: usize = 10;
-                const INPUT_BITLEN: usize = 20;
+                const INPUT_BITLEN: usize = 13;
                 const KEY_SIZE: usize = 16;
                 let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
                 let mut i = 0;
-                let prf_keys = [0; PRF_KEYS_NUM].map(|_| {
-                    i += 1;
-                    [i - 1; KEY_SIZE]
-                });
+                let prf_keys = (0..PRF_KEYS_NUM)
+                    .map(|num| {
+                        let mut output = [0u8; KEY_SIZE];
+                        let bits = usize_to_bits::<KEY_SIZE>(num);
+                        for (i, b) in bits.iter().enumerate() {
+                            if *b {
+                                output[i] = 1;
+                            }
+                        }
+                        output
+                    })
+                    .collect();
 
                 // Define Gen State
-                let mut scalar_keygen_state = SparseVolePcgScalarKeyGenState::<
-                    INPUT_BITLEN,
-                    PRF_KEYS_NUM,
-                >::new(scalar.clone(), prf_keys);
+                let mut scalar_keygen_state =
+                    SparseVolePcgScalarKeyGenState::<INPUT_BITLEN>::new(scalar.clone(), prf_keys);
 
-                let puncturing_points = {
-                    let mut i = 0;
-                    [0; PRF_KEYS_NUM].map(|_| {
-                        i += 1;
-                        usize_to_bits(i * 100)
-                    })
-                };
+                let puncturing_points = (0..PRF_KEYS_NUM).map(|i| usize_to_bits(i * 100)).collect();
 
                 let mut vector_keygen_state_init =
                     SparseVolePcgVectorKeyGenStateInitial::new(puncturing_points);
@@ -48,13 +49,17 @@ pub fn full_pcg_bench(c: &mut Criterion) {
                     vector_keygen_state_init.handle_second_message(scalar_second_message);
 
                 // Create Offline Keys
-                let scalar_offline_key = scalar_keygen_state.keygen_offline();
-                let vector_offline_key = vector_keygen_state_final.keygen_offline();
+                let scalar_offline_key =
+                    scalar_keygen_state.keygen_offline::<RegularErrorPprfAggregator>();
+                let vector_offline_key =
+                    vector_keygen_state_final.keygen_offline::<RegularErrorPprfAggregator>();
 
                 // Create code
                 let code_seed = [0; 32];
-                let scalar_code = EACode::<CODE_WEIGHT>::new(1 << INPUT_BITLEN, 100, code_seed);
-                let vector_code = EACode::<CODE_WEIGHT>::new(1 << INPUT_BITLEN, 100, code_seed);
+                let scalar_code =
+                    EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), 100, code_seed);
+                let vector_code =
+                    EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), 100, code_seed);
 
                 // Create online keys
                 let scalar_online_key = scalar_offline_key.provide_online_key(scalar_code);
@@ -77,29 +82,29 @@ pub fn offline_pcg(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for i in 0..iters as usize {
-                const PRF_KEYS_NUM: usize = 75;
-                const INPUT_BITLEN: usize = 20;
+                const PRF_KEYS_NUM: usize = 128;
+                const INPUT_BITLEN: usize = 13;
                 const KEY_SIZE: usize = 16;
                 let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
                 let mut i = 0;
-                let prf_keys = [0; PRF_KEYS_NUM].map(|_| {
-                    i += 1;
-                    [i - 1; KEY_SIZE]
-                });
+                let prf_keys = (0..PRF_KEYS_NUM)
+                    .map(|num| {
+                        let mut output = [0u8; KEY_SIZE];
+                        let bits = usize_to_bits::<KEY_SIZE>(num);
+                        for (i, b) in bits.iter().enumerate() {
+                            if *b {
+                                output[i] = 1;
+                            }
+                        }
+                        output
+                    })
+                    .collect();
 
                 // Define Gen State
-                let mut scalar_keygen_state = SparseVolePcgScalarKeyGenState::<
-                    INPUT_BITLEN,
-                    PRF_KEYS_NUM,
-                >::new(scalar.clone(), prf_keys);
+                let mut scalar_keygen_state =
+                    SparseVolePcgScalarKeyGenState::<INPUT_BITLEN>::new(scalar.clone(), prf_keys);
 
-                let puncturing_points = {
-                    let mut i = 0;
-                    [0; PRF_KEYS_NUM].map(|_| {
-                        i += 1;
-                        usize_to_bits(i * 100)
-                    })
-                };
+                let puncturing_points = (0..PRF_KEYS_NUM).map(|i| usize_to_bits(i * 100)).collect();
 
                 let mut vector_keygen_state_init =
                     SparseVolePcgVectorKeyGenStateInitial::new(puncturing_points);
@@ -113,8 +118,10 @@ pub fn offline_pcg(c: &mut Criterion) {
                     vector_keygen_state_init.handle_second_message(scalar_second_message);
 
                 // Create Offline Keys
-                let scalar_offline_key = scalar_keygen_state.keygen_offline();
-                let vector_offline_key = vector_keygen_state_final.keygen_offline();
+                let scalar_offline_key =
+                    scalar_keygen_state.keygen_offline::<RegularErrorPprfAggregator>();
+                let vector_offline_key =
+                    vector_keygen_state_final.keygen_offline::<RegularErrorPprfAggregator>();
                 black_box(scalar_offline_key);
                 black_box(vector_offline_key);
             }
@@ -123,5 +130,5 @@ pub fn offline_pcg(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, offline_pcg,);
+criterion_group!(benches, offline_pcg, full_pcg_bench);
 criterion_main!(benches);
