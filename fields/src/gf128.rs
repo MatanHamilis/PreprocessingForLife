@@ -99,7 +99,7 @@ impl Div for GF128 {
 
 impl DivAssign for GF128 {
     fn div_assign(&mut self, rhs: Self) {
-        *self = *self * rhs.inv();
+        *self *= rhs.inv();
     }
 }
 
@@ -159,17 +159,17 @@ impl GF128 {
     /// This requires a special function since IRREDUCIBLE_POLYNOMIAL can't be represented
     /// using GF128 since it has 129 coefficients.
     fn irred_div_by(v: &u64x2) -> (u64x2, u64x2) {
-        let self_deg = GF128::get_deg(&v);
+        let self_deg = GF128::get_deg(v);
         let mut q = u64x2::from_array([0, 0]);
         // The &127 is for the special case in which v is 1.
         GF128::set_bit(&mut q, (128 - self_deg) & 127);
-        let nom = GF128::shl(&v, 128 - self_deg) ^ IRREDUCIBLE_POLYNOMIAL;
+        let nom = GF128::shl(v, 128 - self_deg) ^ IRREDUCIBLE_POLYNOMIAL;
         let (q_prime, r_prime) = GF128::div_rem(&nom, v);
         (q ^ q_prime, r_prime)
     }
     /// Assumes deg(nom) >= deg(denom), otherwise - undefined behavior.
     fn div_rem(nom: &u64x2, denom: &u64x2) -> (u64x2, u64x2) {
-        let mut nom = nom.clone();
+        let mut nom = *nom;
         let mut deg_nom = Self::get_deg(&nom);
         let deg_denom = Self::get_deg(denom);
         let mut q = u64x2::from_array([0; 2]);
@@ -186,6 +186,7 @@ impl GF128 {
     }
 
     #[inline]
+    #[allow(dead_code)]
     fn shl_assign(a: &mut u64x2, b: u32) {
         unsafe { transmute::<&mut u64x2, &mut u128>(a).shl_assign(b) };
     }
@@ -251,7 +252,7 @@ impl GF128 {
             panic!("Inversion of 0 is undefined!");
         }
         if self.is_one() {
-            return self.clone();
+            return *self;
         }
         // Initiazlie the bezout coefficients
         // For each iteration in the EGCD algorithm we have:

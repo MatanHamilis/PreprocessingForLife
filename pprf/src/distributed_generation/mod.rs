@@ -9,6 +9,7 @@
 use crate::double_prg;
 use crate::Direction;
 use crate::PuncturedKey;
+use crate::KEY_SIZE;
 pub use ot::receiver::FirstMessage as ReceiverFirstMessage;
 use ot::receiver::OTReceiver;
 pub use ot::sender::FirstMessage as SenderFirstMessage;
@@ -33,20 +34,20 @@ pub struct Puncturer<const KEY_WIDTH: usize, const DEPTH: usize> {
     messages: [([u8; KEY_WIDTH], [u8; KEY_WIDTH]); DEPTH],
 }
 
-impl<const KEY_WIDTH: usize, const DEPTH: usize> Puncturer<KEY_WIDTH, DEPTH> {
-    pub fn new(prf_key: &[u8; KEY_WIDTH]) -> Self {
+impl<const DEPTH: usize> Puncturer<KEY_SIZE, DEPTH> {
+    pub fn new(prf_key: &[u8; KEY_SIZE]) -> Self {
         let mut puncturer = Puncturer {
-            ots: [OTSender::<KEY_WIDTH>::new(); DEPTH],
+            ots: [OTSender::<KEY_SIZE>::default(); DEPTH],
             state: PuncturerState::Initialized,
-            messages: [([0; KEY_WIDTH], [0; KEY_WIDTH]); DEPTH],
+            messages: [([0; KEY_SIZE], [0; KEY_SIZE]); DEPTH],
         };
         let mut keys = vec![*prf_key];
         for i in 0..DEPTH {
             let mut new_keys = Vec::new();
-            let mut left_sum = [0u8; KEY_WIDTH];
-            let mut right_sum = [0u8; KEY_WIDTH];
+            let mut left_sum = [0u8; KEY_SIZE];
+            let mut right_sum = [0u8; KEY_SIZE];
             keys.iter().for_each(|k| {
-                let [left, right] = double_prg(k);
+                let (left, right) = double_prg(k);
                 xor_arrays(&mut left_sum, &left);
                 xor_arrays(&mut right_sum, &right);
                 new_keys.push(left);
@@ -72,24 +73,24 @@ impl<const KEY_WIDTH: usize, const DEPTH: usize> Puncturer<KEY_WIDTH, DEPTH> {
     pub fn make_second_msg(
         &mut self,
         receiver_msg: [ReceiverFirstMessage; DEPTH],
-    ) -> [SenderSecondMessage<KEY_WIDTH>; DEPTH] {
+    ) -> [SenderSecondMessage<KEY_SIZE>; DEPTH] {
         assert!(self.state == PuncturerState::FirstMessageSent);
         self.state = PuncturerState::Finished;
-        let mut output = [([0; KEY_WIDTH], [0; KEY_WIDTH]); DEPTH];
+        let mut output = [([0; KEY_SIZE], [0; KEY_SIZE]); DEPTH];
         (0..DEPTH).for_each(|i| {
-            output[i] = self.ots[i]
-                .handle_receiver_message::<KEY_WIDTH>(receiver_msg[i], &self.messages[i]);
+            output[i] =
+                self.ots[i].handle_receiver_message::<KEY_SIZE>(receiver_msg[i], &self.messages[i]);
         });
         output
     }
 
-    pub fn get_full_sum(&self) -> [u8; KEY_WIDTH] {
+    pub fn get_full_sum(&self) -> [u8; KEY_SIZE] {
         match self.messages.last() {
             // Not sure what you're trying to do with an empty PPRF but oh well...
-            None => [0; KEY_WIDTH],
+            None => [0; KEY_SIZE],
             Some((ref left, ref right)) => {
-                let mut output = left.clone();
-                xor_arrays(&mut output, &right);
+                let mut output = *left;
+                xor_arrays(&mut output, right);
                 output
             }
         }
@@ -108,14 +109,16 @@ pub struct Puncturee<const KEY_WIDTH: usize, const DEPTH: usize> {
     punctured_point: Option<[bool; DEPTH]>,
 }
 
-impl<const KEY_WIDTH: usize, const DEPTH: usize> Puncturee<KEY_WIDTH, DEPTH> {
-    pub fn new() -> Self {
+impl<const KEY_WIDTH: usize, const DEPTH: usize> Default for Puncturee<KEY_WIDTH, DEPTH> {
+    fn default() -> Self {
         Self {
-            ots: [OTReceiver::<KEY_WIDTH>::new(); DEPTH],
+            ots: [OTReceiver::<KEY_WIDTH>::default(); DEPTH],
             state: PunctureeState::Initialized,
             punctured_point: None,
         }
     }
+}
+impl<const KEY_WIDTH: usize, const DEPTH: usize> Puncturee<KEY_WIDTH, DEPTH> {
     pub fn make_first_msg(
         &mut self,
         sender_msg: [SenderFirstMessage; DEPTH],
@@ -133,16 +136,16 @@ impl<const KEY_WIDTH: usize, const DEPTH: usize> Puncturee<KEY_WIDTH, DEPTH> {
     pub fn obtain_pprf(
         &mut self,
         sender_msg: [SenderSecondMessage<KEY_WIDTH>; DEPTH],
-    ) -> Option<PuncturedKey<KEY_WIDTH, DEPTH>> {
+    ) -> Option<PuncturedKey<DEPTH>> {
         assert!(self.state == PunctureeState::FirstMessageSent);
         self.state = PunctureeState::Finished;
-        let mut ot_results = [[0; KEY_WIDTH]; DEPTH];
+        let mut ot_results = [[0; KEY_SIZE]; DEPTH];
         for i in 0..DEPTH {
-            ot_results[i] =
-                match self.ots[i].handle_final_sender_message::<KEY_WIDTH>(sender_msg[i]) {
-                    None => return None,
-                    Some(x) => x,
-                }
+            ot_results[i] = match self.ots[i].handle_final_sender_message::<KEY_SIZE>(sender_msg[i])
+            {
+                None => return None,
+                Some(x) => x,
+            }
         }
         let ot_results = ot_results;
         let mut keys = vec![];
@@ -151,7 +154,7 @@ impl<const KEY_WIDTH: usize, const DEPTH: usize> Puncturee<KEY_WIDTH, DEPTH> {
         let mut i = 0;
         let punctured_key = ot_results.map(|result| {
             keys.iter().for_each(|k| {
-                let [left, right] = double_prg(k);
+                let (left, right) = double_prg(k);
                 left_new_keys.push(left);
                 right_new_keys.push(right);
             });
@@ -180,7 +183,7 @@ impl<const KEY_WIDTH: usize, const DEPTH: usize> Puncturee<KEY_WIDTH, DEPTH> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{prf_eval, PuncturedKey};
+    use crate::{prf_eval, PuncturedKey, KEY_SIZE};
 
     use super::{Puncturee, Puncturer};
 
@@ -195,12 +198,12 @@ mod tests {
         output
     }
 
-    fn simulate_protocol<const KEY_SIZE: usize, const DEPTH: usize>(
+    fn simulate_protocol<const DEPTH: usize>(
         prf_key: [u8; KEY_SIZE],
         punctured_point: [bool; DEPTH],
-    ) -> Option<PuncturedKey<KEY_SIZE, DEPTH>> {
+    ) -> Option<PuncturedKey<DEPTH>> {
         let mut puncturer = Puncturer::<KEY_SIZE, DEPTH>::new(&prf_key);
-        let mut puncturee = Puncturee::<KEY_SIZE, DEPTH>::new();
+        let mut puncturee = Puncturee::<KEY_SIZE, DEPTH>::default();
         let puncturer_first_msg = puncturer.make_first_msg();
         let puncturee_first_msg = puncturee.make_first_msg(puncturer_first_msg, punctured_point);
         let puncturer_final_msg = puncturer.make_second_msg(puncturee_first_msg);
@@ -209,7 +212,7 @@ mod tests {
 
     #[test]
     fn one_bit_output() {
-        let prf_key = [0u8];
+        let prf_key = [0u8; KEY_SIZE];
         let puncture_point = [true];
         let punctured_key = simulate_protocol(prf_key, puncture_point).unwrap();
         assert!(punctured_key.try_eval(puncture_point).is_none());
@@ -221,7 +224,7 @@ mod tests {
 
     #[test]
     fn check_large_domain() {
-        let prf_key = [11u8; 32];
+        let prf_key = [11u8; KEY_SIZE];
         let puncture_num = 0b1010101;
         let puncture_point = int_to_bool_array::<10>(puncture_num);
         let punctured_key = simulate_protocol(prf_key, puncture_point).unwrap();

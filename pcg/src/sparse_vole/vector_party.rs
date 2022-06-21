@@ -1,16 +1,16 @@
 use super::scalar_party::{ScalarFirstMessage, ScalarSecondMessage};
 use crate::codes::EACode;
 use crate::pprf_aggregator::PprfAggregator;
-use crate::{xor_arrays, KEY_SIZE};
+use crate::KEY_SIZE;
 use fields::{FieldElement, GF128, GF2};
 use pprf::distributed_generation::{Puncturee, ReceiverFirstMessage};
-use pprf::{bits_to_usize, PuncturedKey};
+use pprf::PuncturedKey;
 pub struct SparseVolePcgVectorKeyGenStateInitial<const INPUT_BITLEN: usize> {
     puncturing_points: Vec<[bool; INPUT_BITLEN]>,
     puncturees: Vec<Puncturee<KEY_SIZE, INPUT_BITLEN>>,
 }
 pub struct SparseVolePcgVectorKeyGenStateFinal<const INPUT_BITLEN: usize> {
-    pprf_keys: Vec<PuncturedKey<KEY_SIZE, INPUT_BITLEN>>,
+    pprf_keys: Vec<PuncturedKey<INPUT_BITLEN>>,
     punctured_values: Vec<[u8; KEY_SIZE]>,
     puncturing_points: Vec<[bool; INPUT_BITLEN]>,
 }
@@ -32,7 +32,7 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgVectorKeyGenStateInitial<INPUT_BITL
     pub fn new(puncturing_points: Vec<[bool; INPUT_BITLEN]>) -> Self {
         Self {
             puncturees: (0..puncturing_points.len())
-                .map(|_| Puncturee::<KEY_SIZE, INPUT_BITLEN>::new())
+                .map(|_| Puncturee::<KEY_SIZE, INPUT_BITLEN>::default())
                 .collect(),
             puncturing_points,
         }
@@ -73,7 +73,7 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgVectorKeyGenStateInitial<INPUT_BITL
 }
 
 impl<const INPUT_BITLEN: usize> SparseVolePcgVectorKeyGenStateFinal<INPUT_BITLEN> {
-    pub fn keygen_offline<T: PprfAggregator<KEY_SIZE>>(&self) -> OfflineSparseVoleKey {
+    pub fn keygen_offline<T: PprfAggregator>(&self) -> OfflineSparseVoleKey {
         let (accumulated_scalar_vector, mut numeric_puncturing_points) = T::aggregate_punctured(
             &self.pprf_keys,
             &self.puncturing_points,
@@ -90,8 +90,12 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgVectorKeyGenStateFinal<INPUT_BITLEN
                 let end_index = *numeric_puncturing_points
                     .get(i + 1)
                     .unwrap_or(&(1 << INPUT_BITLEN));
-                for j in starting_index..end_index {
-                    accumulated_sparse_subfield_vector[j] = GF2::one();
+                for item in accumulated_sparse_subfield_vector
+                    .iter_mut()
+                    .take(end_index)
+                    .skip(starting_index)
+                {
+                    *item = GF2::one();
                 }
             });
         let mut sum = GF128::zero();
@@ -127,16 +131,15 @@ impl OfflineSparseVoleKey {
 impl<const CODE_WEIGHT: usize> Iterator for OnlineSparseVoleKey<CODE_WEIGHT> {
     type Item = (GF2, GF128);
     fn next(&mut self) -> Option<Self::Item> {
-        match self.code.next() {
-            None => None,
-            Some(v) => Some((
+        self.code.next().map(|v| {
+            (
                 v.iter()
                     .map(|idx| self.accumulated_sparse_subfield_vector[*idx])
                     .sum(),
                 v.iter()
                     .map(|idx| self.accumulated_scalar_vector[*idx])
                     .sum(),
-            )),
-        }
+            )
+        })
     }
 }

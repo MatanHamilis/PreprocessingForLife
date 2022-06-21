@@ -16,7 +16,7 @@ mod tests {
 
     use crate::{
         codes::EACode,
-        pprf_aggregator::{RandomErrorPprfAggregator, RegularErrorPprfAggregator},
+        pprf_aggregator::RegularErrorPprfAggregator,
         sparse_vole::{
             scalar_party::SparseVolePcgScalarKeyGenState,
             vector_party::SparseVolePcgVectorKeyGenStateInitial,

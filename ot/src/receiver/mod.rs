@@ -21,8 +21,8 @@ pub struct OTReceiver<const KEY_SIZE: usize> {
 
 pub type FirstMessage = RistrettoPoint;
 
-impl<const KEY_SIZE: usize> OTReceiver<KEY_SIZE> {
-    pub fn new() -> Self {
+impl<const KEY_SIZE: usize> Default for OTReceiver<KEY_SIZE> {
+    fn default() -> Self {
         let mut csprng = OsRng;
         OTReceiver {
             selection: None,
@@ -31,7 +31,9 @@ impl<const KEY_SIZE: usize> OTReceiver<KEY_SIZE> {
             encryption_key: None,
         }
     }
+}
 
+impl<const KEY_SIZE: usize> OTReceiver<KEY_SIZE> {
     pub fn handle_first_sender_message(
         &mut self,
         sender_message: RistrettoPoint,
@@ -70,6 +72,6 @@ impl<const KEY_SIZE: usize> OTReceiver<KEY_SIZE> {
 
         let key = self.encryption_key.take();
         self.state = State::Finished;
-        Some(key.unwrap().decrypt(msg_to_decrypt)?)
+        Some(key.unwrap().decrypt(msg_to_decrypt).unwrap())
     }
 }

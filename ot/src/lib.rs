@@ -26,8 +26,8 @@ mod tests {
     fn full_ot() {
         const KEY_SIZE: usize = 64;
         let messages = ([1, 1, 1, 1], [2, 2, 2, 2]);
-        let mut ot_sender = OTSender::new();
-        let mut ot_receiver = OTReceiver::<KEY_SIZE>::new();
+        let mut ot_sender = OTSender::default();
+        let mut ot_receiver = OTReceiver::<KEY_SIZE>::default();
 
         let first_msg = ot_sender.gen_first_message();
         let second_msg = ot_receiver.handle_first_sender_message(first_msg, true);

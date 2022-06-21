@@ -21,8 +21,8 @@ pub struct OTSender<const MSG_SIZE: usize> {
     state: State,
 }
 
-impl<const MSG_SIZE: usize> OTSender<MSG_SIZE> {
-    pub fn new() -> Self {
+impl<const MSG_SIZE: usize> Default for OTSender<MSG_SIZE> {
+    fn default() -> Self {
         let mut csprng = OsRng;
         let random_scalar = Scalar::random(&mut csprng);
         OTSender {
@@ -31,7 +31,8 @@ impl<const MSG_SIZE: usize> OTSender<MSG_SIZE> {
             state: State::Initialized,
         }
     }
-
+}
+impl<const MSG_SIZE: usize> OTSender<MSG_SIZE> {
     pub fn gen_first_message(&mut self) -> FirstMessage {
         assert!(self.state == State::Initialized);
         self.state = State::FirstMessageSent;

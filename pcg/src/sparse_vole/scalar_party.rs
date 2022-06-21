@@ -2,10 +2,7 @@ use super::vector_party::VectorFirstMessage;
 use crate::pprf_aggregator::PprfAggregator;
 use crate::{codes::EACode, xor_arrays, KEY_SIZE};
 use fields::{FieldElement, GF128};
-use pprf::{
-    distributed_generation::{Puncturer, SenderFirstMessage, SenderSecondMessage},
-    prf_eval_all,
-};
+use pprf::distributed_generation::{Puncturer, SenderFirstMessage, SenderSecondMessage};
 
 pub struct SparseVolePcgScalarKeyGenState<const INPUT_BITLEN: usize> {
     prf_keys: Vec<[u8; KEY_SIZE]>,
@@ -21,6 +18,7 @@ pub struct OfflineSparseVoleKey {
 pub struct OnlineSparseVoleKey<const CODE_WEIGHT: usize> {
     accumulated_vector: Vec<GF128>,
     code: EACode<CODE_WEIGHT>,
+    index: usize,
 }
 
 pub type ScalarFirstMessage<const INPUT_BITLEN: usize> = Vec<[SenderFirstMessage; INPUT_BITLEN]>;
@@ -35,7 +33,7 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgScalarKeyGenState<INPUT_BITLEN> {
     pub fn new(scalar: GF128, prf_keys: Vec<[u8; KEY_SIZE]>) -> Self {
         let puncturers = prf_keys
             .iter()
-            .map(|prf_key| Puncturer::<KEY_SIZE, INPUT_BITLEN>::new(&prf_key))
+            .map(Puncturer::<KEY_SIZE, INPUT_BITLEN>::new)
             .collect();
         Self {
             prf_keys,
@@ -66,11 +64,11 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgScalarKeyGenState<INPUT_BITLEN> {
             .collect()
     }
 
-    pub fn keygen_offline<T: PprfAggregator<KEY_SIZE>>(&self) -> OfflineSparseVoleKey {
+    pub fn keygen_offline<T: PprfAggregator>(&self) -> OfflineSparseVoleKey {
         let accumulated_vector = T::aggregate(&self.prf_keys, INPUT_BITLEN);
         let mut sum = GF128::zero();
         OfflineSparseVoleKey {
-            scalar: self.scalar.clone(),
+            scalar: self.scalar,
             accumulated_vector: accumulated_vector
                 .into_iter()
                 .map(|v| {
@@ -90,6 +88,7 @@ impl OfflineSparseVoleKey {
         OnlineSparseVoleKey {
             accumulated_vector: self.accumulated_vector,
             code,
+            index: 0,
         }
     }
     pub fn vector_length(&self) -> usize {
@@ -102,7 +101,10 @@ impl<const CODE_WEIGHT: usize> Iterator for OnlineSparseVoleKey<CODE_WEIGHT> {
     fn next(&mut self) -> Option<Self::Item> {
         match self.code.next() {
             None => None,
-            Some(v) => Some(v.iter().map(|idx| self.accumulated_vector[*idx]).sum()),
+            Some(v) => {
+                self.index += 1;
+                Some(v.iter().map(|idx| self.accumulated_vector[*idx]).sum())
+            }
         }
     }
 }

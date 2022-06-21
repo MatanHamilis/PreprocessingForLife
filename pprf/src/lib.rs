@@ -4,8 +4,14 @@ pub mod distributed_generation;
 
 use std::convert::{From, Into};
 
-use rand::{RngCore, SeedableRng};
-use rand_chacha::ChaCha8Rng;
+use aes::{
+    cipher::{BlockEncrypt, KeyInit},
+    Aes128, Block,
+};
+use once_cell::sync::Lazy;
+// use rand::{RngCore, SeedableRng};
+// use rand_chacha::ChaCha8Rng;
+use rayon::prelude::*;
 #[derive(PartialEq, Eq)]
 pub enum Direction {
     Left,
@@ -21,8 +27,11 @@ impl From<bool> for Direction {
     }
 }
 
+const KEY_SIZE: usize = 16;
+
 // TODO: AES-NI.
-pub fn double_prg<const SEED_SIZE: usize>(input: &[u8; SEED_SIZE]) -> [[u8; SEED_SIZE]; 2] {
+#[cfg(not(feature = "aesni"))]
+pub fn double_prg(input: &[u8; KEY_SIZE]) -> ([u8; KEY_SIZE], [u8; KEY_SIZE]) {
     let mut seed: [u8; 32] = [0; 32];
     input
         .iter()
@@ -30,48 +39,91 @@ pub fn double_prg<const SEED_SIZE: usize>(input: &[u8; SEED_SIZE]) -> [[u8; SEED
         .zip(seed.iter_mut())
         .for_each(|(input_item, seed_item)| *seed_item = *input_item);
     let mut chacha_rng = ChaCha8Rng::from_seed(seed);
-    let mut output: [[u8; SEED_SIZE]; 2] = [[0; SEED_SIZE]; 2];
+    let mut output: [[u8; KEY_SIZE]; 2] = [[0; KEY_SIZE]; 2];
     output.iter_mut().for_each(|arr| chacha_rng.fill_bytes(arr));
-    output
+    (output[0], output[1])
 }
 
-pub fn prf_eval<const KEY_SIZE: usize>(key: [u8; KEY_SIZE], input: &[bool]) -> [u8; KEY_SIZE] {
+#[cfg(feature = "aesni")]
+const PRG_KEY: [u8; KEY_SIZE] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+#[cfg(feature = "aesni")]
+static AES: Lazy<Aes128> = Lazy::new(|| Aes128::new_from_slice(&PRG_KEY).unwrap());
+
+#[cfg(feature = "aesni")]
+pub fn double_prg(input: &[u8; KEY_SIZE]) -> ([u8; KEY_SIZE], [u8; KEY_SIZE]) {
+    let mut blocks = [Block::from(*input); 2];
+    blocks[0][0] ^= 1;
+    blocks[1][0] ^= 2;
+    AES.encrypt_blocks(&mut blocks);
+    (*blocks[0].as_ref(), *blocks[1].as_ref())
+}
+
+pub fn double_prg_many(input: &[Block], output: &mut [Block]) {
+    const SINGLE_THREAD_THRESH: usize = 1 << 8;
+    let length = std::cmp::min(SINGLE_THREAD_THRESH, input.len());
+    output
+        .par_chunks_mut(2 * SINGLE_THREAD_THRESH)
+        .zip(input.par_chunks(SINGLE_THREAD_THRESH))
+        .for_each(|(output_chunk, input_chunk)| {
+            for i in 0..length {
+                output_chunk[2 * i] = input_chunk[i];
+                output_chunk[2 * i][0] ^= 1;
+                output_chunk[2 * i + 1] = input_chunk[i];
+                output_chunk[2 * i + 1][0] ^= 2;
+            }
+            AES.encrypt_blocks(output_chunk);
+        });
+}
+
+pub fn prf_eval(key: [u8; KEY_SIZE], input: &[bool]) -> [u8; KEY_SIZE] {
     input.iter().fold(key, |prf_out, &input_bit| {
-        double_prg(&prf_out)[input_bit as usize]
+        let prg_out = double_prg(&prf_out);
+        if input_bit {
+            prg_out.1
+        } else {
+            prg_out.0
+        }
     })
 }
 
-pub fn prf_eval_all_into_slice<const KEY_SIZE: usize>(
-    key: &[u8; KEY_SIZE],
-    depth: usize,
-    output: &mut [[u8; KEY_SIZE]],
-) {
+pub fn prf_eval_all_into_slice(key: &[u8; KEY_SIZE], depth: usize, output: &mut [[u8; KEY_SIZE]]) {
+    const SINGLE_THREAD_THRESH: usize = 1024;
+    let chunk_size = std::cmp::min(SINGLE_THREAD_THRESH, output.len());
     assert!(output.len() == (1 << depth));
-    output[0] = key.clone();
+    let mut helper = vec![Block::default(); output.len()];
+    let mut helper_two = vec![Block::default(); output.len()];
+    helper[0] = Block::from(*key);
+    let mut cur_from = &mut helper;
+    let mut cur_to = &mut helper_two;
+
     for i in 0..depth {
-        for idx in (0..(1 << i)).rev() {
-            [output[2 * idx], output[2 * idx + 1]] = double_prg(&output[idx]);
-        }
+        double_prg_many(&cur_from[..(1 << i)], &mut cur_to[..(1 << (i + 1))]);
+        (cur_from, cur_to) = (cur_to, cur_from);
     }
+    output
+        .par_chunks_mut(chunk_size)
+        .zip(cur_from.par_chunks(chunk_size))
+        .for_each(|(output_chunk, helper_chunk)| {
+            for i in 0..output_chunk.len() {
+                output_chunk[i] = *helper_chunk[i].as_ref();
+            }
+        });
 }
-pub fn prf_eval_all<const KEY_SIZE: usize>(
-    key: &[u8; KEY_SIZE],
-    depth: usize,
-) -> Vec<[u8; KEY_SIZE]> {
+pub fn prf_eval_all(key: &[u8; KEY_SIZE], depth: usize) -> Vec<[u8; KEY_SIZE]> {
     let mut output: Vec<[u8; KEY_SIZE]> = vec![[0u8; KEY_SIZE]; 1 << depth];
     prf_eval_all_into_slice(key, depth, &mut output);
     output
 }
 
-pub struct PuncturedKey<const SEED_SIZE: usize, const INPUT_BITLEN: usize> {
-    keys: [([u8; SEED_SIZE], Direction); INPUT_BITLEN],
+pub struct PuncturedKey<const INPUT_BITLEN: usize> {
+    keys: [([u8; KEY_SIZE], Direction); INPUT_BITLEN],
 }
 
-impl<const KEY_SIZE: usize, const INPUT_BITLEN: usize> PuncturedKey<KEY_SIZE, INPUT_BITLEN> {
+impl<const INPUT_BITLEN: usize> PuncturedKey<INPUT_BITLEN> {
     pub fn puncture(prf_key: [u8; KEY_SIZE], puncture_point: [bool; INPUT_BITLEN]) -> Self {
         let mut current_key = prf_key;
         let punctured_key = puncture_point.map(|puncture_bit| {
-            let [left, right] = double_prg(&current_key);
+            let (left, right) = double_prg(&current_key);
             match puncture_bit.into() {
                 Direction::Left => {
                     current_key = left;
@@ -159,11 +211,13 @@ pub fn usize_to_bits<const BITS: usize>(mut n: usize) -> [bool; BITS] {
 
 #[cfg(test)]
 mod tests {
-    use crate::{bits_to_usize, prf_eval, prf_eval_all, usize_to_bits, PuncturedKey};
+    use crate::{
+        bits_to_usize, prf_eval, prf_eval_all, usize_to_bits, xor_arrays, PuncturedKey, KEY_SIZE,
+    };
 
     #[test]
     fn one_bit_output() {
-        let prf_key = [0u8];
+        let prf_key = [0u8; KEY_SIZE];
         let puncture_point = [true];
         let punctured_key = PuncturedKey::puncture(prf_key, puncture_point);
         assert!(punctured_key.try_eval(puncture_point).is_none());
@@ -175,7 +229,7 @@ mod tests {
 
     #[test]
     fn check_large_domain() {
-        let prf_key = [11u8; 32];
+        let prf_key = [11u8; KEY_SIZE];
         let puncture_num = 0b0101010101;
         let puncture_point = usize_to_bits::<10>(puncture_num);
         let punctured_key = PuncturedKey::puncture(prf_key, puncture_point);
@@ -194,24 +248,28 @@ mod tests {
 
     #[test]
     fn test_full_eval_prf() {
-        let prf_key = [11u8; 32];
-        let point_num = 0b0101010101;
-        let point_arr = usize_to_bits::<12>(point_num);
-        let full_eval = prf_eval_all(&prf_key, 12);
+        let prf_key = [11u8; KEY_SIZE];
+        let point_num = 0b1;
+        let point_arr = usize_to_bits::<1>(point_num);
+        let full_eval = prf_eval_all(&prf_key, 1);
         let prf_evaluated = prf_eval(prf_key, &point_arr);
         assert_eq!(prf_evaluated, full_eval[point_num as usize]);
     }
 
     #[test]
     fn test_full_eval_punctured() {
-        let prf_key = [11u8; 32];
-        let puncture_point = 0b0101010101;
-        let puncture_point_arr = usize_to_bits::<12>(puncture_point);
+        let prf_key = [11u8; KEY_SIZE];
+        let puncture_point = 0b111;
+        let puncture_point_arr = usize_to_bits::<3>(puncture_point);
         let punctured_key = PuncturedKey::puncture(prf_key, puncture_point_arr);
-        let val_at_puncture_point = prf_eval(prf_key, &puncture_point_arr);
-        let full_eval_regular = prf_eval_all(&prf_key, 12);
-        let full_eval_punctured =
-            punctured_key.full_eval_with_punctured_point(&val_at_puncture_point);
+        let full_eval_regular = prf_eval_all(&prf_key, 3);
+        let leaf_sum = full_eval_regular
+            .iter()
+            .fold([0u8; KEY_SIZE], |mut acc, cur| {
+                xor_arrays(&mut acc, &cur);
+                acc
+            });
+        let full_eval_punctured = punctured_key.full_eval_with_punctured_point(&leaf_sum);
         assert_eq!(full_eval_regular, full_eval_punctured);
     }
 
