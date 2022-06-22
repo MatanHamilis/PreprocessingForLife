@@ -62,8 +62,8 @@ pub fn double_prg_many(input: &[Block], output: &mut [Block]) {
     const SINGLE_THREAD_THRESH: usize = 1 << 8;
     let length = std::cmp::min(SINGLE_THREAD_THRESH, input.len());
     output
-        .par_chunks_mut(2 * SINGLE_THREAD_THRESH)
-        .zip(input.par_chunks(SINGLE_THREAD_THRESH))
+        .chunks_mut(2 * SINGLE_THREAD_THRESH)
+        .zip(input.chunks(SINGLE_THREAD_THRESH))
         .for_each(|(output_chunk, input_chunk)| {
             for i in 0..length {
                 output_chunk[2 * i] = input_chunk[i];
@@ -86,12 +86,23 @@ pub fn prf_eval(key: [u8; KEY_SIZE], input: &[bool]) -> [u8; KEY_SIZE] {
     })
 }
 
+type FakeBlock = [u8; std::mem::size_of::<Block>()];
+
+#[inline(always)]
+fn block_vec(size: usize) -> Vec<Block> {
+    const BLOCK_SIZE: usize = std::mem::size_of::<Block>();
+    let mut v = vec![0u8; size * BLOCK_SIZE];
+    let (ptr, len, cap) = (v.as_mut_ptr(), v.len(), v.capacity());
+    std::mem::forget(v);
+    unsafe { Vec::from_raw_parts(ptr.cast(), len / BLOCK_SIZE, cap / BLOCK_SIZE) }
+}
+
 pub fn prf_eval_all_into_slice(key: &[u8; KEY_SIZE], depth: usize, output: &mut [[u8; KEY_SIZE]]) {
     const SINGLE_THREAD_THRESH: usize = 1024;
     let chunk_size = std::cmp::min(SINGLE_THREAD_THRESH, output.len());
     assert!(output.len() == (1 << depth));
-    let mut helper = vec![Block::default(); output.len()];
-    let mut helper_two = vec![Block::default(); output.len()];
+    let mut helper = block_vec(output.len());
+    let mut helper_two = block_vec(output.len());
     helper[0] = Block::from(*key);
     let mut cur_from = &mut helper;
     let mut cur_to = &mut helper_two;
@@ -101,8 +112,8 @@ pub fn prf_eval_all_into_slice(key: &[u8; KEY_SIZE], depth: usize, output: &mut 
         (cur_from, cur_to) = (cur_to, cur_from);
     }
     output
-        .par_chunks_mut(chunk_size)
-        .zip(cur_from.par_chunks(chunk_size))
+        .chunks_mut(chunk_size)
+        .zip(cur_from.chunks(chunk_size))
         .for_each(|(output_chunk, helper_chunk)| {
             for i in 0..output_chunk.len() {
                 output_chunk[i] = *helper_chunk[i].as_ref();

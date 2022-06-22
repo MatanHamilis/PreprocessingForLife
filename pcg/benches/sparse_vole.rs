@@ -133,9 +133,9 @@ pub fn offline_pcg(c: &mut Criterion) {
     let vector_keygen_state_final =
         vector_keygen_state_init.handle_second_message(scalar_second_message);
 
+    // Create Offline Keys
     c.bench_function("offline_pcg_scalar", |b| {
         b.iter_with_large_drop(|| {
-            // Create Offline Keys
             let scalar_offline_key =
                 scalar_keygen_state.keygen_offline::<RegularErrorPprfAggregator>();
             black_box(scalar_offline_key);
