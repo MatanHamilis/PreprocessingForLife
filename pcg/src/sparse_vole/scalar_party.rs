@@ -19,6 +19,7 @@ pub struct OnlineSparseVoleKey<const CODE_WEIGHT: usize> {
     accumulated_vector: Vec<GF128>,
     code: EACode<CODE_WEIGHT>,
     index: usize,
+    pub scalar: GF128,
 }
 
 pub type ScalarFirstMessage<const INPUT_BITLEN: usize> = Vec<[SenderFirstMessage; INPUT_BITLEN]>;
@@ -89,6 +90,7 @@ impl OfflineSparseVoleKey {
             accumulated_vector: self.accumulated_vector,
             code,
             index: 0,
+            scalar: self.scalar,
         }
     }
     pub fn vector_length(&self) -> usize {

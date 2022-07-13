@@ -2,6 +2,7 @@
 #![feature(option_get_or_insert_default)]
 
 pub mod codes;
+pub mod ot;
 pub mod pprf_aggregator;
 pub mod sparse_vole;
 
