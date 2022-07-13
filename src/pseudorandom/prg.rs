@@ -31,7 +31,15 @@ pub fn double_prg(input: &[u8; PRG_KEY_SIZE]) -> ([u8; PRG_KEY_SIZE], [u8; PRG_K
     let mut blocks = [Block::from(*input); 2];
     blocks[1][0] = !blocks[1][0];
     AES.encrypt_blocks(&mut blocks);
-    (*blocks[0].as_ref(), *blocks[1].as_ref())
+    xor_arrays(&mut blocks[0].into(), input);
+    xor_arrays(&mut blocks[1].into(), input);
+    blocks[1][0] = !blocks[1][0];
+    unsafe {
+        (
+            std::mem::transmute(blocks[0]),
+            std::mem::transmute(blocks[1]),
+        )
+    }
 }
 
 pub fn double_prg_many(input: &[Block], output: &mut [Block]) {
