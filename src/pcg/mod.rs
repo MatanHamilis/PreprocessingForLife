@@ -1,6 +1,6 @@
 pub mod codes;
-pub mod ot;
 pub mod pprf_aggregator;
+pub mod random_ot;
 pub mod sparse_vole;
 
 pub(crate) const KEY_SIZE: usize = 16;

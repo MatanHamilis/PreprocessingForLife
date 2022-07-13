@@ -6,15 +6,14 @@
 //! In the Sparse-VOLE correlation one party ($P_1$) will be holding a value $x$.
 //! The other party ($P_2$) is holding a point $i \in \[N\]$.
 
-use super::double_prg;
 use super::Direction;
 use super::PuncturedKey;
-use super::KEY_SIZE;
 pub use crate::ot::receiver::FirstMessage as ReceiverFirstMessage;
 use crate::ot::receiver::OTReceiver;
 pub use crate::ot::sender::FirstMessage as SenderFirstMessage;
 use crate::ot::sender::OTSender;
 pub use crate::ot::sender::SecondMessage as SenderSecondMessage;
+use crate::pseudorandom::{double_prg, KEY_SIZE};
 
 fn xor_arrays<const LENGTH: usize>(a: &mut [u8; LENGTH], b: &[u8; LENGTH]) {
     for i in 0..LENGTH {
@@ -183,8 +182,9 @@ impl<const KEY_WIDTH: usize, const DEPTH: usize> Puncturee<KEY_WIDTH, DEPTH> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{prf_eval, PuncturedKey, KEY_SIZE};
-    use super::{Puncturee, Puncturer};
+    use super::{PuncturedKey, Puncturee, Puncturer};
+    use crate::pseudorandom::prf::prf_eval;
+    use crate::pseudorandom::KEY_SIZE;
 
     fn int_to_bool_array<const BITS: usize>(mut num: u32) -> [bool; BITS] {
         let mut output = [false; BITS];
