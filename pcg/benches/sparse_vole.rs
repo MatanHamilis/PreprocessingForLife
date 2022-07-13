@@ -136,16 +136,12 @@ pub fn offline_pcg(c: &mut Criterion) {
     // Create Offline Keys
     c.bench_function("offline_pcg_scalar", |b| {
         b.iter_with_large_drop(|| {
-            let scalar_offline_key =
-                scalar_keygen_state.keygen_offline::<RegularErrorPprfAggregator>();
-            black_box(scalar_offline_key);
+            scalar_keygen_state.keygen_offline::<RegularErrorPprfAggregator>();
         });
     });
     c.bench_function("offline_pcg_vector", |b| {
         b.iter_with_large_drop(|| {
-            let vector_offline_key =
-                vector_keygen_state_final.keygen_offline::<RegularErrorPprfAggregator>();
-            black_box(vector_offline_key);
+            vector_keygen_state_final.keygen_offline::<RegularErrorPprfAggregator>();
         });
     });
 }
