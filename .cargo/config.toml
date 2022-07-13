@@ -3,4 +3,13 @@
 [target.x86_64-unknown-linux-gnu]
 rustflags = [
     "-C", "target-cpu=native",
+    "-C", "link-arg=-fuse-ld=lld",
 ]
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = true
+#lto = "thin"
+incremental = false # Otherwise codegen-units is ignored
+codegen-units = 1
