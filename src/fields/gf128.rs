@@ -17,6 +17,16 @@ const IRREDUCIBLE_POLYNOMIAL: u64x2 = u64x2::from_array([IRREDUCIBLE_POLYNOMIAL_
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct GF128(u64x2);
 
+impl From<GF2> for GF128 {
+    fn from(v: GF2) -> Self {
+        if v.is_one() {
+            GF128::one()
+        } else {
+            GF128::zero()
+        }
+    }
+}
+
 impl Into<Block> for GF128 {
     fn into(self) -> Block {
         unsafe { std::mem::transmute(self) }
