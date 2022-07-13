@@ -52,14 +52,13 @@ static AES: Lazy<Aes128> = Lazy::new(|| Aes128::new_from_slice(&PRG_KEY).unwrap(
 #[cfg(feature = "aesni")]
 pub fn double_prg(input: &[u8; KEY_SIZE]) -> ([u8; KEY_SIZE], [u8; KEY_SIZE]) {
     let mut blocks = [Block::from(*input); 2];
-    blocks[0][0] ^= 1;
-    blocks[1][0] ^= 2;
+    blocks[1][0] = !blocks[1][0];
     AES.encrypt_blocks(&mut blocks);
     (*blocks[0].as_ref(), *blocks[1].as_ref())
 }
 
 pub fn double_prg_many(input: &[Block], output: &mut [Block]) {
-    const SINGLE_THREAD_THRESH: usize = 1 << 8;
+    const SINGLE_THREAD_THRESH: usize = 1 << 3;
     let length = std::cmp::min(SINGLE_THREAD_THRESH, input.len());
     output
         .chunks_mut(2 * SINGLE_THREAD_THRESH)
@@ -67,11 +66,15 @@ pub fn double_prg_many(input: &[Block], output: &mut [Block]) {
         .for_each(|(output_chunk, input_chunk)| {
             for i in 0..length {
                 output_chunk[2 * i] = input_chunk[i];
-                output_chunk[2 * i][0] ^= 1;
                 output_chunk[2 * i + 1] = input_chunk[i];
-                output_chunk[2 * i + 1][0] ^= 2;
+                output_chunk[2 * i + 1][0] = !output_chunk[2 * i + 1][0];
             }
             AES.encrypt_blocks(output_chunk);
+            for i in 0..length {
+                xor_arrays(&mut output_chunk[2 * i].into(), &input_chunk[i].into());
+                xor_arrays(&mut output_chunk[2 * i + 1].into(), &input_chunk[i].into());
+                output_chunk[2 * i + 1][0] = !output_chunk[2 * i + 1][0];
+            }
         });
 }
 
