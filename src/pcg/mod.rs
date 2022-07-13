@@ -1,3 +1,4 @@
+pub mod beaver_triples;
 pub mod codes;
 pub mod pprf_aggregator;
 pub mod random_ot;

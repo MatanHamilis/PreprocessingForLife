@@ -6,7 +6,7 @@ use std::iter::Iterator;
 
 const CODE_WEIGHT: usize = 7;
 
-struct RandomOTSenderOnlinePCGKey {
+pub struct RandomOTSenderOnlinePCGKey {
     vole_online_key: ScalarSparseVoleOnlineKey<CODE_WEIGHT>,
 }
 impl Iterator for RandomOTSenderOnlinePCGKey {
@@ -22,7 +22,7 @@ impl Iterator for RandomOTSenderOnlinePCGKey {
     }
 }
 
-struct RandomOTReceiverOnlinePCGKey {
+pub struct RandomOTReceiverOnlinePCGKey {
     vole_online_key: VectorSparseVoleOnlineKey<CODE_WEIGHT>,
 }
 impl Iterator for RandomOTReceiverOnlinePCGKey {
