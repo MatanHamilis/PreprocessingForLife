@@ -1,7 +1,7 @@
 use super::xor_arrays;
 use super::KEY_SIZE;
-use crate::pprf::{bits_to_usize, prf_eval_all, prf_eval_all_into_slice, PuncturedKey};
-use rayon::prelude::*;
+use crate::pprf::{bits_to_usize, PuncturedKey};
+use crate::pseudorandom::prf::{prf_eval_all, prf_eval_all_into_slice};
 
 pub trait PprfAggregator {
     fn aggregate(prf_keys: &[[u8; KEY_SIZE]], pprf_input_bitlen: usize) -> Vec<[u8; KEY_SIZE]>;

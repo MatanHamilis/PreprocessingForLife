@@ -1,3 +1,4 @@
+use aes::Block;
 use core::arch::x86_64::{__m128i, _mm_clmulepi64_si128, _mm_lzcnt_epi64, _mm_xor_si128};
 use core::simd::u64x2;
 use rand_core::{CryptoRng, RngCore};
@@ -15,6 +16,12 @@ const IRREDUCIBLE_POLYNOMIAL: u64x2 = u64x2::from_array([IRREDUCIBLE_POLYNOMIAL_
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct GF128(u64x2);
+
+impl Into<Block> for GF128 {
+    fn into(self) -> Block {
+        unsafe { std::mem::transmute(self) }
+    }
+}
 
 impl Sum for GF128 {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
