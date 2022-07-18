@@ -41,7 +41,7 @@ impl Sum for GF128 {
 impl Neg for GF128 {
     type Output = Self;
     fn neg(self) -> Self::Output {
-        GF128(self.0.not())
+        self
     }
 }
 
@@ -169,9 +169,13 @@ impl GF128 {
         (127 - lzcnt[1] - u64::from(lzcnt[1] == 64) * (lzcnt[0])) as u32
     }
     #[inline]
-    fn set_bit(v: &mut u64x2, offset: u32) {
+    fn toggle_bit(v: &mut u64x2, offset: u32) {
         v[(offset / 64) as usize] ^= 1u64 << (offset % 64);
     }
+    pub fn get_bit(&self, offset: usize) -> bool {
+        (self.0[(offset / 64) as usize] >> (offset % 64)) & 1 != 0
+    }
+
     /// Divides IRREDUCIBLE_POLYNOMIAL by v.
     /// This requires a special function since IRREDUCIBLE_POLYNOMIAL can't be represented
     /// using GF128 since it has 129 coefficients.
@@ -179,7 +183,7 @@ impl GF128 {
         let self_deg = GF128::get_deg(v);
         let mut q = u64x2::from_array([0, 0]);
         // The &127 is for the special case in which v is 1.
-        GF128::set_bit(&mut q, (128 - self_deg) & 127);
+        GF128::toggle_bit(&mut q, (128 - self_deg) & 127);
         let nom = GF128::shl(v, 128 - self_deg) ^ IRREDUCIBLE_POLYNOMIAL;
         let (q_prime, r_prime) = GF128::div_rem(&nom, v);
         (q ^ q_prime, r_prime)
@@ -193,7 +197,7 @@ impl GF128 {
         while deg_nom >= deg_denom {
             let q_deg = deg_nom - deg_denom;
             nom ^= Self::shl(denom, q_deg);
-            GF128::set_bit(&mut q, q_deg);
+            GF128::toggle_bit(&mut q, q_deg);
             if nom == GF128::U64X2_ZERO {
                 break;
             }
@@ -257,6 +261,10 @@ impl GF128 {
         GF128(u64x2::from_array([rng.next_u64(), rng.next_u64()]))
     }
 
+    pub fn random_not_cryptographic<T: RngCore>(rng: &mut T) -> Self {
+        GF128(u64x2::from_array([rng.next_u64(), rng.next_u64()]))
+    }
+
     pub fn checked_div(&self, v: &Self) -> Option<Self> {
         if v.is_zero() {
             return None;
@@ -287,6 +295,10 @@ impl GF128 {
             (t_old, t) = (t, t_old ^ GF128::mul_no_reduce(&t, &q).0);
         }
         t.into()
+    }
+
+    pub fn flip(&mut self) {
+        self.0 = !self.0.not()
     }
 }
 

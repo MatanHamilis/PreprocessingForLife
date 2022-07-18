@@ -1,16 +1,33 @@
 use super::FieldElement;
+use rand_core::{CryptoRng, RngCore};
 use std::{
     iter::Sum,
     ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct GF2 {
     v: bool,
 }
 
-impl GF2 {}
+impl GF2 {
+    pub fn flip(&mut self) {
+        self.v = !self.v;
+    }
+    pub fn random<T: CryptoRng + RngCore>(rng: &mut T) -> Self {
+        GF2::from(rng.next_u32() & 1 == 0)
+    }
 
+    pub fn random_not_cryptographic<T: RngCore>(rng: &mut T) -> Self {
+        GF2::from(rng.next_u32() & 1 == 0)
+    }
+}
+
+impl From<GF2> for bool {
+    fn from(v: GF2) -> Self {
+        v.is_one()
+    }
+}
 impl Sum for GF2 {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(GF2::zero(), |acc, elem| acc + elem)
@@ -37,7 +54,7 @@ impl FieldElement for GF2 {
 impl Neg for GF2 {
     type Output = Self;
     fn neg(self) -> Self::Output {
-        GF2::from(!self.v)
+        self
     }
 }
 
