@@ -11,6 +11,7 @@ curve25519-dalek = "3"
 blake3 = "1"
 rand_core = { version="^0.5", features=["getrandom"], default-features=false}
 rand = "0.8.5"
+log = "0.4.17"
 
 [dev-dependencies]
 criterion = "0.3"
