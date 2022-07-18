@@ -15,6 +15,7 @@ pub struct OfflineSparseVoleKey {
     pub accumulated_vector: Vec<GF128>,
 }
 
+#[derive(Debug)]
 pub struct OnlineSparseVoleKey<const CODE_WEIGHT: usize> {
     accumulated_vector: Vec<GF128>,
     code: EACode<CODE_WEIGHT>,

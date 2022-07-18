@@ -4,12 +4,20 @@ use crate::fields::{GF128, GF2};
 use crate::pseudorandom::hash::correlation_robust_hash_block_field;
 use std::iter::Iterator;
 
-const CODE_WEIGHT: usize = 7;
-
-pub struct RandomOTSenderOnlinePCGKey {
+#[derive(Debug)]
+pub struct RandomOTSenderOnlinePCGKey<const CODE_WEIGHT: usize> {
     vole_online_key: ScalarSparseVoleOnlineKey<CODE_WEIGHT>,
 }
-impl Iterator for RandomOTSenderOnlinePCGKey {
+
+impl<const CODE_WEIGHT: usize> From<ScalarSparseVoleOnlineKey<CODE_WEIGHT>>
+    for RandomOTSenderOnlinePCGKey<CODE_WEIGHT>
+{
+    fn from(vole_online_key: ScalarSparseVoleOnlineKey<CODE_WEIGHT>) -> Self {
+        Self { vole_online_key }
+    }
+}
+
+impl<const CODE_WEIGHT: usize> Iterator for RandomOTSenderOnlinePCGKey<CODE_WEIGHT> {
     type Item = (GF128, GF128);
     fn next(&mut self) -> Option<Self::Item> {
         match self.vole_online_key.next() {
@@ -22,10 +30,19 @@ impl Iterator for RandomOTSenderOnlinePCGKey {
     }
 }
 
-pub struct RandomOTReceiverOnlinePCGKey {
+#[derive(Debug)]
+pub struct RandomOTReceiverOnlinePCGKey<const CODE_WEIGHT: usize> {
     vole_online_key: VectorSparseVoleOnlineKey<CODE_WEIGHT>,
 }
-impl Iterator for RandomOTReceiverOnlinePCGKey {
+
+impl<const CODE_WEIGHT: usize> From<VectorSparseVoleOnlineKey<CODE_WEIGHT>>
+    for RandomOTReceiverOnlinePCGKey<CODE_WEIGHT>
+{
+    fn from(vole_online_key: VectorSparseVoleOnlineKey<CODE_WEIGHT>) -> Self {
+        Self { vole_online_key }
+    }
+}
+impl<const CODE_WEIGHT: usize> Iterator for RandomOTReceiverOnlinePCGKey<CODE_WEIGHT> {
     type Item = (GF2, GF128);
     fn next(&mut self) -> Option<Self::Item> {
         match self.vole_online_key.next() {

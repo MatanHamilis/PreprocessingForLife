@@ -4,6 +4,7 @@ use aes::cipher::{BlockEncrypt, BlockSizeUser, KeyInit};
 use aes::{Aes128, Block};
 use core::mem::transmute;
 
+#[derive(Debug)]
 pub struct EACode<const WEIGHT: usize> {
     width: usize,
     height: usize,

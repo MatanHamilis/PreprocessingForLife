@@ -8,24 +8,69 @@
 //! In other words, the ScalarParty sums $PRF(i)$ for all $i$ in the input domain of the PRF in a value $s$ and sends $(s+x)\in \mathbb{F}_{2^128}$ to the VectorParty$.
 //! By subtracting from the value it received the sum of all points in the PPRF, the VectorParty can obtain the $p+x$ where $p$ is the value of the PRF at the puncturing point.
 
+use self::scalar_party::SparseVolePcgScalarKeyGenState;
+use self::vector_party::SparseVolePcgVectorKeyGenStateInitial;
+use self::{
+    scalar_party::OnlineSparseVoleKey as OnlineSparseVoleKeyScalar,
+    vector_party::OnlineSparseVoleKey as OnlineSparseVoleKeyVector,
+};
+use super::codes::EACode;
+use super::pprf_aggregator::RegularErrorPprfAggregator;
+use crate::fields::GF128;
+use crate::pseudorandom::KEY_SIZE;
+
 pub mod scalar_party;
 pub mod vector_party;
+
+pub fn trusted_deal<const PRF_INPUT_BITLEN: usize, const CODE_WEIGHT: usize>(
+    scalar: &GF128,
+    puncturing_points: Vec<[bool; PRF_INPUT_BITLEN]>,
+    prf_keys: Vec<[u8; KEY_SIZE]>,
+) -> (
+    OnlineSparseVoleKeyScalar<CODE_WEIGHT>,
+    OnlineSparseVoleKeyVector<CODE_WEIGHT>,
+) {
+    // Define Gen State
+    let mut scalar_keygen_state =
+        SparseVolePcgScalarKeyGenState::<PRF_INPUT_BITLEN>::new(scalar.clone(), prf_keys);
+
+    let mut vector_keygen_state_init =
+        SparseVolePcgVectorKeyGenStateInitial::new(puncturing_points);
+
+    // Run Gen Algorithm
+    let scalar_first_message = scalar_keygen_state.create_first_message();
+    let vector_msg = vector_keygen_state_init.create_first_message(&scalar_first_message);
+    let scalar_second_message = scalar_keygen_state.create_second_message(&vector_msg);
+    let vector_keygen_state_final =
+        vector_keygen_state_init.handle_second_message(scalar_second_message);
+
+    // Create Offline Keys
+    let scalar_offline_key = scalar_keygen_state.keygen_offline::<RegularErrorPprfAggregator>();
+    let vector_offline_key =
+        vector_keygen_state_final.keygen_offline::<RegularErrorPprfAggregator>();
+
+    // Create code
+    let code_seed = [0; 32];
+    let scalar_code =
+        EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), 100, code_seed);
+    let vector_code =
+        EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), 100, code_seed);
+
+    // Create online keys
+    let scalar_online_key = scalar_offline_key.provide_online_key(scalar_code);
+    let vector_online_key = vector_offline_key.provide_online_key(vector_code);
+    (scalar_online_key, vector_online_key)
+}
 
 #[cfg(test)]
 mod tests {
 
-    use super::super::{
-        codes::EACode,
-        pprf_aggregator::RegularErrorPprfAggregator,
-        sparse_vole::{
-            scalar_party::SparseVolePcgScalarKeyGenState,
-            vector_party::SparseVolePcgVectorKeyGenStateInitial,
-        },
-        KEY_SIZE,
-    };
-
-    use crate::fields::{FieldElement, GF128};
+    use super::super::KEY_SIZE;
     use crate::pprf::usize_to_bits;
+    use crate::{
+        fields::{FieldElement, GF128},
+        pcg::sparse_vole::trusted_deal,
+    };
 
     #[test]
     fn test_full_correlation() {
@@ -46,38 +91,13 @@ mod tests {
                 output
             })
             .collect();
-
-        // Define Gen State
-        let mut scalar_keygen_state =
-            SparseVolePcgScalarKeyGenState::<INPUT_BITLEN>::new(scalar.clone(), prf_keys);
-
-        let puncturing_points = (0..WEIGHT).map(|i| usize_to_bits(i * 100)).collect();
-
-        let mut vector_keygen_state_init =
-            SparseVolePcgVectorKeyGenStateInitial::new(puncturing_points);
-
-        // Run Gen Algorithm
-        let scalar_first_message = scalar_keygen_state.create_first_message();
-        let vector_msg = vector_keygen_state_init.create_first_message(&scalar_first_message);
-        let scalar_second_message = scalar_keygen_state.create_second_message(&vector_msg);
-        let vector_keygen_state_final =
-            vector_keygen_state_init.handle_second_message(scalar_second_message);
-
-        // Create Offline Keys
-        let scalar_offline_key = scalar_keygen_state.keygen_offline::<RegularErrorPprfAggregator>();
-        let vector_offline_key =
-            vector_keygen_state_final.keygen_offline::<RegularErrorPprfAggregator>();
-
-        // Create code
-        let code_seed = [0; 32];
-        let scalar_code =
-            EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), 100, code_seed);
-        let vector_code =
-            EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), 100, code_seed);
+        let puncturing_points = (0..WEIGHT)
+            .map(|i| usize_to_bits::<INPUT_BITLEN>(i * 100))
+            .collect();
 
         // Create online keys
-        let scalar_online_key = scalar_offline_key.provide_online_key(scalar_code);
-        let vector_online_key = vector_offline_key.provide_online_key(vector_code);
+        let (scalar_online_key, vector_online_key) =
+            trusted_deal::<INPUT_BITLEN, CODE_WEIGHT>(&scalar, puncturing_points, prf_keys);
 
         // Expand the online keys
         for (scalar_gf, (vector_bit, vector_gf)) in scalar_online_key.zip(vector_online_key) {
