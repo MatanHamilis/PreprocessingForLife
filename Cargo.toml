@@ -31,3 +31,7 @@ harness = false
 [[bench]]
 name = "mul_benchmark"
 harness = false
+
+[[bench]]
+name = "circuit_eval"
+harness = false
