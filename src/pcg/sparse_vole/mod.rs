@@ -51,10 +51,16 @@ pub fn trusted_deal<const PRF_INPUT_BITLEN: usize, const CODE_WEIGHT: usize>(
 
     // Create code
     let code_seed = [0; 32];
-    let scalar_code =
-        EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), 100, code_seed);
-    let vector_code =
-        EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), 100, code_seed);
+    let scalar_code = EACode::<CODE_WEIGHT>::new(
+        scalar_offline_key.vector_length(),
+        scalar_offline_key.vector_length() / 5,
+        code_seed,
+    );
+    let vector_code = EACode::<CODE_WEIGHT>::new(
+        vector_offline_key.vector_length(),
+        vector_offline_key.vector_length() / 5,
+        code_seed,
+    );
 
     // Create online keys
     let scalar_online_key = scalar_offline_key.provide_online_key(scalar_code);
@@ -63,8 +69,11 @@ pub fn trusted_deal<const PRF_INPUT_BITLEN: usize, const CODE_WEIGHT: usize>(
 }
 
 #[cfg(test)]
-mod tests {
-
+pub(crate) mod tests {
+    use self::{
+        super::scalar_party::OnlineSparseVoleKey as OnlineSparseVoleKeyScalar,
+        super::vector_party::OnlineSparseVoleKey as OnlineSparseVoleKeyVector,
+    };
     use super::super::KEY_SIZE;
     use crate::pprf::usize_to_bits;
     use crate::{
@@ -72,13 +81,13 @@ mod tests {
         pcg::sparse_vole::trusted_deal,
     };
 
-    #[test]
-    fn test_full_correlation() {
+    pub(crate) fn get_correlation(
+        scalar: &GF128,
+    ) -> (OnlineSparseVoleKeyScalar<10>, OnlineSparseVoleKeyVector<10>) {
         // Define constants
         const WEIGHT: usize = 128;
         const CODE_WEIGHT: usize = 10;
         const INPUT_BITLEN: usize = 10;
-        let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
         let prf_keys = (0..WEIGHT)
             .map(|num| {
                 let mut output = [0u8; KEY_SIZE];
@@ -96,11 +105,16 @@ mod tests {
             .collect();
 
         // Create online keys
-        let (scalar_online_key, vector_online_key) =
-            trusted_deal::<INPUT_BITLEN, CODE_WEIGHT>(&scalar, puncturing_points, prf_keys);
-
+        trusted_deal::<INPUT_BITLEN, CODE_WEIGHT>(&scalar, puncturing_points, prf_keys)
+    }
+    #[test]
+    fn test_full_correlation() {
+        let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+        let (scalar_online_key, vector_online_key) = get_correlation(&scalar);
         // Expand the online keys
-        for (scalar_gf, (vector_bit, vector_gf)) in scalar_online_key.zip(vector_online_key) {
+        for (scalar_gf, (vector_bit, vector_gf)) in
+            scalar_online_key.zip(vector_online_key).take(3000)
+        {
             if vector_bit.is_one() {
                 assert_eq!((scalar_gf + vector_gf), scalar);
             } else {
