@@ -7,7 +7,7 @@ use core::mem::transmute;
 #[derive(Debug)]
 pub struct EACode<const WEIGHT: usize> {
     width: usize,
-    height: usize,
+    // height: usize,
     cur_height: usize,
     aes: Aes128,
     preprocessed_vec: Option<Vec<[usize; WEIGHT]>>,
@@ -17,7 +17,7 @@ impl<const WEIGHT: usize> EACode<WEIGHT> {
     pub fn new(width: usize, height: usize, seed: [u8; 32]) -> Self {
         EACode {
             width,
-            height,
+            // height,
             cur_height: 0,
             aes: Aes128::new_from_slice(&seed[0..16]).unwrap(),
             preprocessed_vec: None,
@@ -31,9 +31,9 @@ impl<const WEIGHT: usize> EACode<WEIGHT> {
 impl<const WEIGHT: usize> Iterator for EACode<WEIGHT> {
     type Item = [usize; WEIGHT];
     fn next(&mut self) -> Option<Self::Item> {
-        if self.height == self.cur_height {
-            return None;
-        }
+        // if self.height == self.cur_height {
+        //     return None;
+        // }
         self.cur_height += 1;
         if self.preprocessed_vec.is_some()
             && self.preprocessed_vec.get_or_insert_default().len() > self.cur_height
