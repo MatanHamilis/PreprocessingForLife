@@ -66,7 +66,7 @@ mod tests {
     pub fn test_sanity() {
         let code = EACode::<5>::new(12, 100, [1; 32]);
         let mut i = 0;
-        for v in code {
+        for v in code.take(100) {
             i += 1;
             assert_eq!(v.len(), 5);
         }
