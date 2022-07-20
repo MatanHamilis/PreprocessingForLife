@@ -113,8 +113,8 @@ pub fn parse_bristol<'a, T: Iterator<Item = &'a str>>(mut lines: T) -> Option<Ci
     for gate_line in lines.take(gates_num + 1) {
         let (gate_type, output_wire) = parse_regular_gate_line(gate_line)?;
         let input_wires = match &gate_type {
-            GateType::TwoInput { input, op } => &input[..],
-            GateType::OneInput { input, op } => &input[..],
+            GateType::TwoInput { input, op: _ } => &input[..],
+            GateType::OneInput { input, op: _ } => &input[..],
         };
         let mut max_topological_index = usize::MIN;
         for &input in input_wires {
@@ -124,11 +124,7 @@ pub fn parse_bristol<'a, T: Iterator<Item = &'a str>>(mut lines: T) -> Option<Ci
                 *wire_toplogical_idx.get(&input)?
             };
             if input >= total_wire_count - output_wire_count {
-                error!("Output wire can be used as an input wire");
-                return None;
-            }
-            if used_wires.contains(&input) {
-                error!("Wire has already been used");
+                error!("Output wire can not be used as an input wire");
                 return None;
             }
             used_wires.insert(input);
@@ -137,7 +133,6 @@ pub fn parse_bristol<'a, T: Iterator<Item = &'a str>>(mut lines: T) -> Option<Ci
         let gate = Gate {
             gate_type,
             output_wire,
-            topological_idx: max_topological_index,
         };
         match gates.get_mut(max_topological_index) {
             None => gates.push(vec![gate]),

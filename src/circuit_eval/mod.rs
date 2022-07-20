@@ -1,4 +1,4 @@
-mod bristol_fashion;
+pub mod bristol_fashion;
 
 use crate::{
     fields::{FieldElement, GF2},
@@ -106,7 +106,6 @@ impl GateOneInputOp {
 pub struct Gate {
     gate_type: GateType,
     output_wire: usize,
-    topological_idx: usize,
 }
 
 #[derive(Debug)]
@@ -141,7 +140,7 @@ pub enum CircuitEvalSessionState<'a, T: Iterator<Item = BeaverTripletShare<GF2>>
 }
 #[derive(Debug)]
 struct CircuitEvalSession<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> {
-    circuit: &'a mut Circuit,
+    circuit: &'a Circuit,
     wires: Vec<GF2>,
     layer_to_process: usize,
     beaver_triple_gen: T,
@@ -164,11 +163,12 @@ impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSession<'a, T> 
 
 impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionState<'a, T> {
     pub fn new(
-        circuit: &'a mut Circuit,
+        circuit: &'a Circuit,
         input_shares: &[GF2],
         beaver_triple_gen: T,
         party_id: bool,
     ) -> Self {
+        assert_eq!(circuit.input_wire_count, input_shares.len());
         let wires: Vec<GF2> = input_shares
             .into_iter()
             .chain(
@@ -179,7 +179,7 @@ impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionState<'a
             )
             .map(|v| *v)
             .collect();
-        let mut session = CircuitEvalSession {
+        let session = CircuitEvalSession {
             circuit,
             wires,
             beaver_triple_gen,
@@ -192,14 +192,14 @@ impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionState<'a
 }
 
 impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionWaitingToSend<'a, T> {
-    fn fetch_layer_messages(mut self) -> (CircuitEvalSessionState<'a, T>, Vec<(GF2, GF2)>) {
+    pub fn fetch_layer_messages(self) -> (CircuitEvalSessionState<'a, T>, Vec<(GF2, GF2)>) {
         // Prepare beaver triples for this layer.
         let mut session = self.session;
         let layer_id = session.layer_to_process;
         let current_layer = session
             .circuit
             .gates
-            .get_mut(layer_id)
+            .get(layer_id)
             .expect("Missing layer, corrupt state!");
         session.beaver_triples_current_layer.clear();
         session
@@ -210,25 +210,34 @@ impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionWaitingT
         let msgs = current_layer
             .iter()
             .filter_map(|g| {
-                if let GateType::TwoInput {
-                    input,
-                    op: GateTwoInputOp::And,
-                } = g.gate_type
-                {
-                    let triple = session
-                        .beaver_triple_gen
-                        .next()
-                        .expect("Beaver triples generator is exhausted.");
-                    let msg = Some(and_gate::mpc_make_msgs(
-                        session.wires[input[0]],
-                        session.wires[input[1]],
-                        &triple,
-                    ));
-                    session.beaver_triples_current_layer.push(triple);
-                    msg
-                } else {
-                    None
-                }
+                session.wires[g.output_wire] = match g.gate_type {
+                    GateType::TwoInput { input, op } => {
+                        let x_share = session.wires[input[0]];
+                        let y_share = session.wires[input[1]];
+                        match op {
+                            GateTwoInputOp::Xor => xor_gate::eval_mpc(x_share, y_share),
+                            GateTwoInputOp::And => {
+                                let triple = session
+                                    .beaver_triple_gen
+                                    .next()
+                                    .expect("Beaver triples generator is exhausted.");
+                                let msg = Some(and_gate::mpc_make_msgs(
+                                    session.wires[input[0]],
+                                    session.wires[input[1]],
+                                    &triple,
+                                ));
+                                session.beaver_triples_current_layer.push(triple);
+                                return msg;
+                            }
+                        }
+                    }
+                    GateType::OneInput { input, op } => match op {
+                        GateOneInputOp::Not => {
+                            not_gate::eval_mpc(session.wires[input[0]], session.party_id)
+                        }
+                    },
+                };
+                None
             })
             .collect();
         let new_state =
@@ -240,7 +249,10 @@ impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionWaitingT
 }
 
 impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionWaitingToReceive<'a, T> {
-    fn handle_layer_responses(self, responses: Vec<(GF2, GF2)>) -> CircuitEvalSessionState<'a, T> {
+    pub fn handle_layer_responses(
+        self,
+        responses: Vec<(GF2, GF2)>,
+    ) -> CircuitEvalSessionState<'a, T> {
         let mut session = self.session;
         let layer_id = session.layer_to_process;
         let current_layer = session
@@ -251,25 +263,25 @@ impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionWaitingT
         let mut responses_iter = responses.into_iter();
         let mut beaver_triples_iter = session.beaver_triples_current_layer.iter();
         for g in current_layer {
-            session.wires[g.output_wire] = match g.gate_type {
-                GateType::TwoInput { input, op } => {
-                    let x_share = session.wires[input[0]];
-                    let y_share = session.wires[input[1]];
-                    match op {
-                        GateTwoInputOp::Xor => xor_gate::eval_mpc(x_share, y_share),
-                        GateTwoInputOp::And => {
-                            let (x_response, y_response) = responses_iter
-                                .next()
-                                .expect("Malformed response from peer! Insufficient data");
-                            and_gate::mpc_handle_msgs(x_share, y_share, x_response, y_response, beaver_triples_iter.next().expect("Insufficient preprocessed triples, this shouldn't have happened!"))
-                        }
-                    }
-                }
-                GateType::OneInput { input, op } => match op {
-                    GateOneInputOp::Not => {
-                        not_gate::eval_mpc(session.wires[input[0]], session.party_id)
-                    }
-                },
+            if let GateType::TwoInput {
+                input,
+                op: GateTwoInputOp::And,
+            } = g.gate_type
+            {
+                let x_share = session.wires[input[0]];
+                let y_share = session.wires[input[1]];
+                let (x_response, y_response) = responses_iter
+                    .next()
+                    .expect("Malformed response from peer! Insufficient data");
+                session.wires[g.output_wire] = and_gate::mpc_handle_msgs(
+                    x_share,
+                    y_share,
+                    x_response,
+                    y_response,
+                    beaver_triples_iter
+                        .next()
+                        .expect("Insufficient preprocessed triples, this shouldn't have happened!"),
+                )
             }
         }
         if responses_iter.next().is_some() {
@@ -299,22 +311,14 @@ impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionWaitingT
 #[cfg(test)]
 mod tests {
     use super::bristol_fashion::parse_bristol;
-    use crate::circuit_eval::{
-        CircuitEvalSession, CircuitEvalSessionState, CircuitEvalSessionWaitingToSend,
-    };
+    use super::Circuit;
+    use crate::circuit_eval::CircuitEvalSessionState;
+    use crate::fields::{FieldElement, GF128, GF2};
     use crate::pcg::bit_beaver_triples::{
-        BeaverTriplerScalarPartyOnlinePCGKey, BeaverTripletBitPartyOnlinePCGKey,
+        BeaverTripletBitPartyOnlinePCGKey, BeaverTripletScalarPartyOnlinePCGKey,
     };
-    use crate::pcg::random_bit_ot::{
-        RandomBitOTReceiverOnlinePCGKey, RandomBitOTSenderOnlinePCGKey,
-    };
-    use crate::pcg::random_ot::{RandomOTReceiverOnlinePCGKey, RandomOTSenderOnlinePCGKey};
     use crate::pprf::usize_to_bits;
     use crate::pseudorandom::KEY_SIZE;
-    use crate::{
-        fields::{FieldElement, GF128, GF2},
-        pcg::bit_beaver_triples::BeaverTripletShare,
-    };
 
     fn get_prf_keys(amount: u8) -> Vec<[u8; KEY_SIZE]> {
         let mut base_prf_key = [0u8; KEY_SIZE];
@@ -343,65 +347,17 @@ mod tests {
             .unzip()
     }
 
-    #[test]
-    fn test_small_circuit() {
-        let mut logical_or_circuit = [
-            "4 6",
-            "2 1 1",
-            "1 1",
-            "",
-            "1 1 0 2 INV",
-            "1 1 1 3 INV",
-            "2 1 2 3 4 AND",
-            "1 1 4 5 INV",
-        ];
-        let mut circuit = parse_bristol(logical_or_circuit.into_iter()).expect("Failed to parse");
-        let mut circuit_2 = parse_bristol(logical_or_circuit.into_iter()).expect("Failed to parse");
-
-        // Test classical eval.
-        assert_eq!(
-            circuit.eval_circuit(&[GF2::one(), GF2::one()]),
-            Some(vec![GF2::one()])
-        );
-        assert_eq!(
-            circuit.eval_circuit(&[GF2::zero(), GF2::one()]),
-            Some(vec![GF2::one()])
-        );
-        assert_eq!(
-            circuit.eval_circuit(&[GF2::one(), GF2::zero()]),
-            Some(vec![GF2::one()])
-        );
-        assert_eq!(
-            circuit.eval_circuit(&[GF2::zero(), GF2::zero()]),
-            Some(vec![GF2::zero()])
-        );
-
-        // Test MPC eval.
-        const WEIGHT: u8 = 10;
-        const INPUT_BITLEN: usize = 3;
-        const CODE_WEIGHT: usize = 7;
-        let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
-        let prf_keys = get_prf_keys(WEIGHT);
-        let puncturing_points: Vec<[bool; INPUT_BITLEN]> = get_puncturing_points(WEIGHT);
-        let (scalar_online_key, vector_online_key) = crate::pcg::sparse_vole::trusted_deal::<
-            INPUT_BITLEN,
-            CODE_WEIGHT,
-        >(&scalar, puncturing_points, prf_keys);
-
-        let random_ot_key: RandomOTSenderOnlinePCGKey<CODE_WEIGHT> = scalar_online_key.into();
-        let random_bit_ot_key: RandomBitOTSenderOnlinePCGKey<CODE_WEIGHT> = random_ot_key.into();
-        let beaver_triple_scalar_key: BeaverTriplerScalarPartyOnlinePCGKey<CODE_WEIGHT> =
-            random_bit_ot_key.into();
-        let random_ot_key: RandomOTReceiverOnlinePCGKey<CODE_WEIGHT> = vector_online_key.into();
-        let random_bit_ot_key: RandomBitOTReceiverOnlinePCGKey<CODE_WEIGHT> = random_ot_key.into();
-        let beaver_triple_vector_key: BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT> =
-            random_bit_ot_key.into();
-
-        let (input_a, input_b) = share_inputs(&vec![GF2::zero(), GF2::zero()]);
+    fn eval_mpc_circuit<const CODE_WEIGHT: usize>(
+        circuit: &Circuit,
+        input_a: &[GF2],
+        input_b: &[GF2],
+        beaver_triple_scalar_key: &mut BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT>,
+        beaver_triple_vector_key: &mut BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT>,
+    ) -> (Vec<GF2>, Vec<GF2>) {
         let mut first_party_session =
-            CircuitEvalSessionState::new(&mut circuit, &input_a, beaver_triple_scalar_key, false);
+            CircuitEvalSessionState::new(&circuit, &input_a, beaver_triple_scalar_key, false);
         let mut second_party_session =
-            CircuitEvalSessionState::new(&mut circuit_2, &input_b, beaver_triple_vector_key, true);
+            CircuitEvalSessionState::new(&circuit, &input_b, beaver_triple_vector_key, true);
         let (first_party_output, second_party_output) = loop {
             let (first_party_session_temp, first_party_queries) = match first_party_session {
                 CircuitEvalSessionState::WaitingToSend(session) => session.fetch_layer_messages(),
@@ -433,7 +389,68 @@ mod tests {
                 panic!();
             }
         };
-        assert_eq!(first_party_output.len(), second_party_output.len());
-        assert_eq!(first_party_output[0] + second_party_output[0], GF2::zero());
+        (first_party_output, second_party_output)
+    }
+
+    #[test]
+    fn test_small_circuit() {
+        let logical_or_circuit = [
+            "4 6",
+            "2 1 1",
+            "1 1",
+            "",
+            "1 1 0 2 INV",
+            "1 1 1 3 INV",
+            "2 1 2 3 4 AND",
+            "1 1 4 5 INV",
+        ];
+        let circuit = parse_bristol(logical_or_circuit.into_iter()).expect("Failed to parse");
+
+        // Test classical eval.
+        assert_eq!(
+            circuit.eval_circuit(&[GF2::one(), GF2::one()]),
+            Some(vec![GF2::one()])
+        );
+        assert_eq!(
+            circuit.eval_circuit(&[GF2::zero(), GF2::one()]),
+            Some(vec![GF2::one()])
+        );
+        assert_eq!(
+            circuit.eval_circuit(&[GF2::one(), GF2::zero()]),
+            Some(vec![GF2::one()])
+        );
+        assert_eq!(
+            circuit.eval_circuit(&[GF2::zero(), GF2::zero()]),
+            Some(vec![GF2::zero()])
+        );
+
+        // Test MPC eval.
+        const WEIGHT: u8 = 10;
+        const INPUT_BITLEN: usize = 3;
+        const CODE_WEIGHT: usize = 7;
+        let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+        let prf_keys = get_prf_keys(WEIGHT);
+        let puncturing_points: Vec<[bool; INPUT_BITLEN]> = get_puncturing_points(WEIGHT);
+        let (scalar_online_key, vector_online_key) = crate::pcg::sparse_vole::trusted_deal::<
+            INPUT_BITLEN,
+            CODE_WEIGHT,
+        >(&scalar, puncturing_points, prf_keys);
+
+        let mut beaver_triple_scalar_key: BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT> =
+            scalar_online_key.into();
+        let mut beaver_triple_vector_key: BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT> =
+            vector_online_key.into();
+
+        let (input_a, input_b) = share_inputs(&vec![GF2::zero(), GF2::zero()]);
+        let (output_a, output_b) = eval_mpc_circuit(
+            &circuit,
+            &input_a,
+            &input_b,
+            &mut beaver_triple_scalar_key,
+            &mut beaver_triple_vector_key,
+        );
+        assert_eq!(output_a.len(), output_b.len());
+        assert_eq!(output_a.len(), 1);
+        assert_eq!(output_a[0] + output_b[0], GF2::zero());
     }
 }
