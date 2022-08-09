@@ -9,9 +9,9 @@ use super::{Circuit, Gate, GateType};
 use std::collections::{HashMap, HashSet};
 
 enum GateOp {
-    AND,
-    XOR,
-    INV,
+    And,
+    Xor,
+    Inv,
 }
 
 struct ParserIterator<'a, T: Iterator<Item = &'a str>> {
@@ -23,15 +23,15 @@ impl<'a, T: Iterator<Item = &'a str>> ParserIterator<'a, T> {
         ParserIterator { iter }
     }
     pub fn next_usize(&mut self) -> Option<usize> {
-        Some(self.iter.next()?.parse().ok()?)
+        self.iter.next()?.parse().ok()
     }
 
     pub fn next_gateop(&mut self) -> Option<GateOp> {
         let op_str = self.iter.next()?;
         Some(match op_str {
-            "AND" => GateOp::AND,
-            "XOR" => GateOp::XOR,
-            "INV" => GateOp::INV,
+            "AND" => GateOp::And,
+            "XOR" => GateOp::Xor,
+            "INV" => GateOp::Inv,
             _ => return None,
         })
     }
@@ -52,7 +52,7 @@ fn parse_first_line(line: &str) -> Option<(usize, usize)> {
 fn parse_io_lines(line: &str) -> Option<(usize, Vec<usize>)> {
     let mut line_parts: Vec<usize> = line.split(' ').map_while(|s| s.parse().ok()).collect();
 
-    if line_parts.len() == 0 {
+    if line_parts.is_empty() {
         return None;
     }
 
@@ -64,9 +64,9 @@ fn parse_io_lines(line: &str) -> Option<(usize, Vec<usize>)> {
 }
 
 fn parse_regular_gate_line(line: &str) -> Option<(GateType, usize)> {
-    let mut line_iter = ParserIterator::new(line.split(" "));
+    let mut line_iter = ParserIterator::new(line.split(' '));
     let total_input = line_iter.next_usize()?;
-    if total_input > 2 || total_input < 1 {
+    if !(1..=2).contains(&total_input) {
         return None;
     }
     if line_iter.next_usize()? != 1 {
@@ -81,15 +81,15 @@ fn parse_regular_gate_line(line: &str) -> Option<(GateType, usize)> {
     let output_wire = line_iter.next_usize()?;
     let gate_op = line_iter.next_gateop()?;
     let gate_type = match gate_op {
-        GateOp::AND => GateType::TwoInput {
+        GateOp::And => GateType::TwoInput {
             input: [input_wires.0, input_wires.1?],
             op: GateTwoInputOp::And,
         },
-        GateOp::XOR => GateType::TwoInput {
+        GateOp::Xor => GateType::TwoInput {
             input: [input_wires.0, input_wires.1?],
             op: GateTwoInputOp::Xor,
         },
-        GateOp::INV => GateType::OneInput {
+        GateOp::Inv => GateType::OneInput {
             input: [input_wires.0],
             op: GateOneInputOp::Not,
         },

@@ -5,6 +5,7 @@ use aes::{
     Aes128, Block,
 };
 use once_cell::sync::Lazy;
+use rayon::prelude::*;
 pub const PRG_KEY_SIZE: usize = 16;
 
 #[cfg(not(feature = "aesni"))]
@@ -43,7 +44,7 @@ pub fn double_prg(input: &[u8; PRG_KEY_SIZE]) -> ([u8; PRG_KEY_SIZE], [u8; PRG_K
 }
 
 pub fn double_prg_many(input: &[Block], output: &mut [Block]) {
-    const SINGLE_THREAD_THRESH: usize = 1 << 3;
+    const SINGLE_THREAD_THRESH: usize = 1 << 4;
     let length = std::cmp::min(SINGLE_THREAD_THRESH, input.len());
     output
         .chunks_mut(2 * SINGLE_THREAD_THRESH)
@@ -61,4 +62,31 @@ pub fn double_prg_many(input: &[Block], output: &mut [Block]) {
                 output_chunk[2 * i + 1][0] = !output_chunk[2 * i + 1][0];
             }
         });
+}
+
+pub fn double_prg_many_inplace(in_out: &mut [Block]) {
+    const BLOCK_SIZE: usize = 1 << 3;
+    if in_out.len() < 2 * BLOCK_SIZE {
+        double_prg_many_inplace_parametrized::<1>(in_out);
+    } else {
+        double_prg_many_inplace_parametrized::<BLOCK_SIZE>(in_out);
+    }
+}
+fn double_prg_many_inplace_parametrized<const BLOCK_SIZE: usize>(in_out: &mut [Block]) {
+    let input_length = in_out.len() >> 1;
+    for chunk_idx in (0..(input_length / BLOCK_SIZE)).rev() {
+        let input: [_; BLOCK_SIZE] = core::array::from_fn(|i| in_out[BLOCK_SIZE * chunk_idx + i]);
+        let output = &mut in_out[2 * (chunk_idx * BLOCK_SIZE)..2 * (chunk_idx + 1) * BLOCK_SIZE];
+        for i in 0..BLOCK_SIZE {
+            output[2 * i] = input[i];
+            output[2 * i + 1] = input[i];
+            output[2 * i + 1][0] = !input[i][0];
+        }
+        AES.encrypt_blocks(output);
+        for i in 0..BLOCK_SIZE {
+            xor_arrays(&mut output[2 * i].into(), &mut input[i].into());
+            xor_arrays(&mut output[2 * i + 1].into(), &mut input[i].into());
+            output[2 * i + 1][0] = !output[2 * i + 1][0];
+        }
+    }
 }

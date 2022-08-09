@@ -1,5 +1,5 @@
 use super::super::pprf_aggregator::PprfAggregator;
-use super::super::{codes::EACode, xor_arrays, KEY_SIZE};
+use super::super::{xor_arrays, KEY_SIZE};
 use super::vector_party::VectorFirstMessage;
 use crate::fields::{FieldElement, GF128};
 use crate::pprf::distributed_generation::{Puncturer, SenderFirstMessage, SenderSecondMessage};
@@ -16,9 +16,9 @@ pub struct OfflineSparseVoleKey {
 }
 
 #[derive(Debug)]
-pub struct OnlineSparseVoleKey<const CODE_WEIGHT: usize> {
+pub struct OnlineSparseVoleKey<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> {
     accumulated_vector: Vec<GF128>,
-    code: EACode<CODE_WEIGHT>,
+    code: S,
     index: usize,
     pub scalar: GF128,
 }
@@ -83,10 +83,13 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgScalarKeyGenState<INPUT_BITLEN> {
 }
 
 impl OfflineSparseVoleKey {
-    pub fn provide_online_key<const CODE_WEIGHT: usize>(
+    pub fn provide_online_key<
+        const CODE_WEIGHT: usize,
+        S: Iterator<Item = [usize; CODE_WEIGHT]>,
+    >(
         self,
-        code: EACode<CODE_WEIGHT>,
-    ) -> OnlineSparseVoleKey<CODE_WEIGHT> {
+        code: S,
+    ) -> OnlineSparseVoleKey<CODE_WEIGHT, S> {
         OnlineSparseVoleKey {
             accumulated_vector: self.accumulated_vector,
             code,
@@ -99,7 +102,9 @@ impl OfflineSparseVoleKey {
     }
 }
 
-impl<const CODE_WEIGHT: usize> Iterator for OnlineSparseVoleKey<CODE_WEIGHT> {
+impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> Iterator
+    for OnlineSparseVoleKey<CODE_WEIGHT, S>
+{
     type Item = GF128;
     fn next(&mut self) -> Option<Self::Item> {
         match self.code.next() {

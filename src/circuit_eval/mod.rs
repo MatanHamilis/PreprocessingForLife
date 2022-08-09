@@ -177,7 +177,7 @@ impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionState<'a
                     .cycle()
                     .take(circuit.total_wire_count - circuit.input_wire_count),
             )
-            .map(|v| *v)
+            .copied()
             .collect();
         let session = CircuitEvalSession {
             circuit,
@@ -347,12 +347,16 @@ mod tests {
             .unzip()
     }
 
-    fn eval_mpc_circuit<const CODE_WEIGHT: usize>(
+    fn eval_mpc_circuit<
+        const CODE_WEIGHT: usize,
+        S: Iterator<Item = [usize; CODE_WEIGHT]>,
+        T: Iterator<Item = [usize; CODE_WEIGHT]>,
+    >(
         circuit: &Circuit,
         input_a: &[GF2],
         input_b: &[GF2],
-        beaver_triple_scalar_key: &mut BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT>,
-        beaver_triple_vector_key: &mut BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT>,
+        beaver_triple_scalar_key: &mut BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT, S>,
+        beaver_triple_vector_key: &mut BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT, T>,
     ) -> (Vec<GF2>, Vec<GF2>) {
         let mut first_party_session =
             CircuitEvalSessionState::new(&circuit, &input_a, beaver_triple_scalar_key, false);
@@ -436,9 +440,9 @@ mod tests {
             CODE_WEIGHT,
         >(&scalar, puncturing_points, prf_keys);
 
-        let mut beaver_triple_scalar_key: BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT> =
+        let mut beaver_triple_scalar_key: BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT, _> =
             scalar_online_key.into();
-        let mut beaver_triple_vector_key: BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT> =
+        let mut beaver_triple_vector_key: BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT, _> =
             vector_online_key.into();
 
         let (input_a, input_b) = share_inputs(&vec![GF2::zero(), GF2::zero()]);

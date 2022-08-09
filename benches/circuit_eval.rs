@@ -1,10 +1,11 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use silent_party::circuit_eval::bristol_fashion::parse_bristol;
 use silent_party::circuit_eval::{Circuit, CircuitEvalSessionState};
 use silent_party::fields::{FieldElement, GF128, GF2};
 use silent_party::pcg::bit_beaver_triples::{
-    BeaverTripletBitPartyOnlinePCGKey, BeaverTripletScalarPartyOnlinePCGKey,
+    BeaverTripletBitPartyOnlinePCGKey, BeaverTripletScalarPartyOnlinePCGKey, BeaverTripletShare,
 };
+use silent_party::pcg::preprocessor::Preprocessor;
 use silent_party::pprf::usize_to_bits;
 use silent_party::pseudorandom::KEY_SIZE;
 
@@ -35,12 +36,15 @@ fn get_puncturing_points<const INPUT_BITLEN: usize>(amount: u8) -> Vec<[bool; IN
         .collect()
 }
 
-fn eval_mpc_circuit<const CODE_WEIGHT: usize>(
+fn eval_mpc_circuit<
+    T: Iterator<Item = BeaverTripletShare<GF2>>,
+    S: Iterator<Item = BeaverTripletShare<GF2>>,
+>(
     circuit: &Circuit,
     input_a: &[GF2],
     input_b: &[GF2],
-    beaver_triple_scalar_key: &mut BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT>,
-    beaver_triple_vector_key: &mut BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT>,
+    beaver_triple_scalar_key: &mut T,
+    beaver_triple_vector_key: &mut S,
 ) -> (Vec<GF2>, Vec<GF2>) {
     let mut first_party_session =
         CircuitEvalSessionState::new(&circuit, &input_a, beaver_triple_scalar_key, false);
@@ -82,8 +86,8 @@ fn eval_mpc_circuit<const CODE_WEIGHT: usize>(
 pub fn circuit_eval_bench(c: &mut Criterion) {
     let circuit = parse_bristol(AES_CIRCUIT.lines()).unwrap();
     // Test MPC eval.
-    const WEIGHT: u8 = 120;
-    const INPUT_BITLEN: usize = 3;
+    const WEIGHT: u8 = 125;
+    const INPUT_BITLEN: usize = 18;
     const CODE_WEIGHT: usize = 7;
     let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
     let prf_keys = get_prf_keys(WEIGHT);
@@ -93,15 +97,14 @@ pub fn circuit_eval_bench(c: &mut Criterion) {
         CODE_WEIGHT,
     >(&scalar, puncturing_points, prf_keys);
 
-    let mut beaver_triple_scalar_key: BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT> =
+    let mut beaver_triple_scalar_key: BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT, _> =
         scalar_online_key.into();
-    let mut beaver_triple_vector_key: BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT> =
+    let mut beaver_triple_vector_key: BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT, _> =
         vector_online_key.into();
-
     let (input_a, input_b) = share_inputs(&vec![GF2::zero(); 256]);
-    c.bench_function("eval_circuit", |b| {
+    c.bench_function("eval_circuit no preprocessing", |b| {
         b.iter(|| {
-            let (output_a, output_b) = eval_mpc_circuit(
+            let (_, _) = eval_mpc_circuit(
                 &circuit,
                 &input_a,
                 &input_b,
@@ -109,6 +112,31 @@ pub fn circuit_eval_bench(c: &mut Criterion) {
                 &mut beaver_triple_vector_key,
             );
         });
+    });
+
+    let preprocessed_scalar_key: Vec<_> =
+        Preprocessor::new(10_000, beaver_triple_scalar_key).collect();
+    let preprocessed_vector_key: Vec<_> =
+        Preprocessor::new(10_000, beaver_triple_vector_key).collect();
+    c.bench_function("eval_circuit with preprocessing", |b| {
+        b.iter_batched(
+            || {
+                (
+                    preprocessed_scalar_key.clone(),
+                    preprocessed_vector_key.clone(),
+                )
+            },
+            |(scalar_key, vector_key)| {
+                let (_, _) = eval_mpc_circuit(
+                    &circuit,
+                    &input_a,
+                    &input_b,
+                    &mut scalar_key.into_iter(),
+                    &mut vector_key.into_iter(),
+                );
+            },
+            criterion::BatchSize::SmallInput,
+        );
     });
 }
 criterion_group!(benches, circuit_eval_bench);

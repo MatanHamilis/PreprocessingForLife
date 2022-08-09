@@ -2,6 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use silent_party::fields::GF128;
 use silent_party::pcg::codes::EACode;
 use silent_party::pcg::pprf_aggregator::RegularErrorPprfAggregator;
+use silent_party::pcg::preprocessor::Preprocessor;
 use silent_party::pcg::sparse_vole::scalar_party::OfflineSparseVoleKey as ScalarOfflineSparseVoleKey;
 use silent_party::pcg::sparse_vole::scalar_party::SparseVolePcgScalarKeyGenState;
 use silent_party::pcg::sparse_vole::vector_party::OfflineSparseVoleKey as VectorOfflineSparseVoleKey;
@@ -55,18 +56,10 @@ pub fn online_pcg(c: &mut Criterion) {
 
     // Create code
     let code_seed = [0; 32];
-    let mut scalar_code = EACode::<CODE_WEIGHT>::new(
-        scalar_offline_key.vector_length(),
-        10_000_000usize,
-        code_seed,
-    );
-    let mut vector_code = EACode::<CODE_WEIGHT>::new(
-        vector_offline_key.vector_length(),
-        10_000_000usize,
-        code_seed,
-    );
-    scalar_code.preprocess(10_000_000usize);
-    vector_code.preprocess(10_000_000usize);
+    let scalar_code = EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), code_seed);
+    let vector_code = EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), code_seed);
+    let scalar_code = Preprocessor::new(10_000_000usize, scalar_code);
+    let vector_code = Preprocessor::new(10_000_000usize, vector_code);
 
     // Create online keys
     let mut scalar_online_key = scalar_offline_key.provide_online_key(scalar_code);
@@ -80,16 +73,8 @@ pub fn online_pcg(c: &mut Criterion) {
 
     let (scalar_offline_key, vector_offline_key) = get_offline_keys();
     let code_seed = [0; 32];
-    let scalar_code = EACode::<CODE_WEIGHT>::new(
-        scalar_offline_key.vector_length(),
-        10_000_000usize,
-        code_seed,
-    );
-    let vector_code = EACode::<CODE_WEIGHT>::new(
-        vector_offline_key.vector_length(),
-        10_000_000usize,
-        code_seed,
-    );
+    let scalar_code = EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), code_seed);
+    let vector_code = EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), code_seed);
     let mut scalar_online_key = scalar_offline_key.provide_online_key(scalar_code);
     let mut vector_online_key = vector_offline_key.provide_online_key(vector_code);
     c.bench_function("online_pcg_scalar", |b| {
@@ -149,6 +134,6 @@ pub fn offline_pcg(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = offline_pcg, //online_pcg
+    targets = offline_pcg, online_pcg
 }
 criterion_main!(benches);

@@ -1,4 +1,3 @@
-use super::super::codes::EACode;
 use super::super::pprf_aggregator::PprfAggregator;
 use super::super::KEY_SIZE;
 use super::scalar_party::{ScalarFirstMessage, ScalarSecondMessage};
@@ -24,10 +23,10 @@ pub struct OfflineSparseVoleKey {
 }
 
 #[derive(Debug)]
-pub struct OnlineSparseVoleKey<const CODE_WEIGHT: usize> {
+pub struct OnlineSparseVoleKey<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> {
     accumulated_scalar_vector: Vec<GF128>,
     accumulated_sparse_subfield_vector: Vec<GF2>,
-    code: EACode<CODE_WEIGHT>,
+    code: S,
 }
 
 impl<const INPUT_BITLEN: usize> SparseVolePcgVectorKeyGenStateInitial<INPUT_BITLEN> {
@@ -115,10 +114,13 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgVectorKeyGenStateFinal<INPUT_BITLEN
 }
 
 impl OfflineSparseVoleKey {
-    pub fn provide_online_key<const CODE_WEIGHT: usize>(
+    pub fn provide_online_key<
+        const CODE_WEIGHT: usize,
+        S: Iterator<Item = [usize; CODE_WEIGHT]>,
+    >(
         self,
-        code: EACode<CODE_WEIGHT>,
-    ) -> OnlineSparseVoleKey<CODE_WEIGHT> {
+        code: S,
+    ) -> OnlineSparseVoleKey<CODE_WEIGHT, S> {
         OnlineSparseVoleKey {
             accumulated_scalar_vector: self.accumulated_scalar_vector,
             accumulated_sparse_subfield_vector: self.accumulated_sparse_subfield_vector,
@@ -130,7 +132,9 @@ impl OfflineSparseVoleKey {
     }
 }
 
-impl<const CODE_WEIGHT: usize> Iterator for OnlineSparseVoleKey<CODE_WEIGHT> {
+impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> Iterator
+    for OnlineSparseVoleKey<CODE_WEIGHT, S>
+{
     type Item = (GF2, GF128);
     fn next(&mut self) -> Option<Self::Item> {
         self.code.next().map(|v| {

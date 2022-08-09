@@ -3,6 +3,7 @@ use std::mem::size_of;
 use aes::cipher::{BlockEncrypt, BlockSizeUser, KeyInit};
 use aes::{Aes128, Block};
 use core::mem::transmute;
+use rand::{Fill, SeedableRng};
 
 #[derive(Debug)]
 pub struct EACode<const WEIGHT: usize> {
@@ -14,7 +15,7 @@ pub struct EACode<const WEIGHT: usize> {
 }
 
 impl<const WEIGHT: usize> EACode<WEIGHT> {
-    pub fn new(width: usize, height: usize, seed: [u8; 32]) -> Self {
+    pub fn new(width: usize, seed: [u8; 32]) -> Self {
         EACode {
             width,
             // height,
@@ -24,6 +25,7 @@ impl<const WEIGHT: usize> EACode<WEIGHT> {
         }
     }
     pub fn preprocess(&mut self, count: usize) {
+        self.cur_height = 0;
         self.preprocessed_vec = Some((0..count).map(|_| self.next().unwrap()).collect());
     }
 }
@@ -35,23 +37,21 @@ impl<const WEIGHT: usize> Iterator for EACode<WEIGHT> {
         //     return None;
         // }
         self.cur_height += 1;
-        if self.preprocessed_vec.is_some()
-            && self.preprocessed_vec.get_or_insert_default().len() > self.cur_height
-        {
+        if self.preprocessed_vec.is_some() {
+            if self.preprocessed_vec.get_or_insert_default().len() <= self.cur_height {
+                self.cur_height = 0;
+            }
             return Some(self.preprocessed_vec.get_or_insert_default()[self.cur_height - 1]);
         }
 
         //AES
-        let mut output = [0; WEIGHT];
+        let mut output: [usize; WEIGHT] = [0; WEIGHT];
         let step_size = aes::Aes128::block_size() / size_of::<u32>();
         for i in (0..WEIGHT - 3).step_by(step_size) {
             let mut b = Block::from((self.cur_height as u128).to_be_bytes());
             self.aes.encrypt_block(&mut b);
             let b: [u32; 4] = unsafe { transmute(b) };
             for j in 0..step_size {
-                if i + j >= WEIGHT {
-                    break;
-                }
                 output[i + j] = (b[j] as usize) % self.width
             }
         }
@@ -64,7 +64,7 @@ mod tests {
     use super::EACode;
     #[test]
     pub fn test_sanity() {
-        let code = EACode::<5>::new(12, 100, [1; 32]);
+        let code = EACode::<5>::new(12, [1; 32]);
         let mut i = 0;
         for v in code.take(100) {
             i += 1;

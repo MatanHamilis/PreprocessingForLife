@@ -16,6 +16,7 @@ use self::{
 };
 use super::codes::EACode;
 use super::pprf_aggregator::RegularErrorPprfAggregator;
+use super::preprocessor::Preprocessor;
 use crate::fields::GF128;
 use crate::pseudorandom::KEY_SIZE;
 
@@ -27,12 +28,12 @@ pub fn trusted_deal<const PRF_INPUT_BITLEN: usize, const CODE_WEIGHT: usize>(
     puncturing_points: Vec<[bool; PRF_INPUT_BITLEN]>,
     prf_keys: Vec<[u8; KEY_SIZE]>,
 ) -> (
-    OnlineSparseVoleKeyScalar<CODE_WEIGHT>,
-    OnlineSparseVoleKeyVector<CODE_WEIGHT>,
+    OnlineSparseVoleKeyScalar<CODE_WEIGHT, EACode<CODE_WEIGHT>>,
+    OnlineSparseVoleKeyVector<CODE_WEIGHT, EACode<CODE_WEIGHT>>,
 ) {
     // Define Gen State
     let mut scalar_keygen_state =
-        SparseVolePcgScalarKeyGenState::<PRF_INPUT_BITLEN>::new(scalar.clone(), prf_keys);
+        SparseVolePcgScalarKeyGenState::<PRF_INPUT_BITLEN>::new(*scalar, prf_keys);
 
     let mut vector_keygen_state_init =
         SparseVolePcgVectorKeyGenStateInitial::new(puncturing_points);
@@ -51,16 +52,8 @@ pub fn trusted_deal<const PRF_INPUT_BITLEN: usize, const CODE_WEIGHT: usize>(
 
     // Create code
     let code_seed = [0; 32];
-    let scalar_code = EACode::<CODE_WEIGHT>::new(
-        scalar_offline_key.vector_length(),
-        scalar_offline_key.vector_length() / 5,
-        code_seed,
-    );
-    let vector_code = EACode::<CODE_WEIGHT>::new(
-        vector_offline_key.vector_length(),
-        vector_offline_key.vector_length() / 5,
-        code_seed,
-    );
+    let mut scalar_code = EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), code_seed);
+    let mut vector_code = EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), code_seed);
 
     // Create online keys
     let scalar_online_key = scalar_offline_key.provide_online_key(scalar_code);
@@ -74,7 +67,9 @@ pub(crate) mod tests {
         super::scalar_party::OnlineSparseVoleKey as OnlineSparseVoleKeyScalar,
         super::vector_party::OnlineSparseVoleKey as OnlineSparseVoleKeyVector,
     };
+    use super::super::preprocessor::Preprocessor;
     use super::super::KEY_SIZE;
+    use crate::pcg::codes::EACode;
     use crate::pprf::usize_to_bits;
     use crate::{
         fields::{FieldElement, GF128},
@@ -83,7 +78,10 @@ pub(crate) mod tests {
 
     pub(crate) fn get_correlation(
         scalar: &GF128,
-    ) -> (OnlineSparseVoleKeyScalar<10>, OnlineSparseVoleKeyVector<10>) {
+    ) -> (
+        OnlineSparseVoleKeyScalar<10, EACode<10>>,
+        OnlineSparseVoleKeyVector<10, EACode<10>>,
+    ) {
         // Define constants
         const WEIGHT: usize = 128;
         const CODE_WEIGHT: usize = 10;
