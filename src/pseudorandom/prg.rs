@@ -44,23 +44,29 @@ pub fn double_prg(input: &[u8; PRG_KEY_SIZE]) -> ([u8; PRG_KEY_SIZE], [u8; PRG_K
 }
 
 pub fn double_prg_many(input: &[Block], output: &mut [Block]) {
-    const SINGLE_THREAD_THRESH: usize = 1 << 4;
-    let length = std::cmp::min(SINGLE_THREAD_THRESH, input.len());
+    const BLOCK_SIZE: usize = 1 << 4;
+    const SINGLE_THREAD_THRESH: usize = 1 << 14;
+    let length = std::cmp::min(BLOCK_SIZE, input.len());
     output
-        .chunks_mut(2 * SINGLE_THREAD_THRESH)
-        .zip(input.chunks(SINGLE_THREAD_THRESH))
+        .par_chunks_mut(2 * SINGLE_THREAD_THRESH)
+        .zip(input.par_chunks(SINGLE_THREAD_THRESH))
         .for_each(|(output_chunk, input_chunk)| {
-            for i in 0..length {
-                output_chunk[2 * i] = input_chunk[i];
-                output_chunk[2 * i + 1] = input_chunk[i];
-                output_chunk[2 * i + 1][0] = !output_chunk[2 * i + 1][0];
-            }
-            AES.encrypt_blocks(output_chunk);
-            for i in 0..length {
-                xor_arrays(&mut output_chunk[2 * i].into(), &input_chunk[i].into());
-                xor_arrays(&mut output_chunk[2 * i + 1].into(), &input_chunk[i].into());
-                output_chunk[2 * i + 1][0] = !output_chunk[2 * i + 1][0];
-            }
+            output_chunk
+                .chunks_mut(2 * BLOCK_SIZE)
+                .zip(input_chunk.chunks(BLOCK_SIZE))
+                .for_each(|(output_chunk, input_chunk)| {
+                    for i in 0..length {
+                        output_chunk[2 * i] = input_chunk[i];
+                        output_chunk[2 * i + 1] = input_chunk[i];
+                        output_chunk[2 * i + 1][0] = !output_chunk[2 * i + 1][0];
+                    }
+                    AES.encrypt_blocks(output_chunk);
+                    for i in 0..length {
+                        xor_arrays(&mut output_chunk[2 * i].into(), &input_chunk[i].into());
+                        xor_arrays(&mut output_chunk[2 * i + 1].into(), &input_chunk[i].into());
+                        output_chunk[2 * i + 1][0] = !output_chunk[2 * i + 1][0];
+                    }
+                })
         });
 }
 

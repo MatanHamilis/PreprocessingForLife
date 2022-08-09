@@ -36,5 +36,9 @@ harness = false
 name = "circuit_eval"
 harness = false
 
+[[bench]]
+name = "prf"
+harness = false
+
 [profile.bench]
 debug = true

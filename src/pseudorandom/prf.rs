@@ -29,7 +29,7 @@ fn block_vec(size: usize) -> Vec<Block> {
 }
 
 pub fn prf_eval_all_into_slice(key: &[u8; KEY_SIZE], depth: usize, output: &mut [[u8; KEY_SIZE]]) {
-    const SINGLE_THREAD_THRESH: usize = 1 << 14;
+    const SINGLE_THREAD_THRESH: usize = 1 << 10;
     let chunk_size = std::cmp::min(SINGLE_THREAD_THRESH, output.len());
     assert!(output.len() == (1 << depth));
     let mut helper = block_vec(output.len());
@@ -39,12 +39,7 @@ pub fn prf_eval_all_into_slice(key: &[u8; KEY_SIZE], depth: usize, output: &mut 
     let mut cur_to = &mut helper_two;
 
     for i in 0..depth {
-        cur_from[0..1 << i]
-            .par_chunks(SINGLE_THREAD_THRESH)
-            .zip(cur_to[0..1 << (i + 1)].par_chunks_mut(2 * SINGLE_THREAD_THRESH))
-            .for_each(|(from, to)| {
-                double_prg_many(from, to);
-            });
+        double_prg_many(&cur_from[0..1 << i], &mut cur_to[..1 << (i + 1)]);
         (cur_from, cur_to) = (cur_to, cur_from);
     }
     output
