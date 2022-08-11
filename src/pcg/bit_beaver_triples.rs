@@ -1,8 +1,9 @@
-use crate::fields::{FieldElement, GF2};
-
 use super::random_bit_ot::{RandomBitOTReceiverOnlinePCGKey, RandomBitOTSenderOnlinePCGKey};
+use super::random_bit_ot::{ReceiverRandomBitOtPcgItem, SenderRandomBitOtPcgItem};
+use super::random_ot::{RandomOTReceiverOnlinePCGKey, RandomOTSenderOnlinePCGKey};
 use super::sparse_vole::scalar_party::OnlineSparseVoleKey as ScalarPartySparseVoleOnlinePCGKey;
 use super::sparse_vole::vector_party::OnlineSparseVoleKey as VectorPartySparseVoleOnlinePCGKey;
+use crate::fields::{FieldElement, GF2};
 
 #[derive(Debug, Clone, Copy)]
 pub struct BeaverTripletShare<T: FieldElement> {
@@ -12,18 +13,14 @@ pub struct BeaverTripletShare<T: FieldElement> {
 }
 
 #[derive(Debug)]
-pub struct BeaverTripletBitPartyOnlinePCGKey<
-    const CODE_WEIGHT: usize,
-    S: Iterator<Item = [usize; CODE_WEIGHT]>,
-> {
-    ot_receiver_pcg_key: RandomBitOTReceiverOnlinePCGKey<CODE_WEIGHT, S>,
+pub struct BeaverTripletBitPartyOnlinePCGKey<T: Iterator<Item = ReceiverRandomBitOtPcgItem>> {
+    ot_receiver_pcg_key: T,
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
-    From<RandomBitOTReceiverOnlinePCGKey<CODE_WEIGHT, S>>
-    for BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT, S>
+impl<T: Iterator<Item = ReceiverRandomBitOtPcgItem>> From<T>
+    for BeaverTripletBitPartyOnlinePCGKey<T>
 {
-    fn from(ot_receiver_pcg_key: RandomBitOTReceiverOnlinePCGKey<CODE_WEIGHT, S>) -> Self {
+    fn from(ot_receiver_pcg_key: T) -> Self {
         Self {
             ot_receiver_pcg_key,
         }
@@ -32,7 +29,11 @@ impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
 
 impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
     From<VectorPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>
-    for BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT, S>
+    for BeaverTripletBitPartyOnlinePCGKey<
+        RandomBitOTReceiverOnlinePCGKey<
+            RandomOTReceiverOnlinePCGKey<VectorPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>,
+        >,
+    >
 {
     fn from(key: VectorPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>) -> Self {
         Self {
@@ -41,8 +42,8 @@ impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
     }
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> Iterator
-    for BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT, S>
+impl<T: Iterator<Item = ReceiverRandomBitOtPcgItem>> Iterator
+    for BeaverTripletBitPartyOnlinePCGKey<T>
 {
     type Item = BeaverTripletShare<GF2>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -57,25 +58,25 @@ impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> Iterato
 }
 
 #[derive(Debug)]
-pub struct BeaverTripletScalarPartyOnlinePCGKey<
-    const CODE_WEIGHT: usize,
-    S: Iterator<Item = [usize; CODE_WEIGHT]>,
-> {
-    ot_sender_pcg_key: RandomBitOTSenderOnlinePCGKey<CODE_WEIGHT, S>,
+pub struct BeaverTripletScalarPartyOnlinePCGKey<T: Iterator<Item = SenderRandomBitOtPcgItem>> {
+    ot_sender_pcg_key: T,
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
-    From<RandomBitOTSenderOnlinePCGKey<CODE_WEIGHT, S>>
-    for BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT, S>
+impl<T: Iterator<Item = SenderRandomBitOtPcgItem>> From<T>
+    for BeaverTripletScalarPartyOnlinePCGKey<T>
 {
-    fn from(ot_sender_pcg_key: RandomBitOTSenderOnlinePCGKey<CODE_WEIGHT, S>) -> Self {
+    fn from(ot_sender_pcg_key: T) -> Self {
         Self { ot_sender_pcg_key }
     }
 }
 
 impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
     From<ScalarPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>
-    for BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT, S>
+    for BeaverTripletScalarPartyOnlinePCGKey<
+        RandomBitOTSenderOnlinePCGKey<
+            RandomOTSenderOnlinePCGKey<ScalarPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>,
+        >,
+    >
 {
     fn from(key: ScalarPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>) -> Self {
         Self {
@@ -84,8 +85,8 @@ impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
     }
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> Iterator
-    for BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT, S>
+impl<T: Iterator<Item = SenderRandomBitOtPcgItem>> Iterator
+    for BeaverTripletScalarPartyOnlinePCGKey<T>
 {
     type Item = BeaverTripletShare<GF2>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -111,9 +112,9 @@ mod tests {
         let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
         let (scalar_sparse_vole_key, vector_sparse_vole_key) =
             super::super::sparse_vole::tests::get_correlation(&scalar);
-        let scalar_bit_beaver_triplet_online_key: BeaverTripletScalarPartyOnlinePCGKey<10, _> =
+        let scalar_bit_beaver_triplet_online_key: BeaverTripletScalarPartyOnlinePCGKey<_> =
             scalar_sparse_vole_key.into();
-        let vector_bit_beaver_triplet_online_key: BeaverTripletBitPartyOnlinePCGKey<10, _> =
+        let vector_bit_beaver_triplet_online_key: BeaverTripletBitPartyOnlinePCGKey<_> =
             vector_sparse_vole_key.into();
 
         scalar_bit_beaver_triplet_online_key

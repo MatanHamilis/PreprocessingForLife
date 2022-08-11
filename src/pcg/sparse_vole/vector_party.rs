@@ -4,6 +4,7 @@ use super::scalar_party::{ScalarFirstMessage, ScalarSecondMessage};
 use crate::fields::{FieldElement, GF128, GF2};
 use crate::pprf::distributed_generation::{Puncturee, ReceiverFirstMessage};
 use crate::pprf::PuncturedKey;
+pub type PcgItem = (GF2, GF128);
 
 pub struct SparseVolePcgVectorKeyGenStateInitial<const INPUT_BITLEN: usize> {
     puncturing_points: Vec<[bool; INPUT_BITLEN]>,
@@ -17,9 +18,10 @@ pub struct SparseVolePcgVectorKeyGenStateFinal<const INPUT_BITLEN: usize> {
 
 pub type VectorFirstMessage<const INPUT_BITLEN: usize> = Vec<[ReceiverFirstMessage; INPUT_BITLEN]>;
 
+#[derive(Clone)]
 pub struct OfflineSparseVoleKey {
-    accumulated_scalar_vector: Vec<GF128>,
-    accumulated_sparse_subfield_vector: Vec<GF2>,
+    pub(super) accumulated_scalar_vector: Vec<GF128>,
+    pub(super) accumulated_sparse_subfield_vector: Vec<GF2>,
 }
 
 #[derive(Debug)]
@@ -135,7 +137,7 @@ impl OfflineSparseVoleKey {
 impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> Iterator
     for OnlineSparseVoleKey<CODE_WEIGHT, S>
 {
-    type Item = (GF2, GF128);
+    type Item = PcgItem;
     fn next(&mut self) -> Option<Self::Item> {
         self.code.next().map(|v| {
             (

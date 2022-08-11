@@ -1,18 +1,91 @@
+use criterion::BenchmarkId;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use silent_party::fields::GF128;
 use silent_party::pcg::codes::EACode;
 use silent_party::pcg::pprf_aggregator::RegularErrorPprfAggregator;
 use silent_party::pcg::preprocessor::Preprocessor;
+use silent_party::pcg::sparse_vole::packed::SparseVoleScalarPartyPackedOfflineKey;
+use silent_party::pcg::sparse_vole::packed::SparseVoleScalarPartyPackedOnlineKey;
+use silent_party::pcg::sparse_vole::packed::SparseVoleVectorPartyPackedOfflineKey;
+use silent_party::pcg::sparse_vole::packed::SparseVoleVectorPartyPackedOnlineKey;
 use silent_party::pcg::sparse_vole::scalar_party::OfflineSparseVoleKey as ScalarOfflineSparseVoleKey;
 use silent_party::pcg::sparse_vole::scalar_party::SparseVolePcgScalarKeyGenState;
+use silent_party::pcg::sparse_vole::trusted_deal_packed_offline_keys;
 use silent_party::pcg::sparse_vole::vector_party::OfflineSparseVoleKey as VectorOfflineSparseVoleKey;
 use silent_party::pcg::sparse_vole::vector_party::SparseVolePcgVectorKeyGenStateInitial;
 use silent_party::pprf::usize_to_bits;
+use silent_party::pseudorandom::KEY_SIZE;
+
+macro_rules! pack_test {
+    ($group:ident,$pack:literal,$codeseed:ident) => {
+        let p = $pack;
+        $group.bench_with_input(BenchmarkId::from_parameter($pack), &p, |b, p| {
+            let (scalar_offline_key, vector_offline_key) =
+                get_packed_offline_keys::<$pack, 128, 14>();
+            let code_scalar = EACode::<CODE_WEIGHT>::new(scalar_offline_key.len(), $codeseed);
+            let code_vector = EACode::<CODE_WEIGHT>::new(scalar_offline_key.len(), $codeseed);
+            let mut scalar_online_key =
+                SparseVoleScalarPartyPackedOnlineKey::new(code_scalar, scalar_offline_key);
+            b.iter(|| scalar_online_key.next().unwrap());
+            // let mut vector_online_key =
+            //     SparseVoleVectorPartyPackedOnlineKey::new(code_vector, vector_offline_key);
+            // b.iter(|| vector_online_key.next().unwrap());
+        });
+    };
+}
+pub fn get_packed_offline_keys<
+    const PACK: usize,
+    const PRF_KEYS_NUM: usize,
+    const INPUT_BITLEN: usize,
+>() -> (
+    SparseVoleScalarPartyPackedOfflineKey<PACK>,
+    SparseVoleVectorPartyPackedOfflineKey<PACK>,
+) {
+    let scalars = core::array::from_fn(|i| {
+        GF128::from([
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            u8::try_from(i).unwrap(),
+        ])
+    });
+    let puncturing_points: [Vec<[bool; INPUT_BITLEN]>; PACK] = core::array::from_fn(|idx| {
+        (0..PRF_KEYS_NUM)
+            .map(|i| usize_to_bits((i + idx) * (100 + idx)))
+            .collect()
+    });
+    let prf_keys = core::array::from_fn(|idx| {
+        (0..PRF_KEYS_NUM)
+            .map(|num| {
+                let mut output = [0u8; KEY_SIZE];
+                let bits = usize_to_bits::<KEY_SIZE>(num);
+                for (i, b) in bits.iter().enumerate() {
+                    if *b {
+                        output[i] = 1;
+                    }
+                }
+                output
+            })
+            .collect()
+    });
+    trusted_deal_packed_offline_keys(&scalars, puncturing_points, prf_keys)
+}
 
 pub fn get_offline_keys() -> (ScalarOfflineSparseVoleKey, VectorOfflineSparseVoleKey) {
     const PRF_KEYS_NUM: usize = 128;
     const INPUT_BITLEN: usize = 19;
-    const KEY_SIZE: usize = 16;
     let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
     let prf_keys = (0..PRF_KEYS_NUM)
         .map(|num| {
@@ -49,6 +122,22 @@ pub fn get_offline_keys() -> (ScalarOfflineSparseVoleKey, VectorOfflineSparseVol
         vector_keygen_state_final.keygen_offline::<RegularErrorPprfAggregator>();
     (scalar_offline_key, vector_offline_key)
 }
+pub fn packing_pcg(c: &mut Criterion) {
+    let CODE_SEED: [u8; 32] = [0u8; 32];
+    const CODE_WEIGHT: usize = 8;
+    let mut group = c.benchmark_group("packing_pcg");
+    pack_test!(group, 1, CODE_SEED);
+    pack_test!(group, 2, CODE_SEED);
+    pack_test!(group, 4, CODE_SEED);
+    pack_test!(group, 8, CODE_SEED);
+    pack_test!(group, 12, CODE_SEED);
+    pack_test!(group, 16, CODE_SEED);
+    pack_test!(group, 20, CODE_SEED);
+    pack_test!(group, 24, CODE_SEED);
+    pack_test!(group, 28, CODE_SEED);
+    pack_test!(group, 32, CODE_SEED);
+}
+
 pub fn online_pcg(c: &mut Criterion) {
     const CODE_WEIGHT: usize = 8;
     // Create Offline Keys
@@ -134,6 +223,6 @@ pub fn offline_pcg(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = offline_pcg, online_pcg
+    targets = offline_pcg, online_pcg, packing_pcg
 }
 criterion_main!(benches);

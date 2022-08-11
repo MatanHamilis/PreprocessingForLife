@@ -97,9 +97,9 @@ pub fn circuit_eval_bench(c: &mut Criterion) {
         CODE_WEIGHT,
     >(&scalar, puncturing_points, prf_keys);
 
-    let mut beaver_triple_scalar_key: BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT, _> =
+    let mut beaver_triple_scalar_key: BeaverTripletScalarPartyOnlinePCGKey<_> =
         scalar_online_key.into();
-    let mut beaver_triple_vector_key: BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT, _> =
+    let mut beaver_triple_vector_key: BeaverTripletBitPartyOnlinePCGKey<_> =
         vector_online_key.into();
     let (input_a, input_b) = share_inputs(&vec![GF2::zero(); 256]);
     c.bench_function("eval_circuit no preprocessing", |b| {

@@ -1,28 +1,30 @@
-use crate::fields::GF2;
-
-use super::random_ot::{RandomOTReceiverOnlinePCGKey, RandomOTSenderOnlinePCGKey};
+use super::random_ot::{
+    RandomOTReceiverOnlinePCGKey, RandomOTSenderOnlinePCGKey, ReceiverRandomOtPcgItem,
+    SenderRandomOtPcgItem,
+};
 use super::sparse_vole::scalar_party::OnlineSparseVoleKey as OnlineSparseVoleKeyScalar;
 use super::sparse_vole::vector_party::OnlineSparseVoleKey as OnlineSparseVoleKeyVector;
+use crate::fields::GF2;
+
+pub type SenderRandomBitOtPcgItem = (GF2, GF2);
+pub type ReceiverRandomBitOtPcgItem = (GF2, GF2);
+
 #[derive(Debug)]
-pub struct RandomBitOTSenderOnlinePCGKey<
-    const CODE_WEIGHT: usize,
-    S: Iterator<Item = [usize; CODE_WEIGHT]>,
-> {
-    random_ot_pcg_key: RandomOTSenderOnlinePCGKey<CODE_WEIGHT, S>,
+pub struct RandomBitOTSenderOnlinePCGKey<T: Iterator<Item = SenderRandomOtPcgItem>> {
+    random_ot_pcg_key: T,
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
-    From<RandomOTSenderOnlinePCGKey<CODE_WEIGHT, S>>
-    for RandomBitOTSenderOnlinePCGKey<CODE_WEIGHT, S>
-{
-    fn from(random_ot_pcg_key: RandomOTSenderOnlinePCGKey<CODE_WEIGHT, S>) -> Self {
+impl<T: Iterator<Item = SenderRandomOtPcgItem>> From<T> for RandomBitOTSenderOnlinePCGKey<T> {
+    fn from(random_ot_pcg_key: T) -> Self {
         Self { random_ot_pcg_key }
     }
 }
 
 impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
     From<OnlineSparseVoleKeyScalar<CODE_WEIGHT, S>>
-    for RandomBitOTSenderOnlinePCGKey<CODE_WEIGHT, S>
+    for RandomBitOTSenderOnlinePCGKey<
+        RandomOTSenderOnlinePCGKey<OnlineSparseVoleKeyScalar<CODE_WEIGHT, S>>,
+    >
 {
     fn from(key: OnlineSparseVoleKeyScalar<CODE_WEIGHT, S>) -> Self {
         Self {
@@ -31,9 +33,7 @@ impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
     }
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> Iterator
-    for RandomBitOTSenderOnlinePCGKey<CODE_WEIGHT, S>
-{
+impl<T: Iterator<Item = SenderRandomOtPcgItem>> Iterator for RandomBitOTSenderOnlinePCGKey<T> {
     type Item = (GF2, GF2);
     fn next(&mut self) -> Option<Self::Item> {
         let (m_1, m_2) = self.random_ot_pcg_key.next()?;
@@ -41,25 +41,21 @@ impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> Iterato
     }
 }
 #[derive(Debug)]
-pub struct RandomBitOTReceiverOnlinePCGKey<
-    const CODE_WEIGHT: usize,
-    S: Iterator<Item = [usize; CODE_WEIGHT]>,
-> {
-    random_ot_pcg_key: RandomOTReceiverOnlinePCGKey<CODE_WEIGHT, S>,
+pub struct RandomBitOTReceiverOnlinePCGKey<T: Iterator<Item = ReceiverRandomOtPcgItem>> {
+    random_ot_pcg_key: T,
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
-    From<RandomOTReceiverOnlinePCGKey<CODE_WEIGHT, S>>
-    for RandomBitOTReceiverOnlinePCGKey<CODE_WEIGHT, S>
-{
-    fn from(random_ot_pcg_key: RandomOTReceiverOnlinePCGKey<CODE_WEIGHT, S>) -> Self {
+impl<T: Iterator<Item = ReceiverRandomOtPcgItem>> From<T> for RandomBitOTReceiverOnlinePCGKey<T> {
+    fn from(random_ot_pcg_key: T) -> Self {
         Self { random_ot_pcg_key }
     }
 }
 
 impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
     From<OnlineSparseVoleKeyVector<CODE_WEIGHT, S>>
-    for RandomBitOTReceiverOnlinePCGKey<CODE_WEIGHT, S>
+    for RandomBitOTReceiverOnlinePCGKey<
+        RandomOTReceiverOnlinePCGKey<OnlineSparseVoleKeyVector<CODE_WEIGHT, S>>,
+    >
 {
     fn from(key: OnlineSparseVoleKeyVector<CODE_WEIGHT, S>) -> Self {
         Self {
@@ -68,9 +64,7 @@ impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
     }
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> Iterator
-    for RandomBitOTReceiverOnlinePCGKey<CODE_WEIGHT, S>
-{
+impl<T: Iterator<Item = ReceiverRandomOtPcgItem>> Iterator for RandomBitOTReceiverOnlinePCGKey<T> {
     type Item = (GF2, GF2);
     fn next(&mut self) -> Option<Self::Item> {
         let (b, mb) = self.random_ot_pcg_key.next()?;

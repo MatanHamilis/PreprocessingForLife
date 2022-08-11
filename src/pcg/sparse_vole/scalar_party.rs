@@ -4,6 +4,8 @@ use super::vector_party::VectorFirstMessage;
 use crate::fields::{FieldElement, GF128};
 use crate::pprf::distributed_generation::{Puncturer, SenderFirstMessage, SenderSecondMessage};
 
+pub type PcgItem = (GF128, GF128);
+
 pub struct SparseVolePcgScalarKeyGenState<const INPUT_BITLEN: usize> {
     prf_keys: Vec<[u8; KEY_SIZE]>,
     scalar: GF128,
@@ -17,7 +19,7 @@ pub struct OfflineSparseVoleKey {
 
 #[derive(Debug)]
 pub struct OnlineSparseVoleKey<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> {
-    accumulated_vector: Vec<GF128>,
+    pub(super) accumulated_vector: Vec<GF128>,
     code: S,
     index: usize,
     pub scalar: GF128,
@@ -105,13 +107,16 @@ impl OfflineSparseVoleKey {
 impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> Iterator
     for OnlineSparseVoleKey<CODE_WEIGHT, S>
 {
-    type Item = GF128;
+    type Item = PcgItem;
     fn next(&mut self) -> Option<Self::Item> {
         match self.code.next() {
             None => None,
             Some(v) => {
                 self.index += 1;
-                Some(v.iter().map(|idx| self.accumulated_vector[*idx]).sum())
+                Some((
+                    v.iter().map(|idx| self.accumulated_vector[*idx]).sum(),
+                    self.scalar,
+                ))
             }
         }
     }

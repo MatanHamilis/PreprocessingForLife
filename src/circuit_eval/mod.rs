@@ -317,6 +317,7 @@ mod tests {
     use crate::pcg::bit_beaver_triples::{
         BeaverTripletBitPartyOnlinePCGKey, BeaverTripletScalarPartyOnlinePCGKey,
     };
+    use crate::pcg::random_bit_ot::{ReceiverRandomBitOtPcgItem, SenderRandomBitOtPcgItem};
     use crate::pprf::usize_to_bits;
     use crate::pseudorandom::KEY_SIZE;
 
@@ -348,15 +349,14 @@ mod tests {
     }
 
     fn eval_mpc_circuit<
-        const CODE_WEIGHT: usize,
-        S: Iterator<Item = [usize; CODE_WEIGHT]>,
-        T: Iterator<Item = [usize; CODE_WEIGHT]>,
+        S: Iterator<Item = SenderRandomBitOtPcgItem>,
+        T: Iterator<Item = ReceiverRandomBitOtPcgItem>,
     >(
         circuit: &Circuit,
         input_a: &[GF2],
         input_b: &[GF2],
-        beaver_triple_scalar_key: &mut BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT, S>,
-        beaver_triple_vector_key: &mut BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT, T>,
+        beaver_triple_scalar_key: &mut BeaverTripletScalarPartyOnlinePCGKey<S>,
+        beaver_triple_vector_key: &mut BeaverTripletBitPartyOnlinePCGKey<T>,
     ) -> (Vec<GF2>, Vec<GF2>) {
         let mut first_party_session =
             CircuitEvalSessionState::new(&circuit, &input_a, beaver_triple_scalar_key, false);
@@ -440,9 +440,9 @@ mod tests {
             CODE_WEIGHT,
         >(&scalar, puncturing_points, prf_keys);
 
-        let mut beaver_triple_scalar_key: BeaverTripletScalarPartyOnlinePCGKey<CODE_WEIGHT, _> =
+        let mut beaver_triple_scalar_key: BeaverTripletScalarPartyOnlinePCGKey<_> =
             scalar_online_key.into();
-        let mut beaver_triple_vector_key: BeaverTripletBitPartyOnlinePCGKey<CODE_WEIGHT, _> =
+        let mut beaver_triple_vector_key: BeaverTripletBitPartyOnlinePCGKey<_> =
             vector_online_key.into();
 
         let (input_a, input_b) = share_inputs(&vec![GF2::zero(), GF2::zero()]);

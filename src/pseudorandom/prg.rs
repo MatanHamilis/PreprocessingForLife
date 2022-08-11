@@ -45,7 +45,7 @@ pub fn double_prg(input: &[u8; PRG_KEY_SIZE]) -> ([u8; PRG_KEY_SIZE], [u8; PRG_K
 
 pub fn double_prg_many(input: &[Block], output: &mut [Block]) {
     const BLOCK_SIZE: usize = 1 << 4;
-    const SINGLE_THREAD_THRESH: usize = 1 << 14;
+    const SINGLE_THREAD_THRESH: usize = 1 << 10;
     let length = std::cmp::min(BLOCK_SIZE, input.len());
     output
         .par_chunks_mut(2 * SINGLE_THREAD_THRESH)
