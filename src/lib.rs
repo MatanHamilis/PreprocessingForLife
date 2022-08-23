@@ -4,6 +4,7 @@
 
 pub mod circuit_eval;
 pub mod communicator;
+pub mod dpf;
 pub mod fields;
 pub mod non_committing_encryption;
 pub mod ot;

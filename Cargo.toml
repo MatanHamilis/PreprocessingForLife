@@ -40,5 +40,9 @@ harness = false
 name = "prf"
 harness = false
 
+[[bench]]
+name = "dpf"
+harness = false
+
 [profile.bench]
 debug = true
