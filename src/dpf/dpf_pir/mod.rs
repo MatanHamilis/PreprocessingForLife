@@ -1,7 +1,5 @@
-use rayon::iter::{IndexedParallelIterator, ParallelIterator};
-
 use crate::pprf::usize_to_bits;
-use std::simd::{u8x16, u8x64};
+use std::simd::u8x64;
 
 use super::{DpfKey, DPF_KEY_SIZE};
 const BITS_IN_BYTE: usize = 8;
@@ -81,11 +79,9 @@ pub fn inner_prod_simd<const BATCH: usize>(a: &[[u8x64; BATCH]], b: &[u8x64]) ->
 
 #[cfg(test)]
 mod tests {
-    use std::simd::{u8x16, u8x64};
-
     use crate::dpf::dpf_pir::{answer_query_batched, dpf_to_simd_vec, gen_query};
-    use crate::dpf::{DpfKey, DPF_KEY_SIZE};
-    use crate::pprf::usize_to_bits;
+    use crate::dpf::DPF_KEY_SIZE;
+    use std::simd::u8x64;
 
     #[test]
     pub fn test_pir() {
@@ -116,19 +112,5 @@ mod tests {
             ((output_0[array_index][0] ^ output_1[array_index][0])[cell_index] >> bit_index) & 1,
             (db[array_index][cell_index] >> bit_index) & 1
         );
-        // for i in 0..output_0.len() {
-        //     let entry: [u8; DPF_KEY_SIZE] = unsafe {
-        //         std::mem::transmute(
-        //             u8x16::from_array(output_0[i][0]) ^ u8x16::from_array(output_1[i][0]),
-        //         )
-        //     };
-        //     if i != QUERY_OUTPUT_INDEX {
-        //         assert_eq!(entry, [0u8; DPF_KEY_SIZE]);
-        //     } else {
-        //         let mut expected_output = [0u8; DPF_KEY_SIZE];
-        //         expected_output[QUERY_OUTPUT_IN_CELL] = 1 << QUERY_OUTPUT_BIT;
-        //         assert_eq!(entry, expected_output);
-        //     }
-        // }
     }
 }

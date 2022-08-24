@@ -66,6 +66,7 @@ pub fn bench_dpf_gen(g: &mut Criterion) {
     dpf_gen_bench::<20>(g);
 }
 pub fn bench_dpf_evalall(g: &mut Criterion) {
+    dpf_evalall_bench::<18>(g);
     dpf_evalall_bench::<3>(g);
     dpf_evalall_bench::<4>(g);
     dpf_evalall_bench::<5>(g);
@@ -128,7 +129,7 @@ pub fn bench_pir_single<const DPF_DEPTH: usize, const BATCH: usize>(
 pub fn bench_pir(c: &mut Criterion) {
     const LOG_DB_SZ: usize = 33;
     const DB_SZ: usize = 1 << LOG_DB_SZ;
-    const DPF_DEPTH: usize = 9;
+    const DPF_DEPTH: usize = 12;
     const QUERY_INDEX: usize = 257;
     let mut g = c.benchmark_group("pir_batch");
     let db: Vec<_> = (0..(DB_SZ / (std::mem::size_of::<u8x64>() * 8)))
@@ -146,7 +147,7 @@ pub fn bench_pir(c: &mut Criterion) {
     // bench_pir_single::<DPF_DEPTH, 10>(&mut g, &db, QUERY_INDEX);
     bench_pir_single::<DPF_DEPTH, 16>(&mut g, &db, QUERY_INDEX);
     bench_pir_single::<DPF_DEPTH, 32>(&mut g, &db, QUERY_INDEX);
-    bench_pir_single::<DPF_DEPTH, 64>(&mut g, &db, QUERY_INDEX);
+    // bench_pir_single::<DPF_DEPTH, 64>(&mut g, &db, QUERY_INDEX);
     g.finish();
 }
 

@@ -1,7 +1,18 @@
+use std::u8;
+
+use aes::{
+    cipher::{BlockEncrypt, KeyInit},
+    Aes128,
+};
+use once_cell::sync::Lazy;
+
 use crate::{pseudorandom::double_prg, xor_arrays};
 
 pub mod dpf_pir;
 pub const DPF_KEY_SIZE: usize = 16;
+
+const DPF_AES_KEY: [u8; DPF_KEY_SIZE] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1, 2];
+static AES: Lazy<Aes128> = Lazy::new(|| Aes128::new_from_slice(&DPF_AES_KEY).unwrap());
 
 #[derive(Default, Clone, Copy)]
 pub struct CorrectionWord {
@@ -17,16 +28,21 @@ pub struct DpfKey<const DEPTH: usize> {
 }
 
 fn expand_seed(seed: &[u8; DPF_KEY_SIZE]) -> ([u8; DPF_KEY_SIZE], bool, [u8; DPF_KEY_SIZE], bool) {
-    let (scw_0, seed_2) = double_prg(&seed);
-    let (scw_1, toggle_bits) = double_prg(&seed_2);
-    (
-        scw_0,
-        toggle_bits[0] & 1 == 0,
-        scw_1,
-        toggle_bits[0] & 2 == 0,
-    )
+    let (mut scw_0, mut scw_1) = double_prg(&seed);
+    let toggle_bit_0 = scw_0[0] & 1;
+    let toggle_bit_1 = scw_1[0] & 1;
+    scw_0[0] &= (u8::MAX - 1);
+    scw_1[0] &= (u8::MAX - 1);
+    (scw_0, toggle_bit_0 == 0, scw_1, toggle_bit_1 == 0)
+}
+fn into_block(mut s: &mut [u8; DPF_KEY_SIZE]) {
+    AES.encrypt_block(s.into());
 }
 
+fn into_blocks(mut s: &mut [[u8; DPF_KEY_SIZE]]) {
+    let mut s = unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr().cast(), s.len()) };
+    AES.encrypt_blocks(s);
+}
 impl<const DEPTH: usize> DpfKey<DEPTH> {
     pub fn gen(
         hiding_point: &[bool; DEPTH],
@@ -69,6 +85,8 @@ impl<const DEPTH: usize> DpfKey<DEPTH> {
             }
         }
         let mut last_correction = *point_val;
+        into_block(&mut cw_0);
+        into_block(&mut cw_1);
         xor_arrays(&mut last_correction, &cw_0);
         xor_arrays(&mut last_correction, &cw_1);
         (
@@ -107,6 +125,7 @@ impl<const DEPTH: usize> DpfKey<DEPTH> {
             };
             t = t_next;
         }
+        into_block(&mut s);
         if t {
             xor_arrays(&mut s, &self.last_correction);
         }
@@ -132,6 +151,7 @@ impl<const DEPTH: usize> DpfKey<DEPTH> {
                 aux[2 * j + 1] = t_r;
             }
         }
+        into_blocks(output);
         for i in 0..1 << DEPTH {
             if aux[i] {
                 xor_arrays(&mut output[i], &self.last_correction);
