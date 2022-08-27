@@ -6,8 +6,8 @@ use std::{
 };
 
 use criterion::{
-    criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, BenchmarkId, Criterion,
-    PlotConfiguration, Throughput,
+    black_box, criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, BenchmarkId,
+    Criterion, PlotConfiguration, Throughput,
 };
 use silent_party::dpf::{
     dpf_pir::{answer_query_batched, dpf_to_simd_vec, gen_query},
@@ -66,7 +66,6 @@ pub fn bench_dpf_gen(g: &mut Criterion) {
     dpf_gen_bench::<20>(g);
 }
 pub fn bench_dpf_evalall(g: &mut Criterion) {
-    dpf_evalall_bench::<18>(g);
     dpf_evalall_bench::<3>(g);
     dpf_evalall_bench::<4>(g);
     dpf_evalall_bench::<5>(g);
@@ -137,17 +136,10 @@ pub fn bench_pir(c: &mut Criterion) {
         .collect();
     bench_pir_single::<DPF_DEPTH, 1>(&mut g, &db, QUERY_INDEX);
     bench_pir_single::<DPF_DEPTH, 2>(&mut g, &db, QUERY_INDEX);
-    // bench_pir_single::<DPF_DEPTH, 3>(&mut g, &db, QUERY_INDEX);
     bench_pir_single::<DPF_DEPTH, 4>(&mut g, &db, QUERY_INDEX);
-    // bench_pir_single::<DPF_DEPTH, 5>(&mut g, &db, QUERY_INDEX);
-    // bench_pir_single::<DPF_DEPTH, 6>(&mut g, &db, QUERY_INDEX);
-    // bench_pir_single::<DPF_DEPTH, 7>(&mut g, &db, QUERY_INDEX);
     bench_pir_single::<DPF_DEPTH, 8>(&mut g, &db, QUERY_INDEX);
-    // bench_pir_single::<DPF_DEPTH, 9>(&mut g, &db, QUERY_INDEX);
-    // bench_pir_single::<DPF_DEPTH, 10>(&mut g, &db, QUERY_INDEX);
     bench_pir_single::<DPF_DEPTH, 16>(&mut g, &db, QUERY_INDEX);
     bench_pir_single::<DPF_DEPTH, 32>(&mut g, &db, QUERY_INDEX);
-    // bench_pir_single::<DPF_DEPTH, 64>(&mut g, &db, QUERY_INDEX);
     g.finish();
 }
 
@@ -160,21 +152,43 @@ pub fn bench_mem_xor(c: &mut Criterion) {
     g.bench_function("mem_xor", |b| {
         b.iter(|| {
             let mut sum = u8x64::default();
-            for i in 0..db.len() / 8 {
-                let a = db[8 * i] ^ db[8 * i + 1];
-                let b = db[8 * i + 2] ^ db[8 * i + 3];
-                let c = db[8 * i + 4] ^ db[8 * i + 5];
-                let d = db[8 * i + 6] ^ db[8 * i + 7];
-                sum ^= a ^ b ^ c ^ d;
+            for i in 0..db.len() {
+                sum ^= db[i]
             }
+        });
+    });
+}
+pub fn bench_mem_xor_with_stride(c: &mut Criterion) {
+    let mut g = c.benchmark_group("mem_xor_with_stride");
+    const LOG_DB_SZ: usize = 30;
+    const DB_SZ: usize = 1 << LOG_DB_SZ;
+    // let db = vec![0u8; DB_SZ];
+    let db: Vec<u8> = (0..DB_SZ).map(|i| i as u8).collect();
+    g.bench_function(BenchmarkId::from_parameter(0), |b| {
+        b.iter(|| {
+            let sum = db.iter().fold(0u8, |acc, cur| acc ^ cur);
+            black_box(sum);
         })
     });
+
+    for log_stride in 4..=17 {
+        let stride = 1 << log_stride;
+        g.bench_with_input(BenchmarkId::from_parameter(log_stride), &stride, |b, s| {
+            b.iter(|| {
+                for chunk in db.chunks(stride).step_by(2) {
+                    let sum = chunk.iter().fold(0u8, |acc, cur| acc ^ cur);
+                    black_box(sum);
+                }
+            });
+        });
+    }
 }
 criterion_group!(
     benches,
     bench_dpf_gen,
     bench_dpf_evalall,
     bench_pir,
-    bench_mem_xor
+    bench_mem_xor,
+    bench_mem_xor_with_stride
 );
 criterion_main!(benches);
