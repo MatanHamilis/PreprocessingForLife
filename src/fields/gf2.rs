@@ -2,12 +2,15 @@ use super::FieldElement;
 use rand_core::{CryptoRng, RngCore};
 use std::{
     iter::Sum,
-    ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+    ops::{
+        Add, AddAssign, BitAnd, BitAndAssign, BitXor, BitXorAssign, Div, DivAssign, Mul, MulAssign,
+        Neg, Sub, SubAssign,
+    },
 };
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
 pub struct GF2 {
-    v: bool,
+    v: u8,
 }
 
 impl GF2 {
@@ -20,6 +23,32 @@ impl GF2 {
 
     pub fn random_not_cryptographic<T: RngCore>(rng: &mut T) -> Self {
         GF2::from(rng.next_u32() & 1 == 0)
+    }
+}
+
+impl BitAnd for GF2 {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self::Output {
+        self * rhs
+    }
+}
+
+impl BitAndAssign for GF2 {
+    fn bitand_assign(&mut self, rhs: Self) {
+        *self *= rhs;
+    }
+}
+
+impl BitXor for GF2 {
+    type Output = Self;
+    fn bitxor(self, rhs: Self) -> Self::Output {
+        self + rhs
+    }
+}
+
+impl BitXorAssign for GF2 {
+    fn bitxor_assign(&mut self, rhs: Self) {
+        *self += rhs;
     }
 }
 
@@ -39,7 +68,7 @@ impl FieldElement for GF2 {
     }
 
     fn is_one(&self) -> bool {
-        self.v
+        self.v == 1u8
     }
 
     fn zero() -> Self {
@@ -47,7 +76,7 @@ impl FieldElement for GF2 {
     }
 
     fn is_zero(&self) -> bool {
-        !self.v
+        self.v == 0
     }
 }
 
@@ -60,7 +89,10 @@ impl Neg for GF2 {
 
 impl From<bool> for GF2 {
     fn from(v: bool) -> Self {
-        Self { v }
+        match v {
+            true => GF2::one(),
+            _ => GF2::zero(),
+        }
     }
 }
 
@@ -80,7 +112,7 @@ impl SubAssign for GF2 {
 impl Mul for GF2 {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self::Output {
-        GF2::from(self.v && rhs.v)
+        GF2::from((self.v & rhs.v) == 0)
     }
 }
 
@@ -93,7 +125,7 @@ impl MulAssign for GF2 {
 impl Add for GF2 {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
-        GF2::from(self.v ^ rhs.v)
+        GF2::from(self.v ^ rhs.v == 0)
     }
 }
 
@@ -106,13 +138,30 @@ impl AddAssign for GF2 {
 impl Div for GF2 {
     type Output = Self;
     fn div(self, rhs: Self) -> Self::Output {
-        assert!(rhs.v);
+        assert!(rhs.v != 0);
         self
     }
 }
 
 impl DivAssign for GF2 {
     fn div_assign(&mut self, rhs: Self) {
-        assert!(rhs.v);
+        assert!(rhs.v != 0);
+    }
+}
+
+impl TryFrom<u8> for GF2 {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        if value > 1 {
+            Err(())
+        } else {
+            Ok(Self { v: value })
+        }
+    }
+}
+
+impl From<GF2> for u8 {
+    fn from(v: GF2) -> Self {
+        v.v
     }
 }
