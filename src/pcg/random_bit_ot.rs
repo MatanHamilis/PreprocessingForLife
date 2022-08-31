@@ -2,12 +2,8 @@ use super::random_ot::{
     RandomOTReceiverOnlinePCGKey, RandomOTSenderOnlinePCGKey, ReceiverRandomOtPcgItem,
     SenderRandomOtPcgItem,
 };
-use super::sparse_vole::scalar_party::{
-    OnlineSparseVoleKey as OnlineSparseVoleKeyScalar, PcgItem as PcgItemScalar,
-};
-use super::sparse_vole::vector_party::{
-    OnlineSparseVoleKey as OnlineSparseVoleKeyVector, PcgItem as PcgItemVector,
-};
+use super::sparse_vole::scalar_party::PcgItem as PcgItemScalar;
+use super::sparse_vole::vector_party::PcgItem as PcgItemVector;
 use crate::fields::GF2;
 
 pub type SenderRandomBitOtPcgItem = (GF2, GF2);

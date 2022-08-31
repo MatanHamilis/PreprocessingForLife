@@ -31,16 +31,16 @@ fn expand_seed(seed: &[u8; DPF_KEY_SIZE]) -> ([u8; DPF_KEY_SIZE], bool, [u8; DPF
     let (mut scw_0, mut scw_1) = double_prg(&seed);
     let toggle_bit_0 = scw_0[0] & 1;
     let toggle_bit_1 = scw_1[0] & 1;
-    scw_0[0] &= (u8::MAX - 1);
-    scw_1[0] &= (u8::MAX - 1);
+    scw_0[0] &= u8::MAX - 1;
+    scw_1[0] &= u8::MAX - 1;
     (scw_0, toggle_bit_0 == 0, scw_1, toggle_bit_1 == 0)
 }
-fn into_block(mut s: &mut [u8; DPF_KEY_SIZE]) {
+fn into_block(s: &mut [u8; DPF_KEY_SIZE]) {
     AES.encrypt_block(s.into());
 }
 
-fn into_blocks(mut s: &mut [[u8; DPF_KEY_SIZE]]) {
-    let mut s = unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr().cast(), s.len()) };
+fn into_blocks(s: &mut [[u8; DPF_KEY_SIZE]]) {
+    let s = unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr().cast(), s.len()) };
     AES.encrypt_blocks(s);
 }
 impl<const DEPTH: usize> DpfKey<DEPTH> {
@@ -52,11 +52,11 @@ impl<const DEPTH: usize> DpfKey<DEPTH> {
     ) -> (DpfKey<DEPTH>, DpfKey<DEPTH>) {
         let mut correction = [CorrectionWord::default(); DEPTH];
         let mut toggle_0 = false;
-        let mut toggle_1 = true;
+        let mut toggle_1 = false;
         let mut cw_0 = dpf_root_0;
         let mut cw_1 = dpf_root_1;
         for i in 0..DEPTH {
-            let (mut s_0_l, t_0_l, mut s_0_r, t_0_r) = expand_seed(&cw_0);
+            let (s_0_l, t_0_l, s_0_r, t_0_r) = expand_seed(&cw_0);
             let (s_1_l, t_1_l, s_1_r, t_1_r) = expand_seed(&cw_1);
             let (mut s_0_lose, s_1_lose, mut s_0_keep, mut s_1_keep, t_0_keep, t_1_keep) =
                 if hiding_point[i] {

@@ -15,7 +15,7 @@ pub struct GF2 {
 
 impl GF2 {
     pub fn flip(&mut self) {
-        self.v = !self.v;
+        self.v ^= 1;
     }
     pub fn random<T: CryptoRng + RngCore>(rng: &mut T) -> Self {
         GF2::from(rng.next_u32() & 1 == 0)
@@ -64,7 +64,7 @@ impl Sum for GF2 {
 }
 impl FieldElement for GF2 {
     fn one() -> Self {
-        GF2::from(true)
+        Self { v: 1u8 }
     }
 
     fn is_one(&self) -> bool {
@@ -72,7 +72,7 @@ impl FieldElement for GF2 {
     }
 
     fn zero() -> Self {
-        GF2::from(false)
+        Self { v: 0u8 }
     }
 
     fn is_zero(&self) -> bool {
@@ -112,7 +112,7 @@ impl SubAssign for GF2 {
 impl Mul for GF2 {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self::Output {
-        GF2::from((self.v & rhs.v) == 0)
+        Self { v: self.v & rhs.v }
     }
 }
 
@@ -125,7 +125,7 @@ impl MulAssign for GF2 {
 impl Add for GF2 {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
-        GF2::from(self.v ^ rhs.v == 0)
+        Self { v: self.v ^ rhs.v }
     }
 }
 

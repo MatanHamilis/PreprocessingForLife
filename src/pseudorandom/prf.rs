@@ -1,14 +1,10 @@
-use std::mem::transmute;
-
-use crate::pseudorandom::prg::double_prg_many_inplace;
-
 use super::double_prg;
 use super::double_prg_many;
 use super::KEY_SIZE;
 #[cfg(feature = "aesni")]
 use aes::Block;
-use blake3::KEY_LEN;
 use rayon::prelude::*;
+use std::mem::transmute;
 pub fn prf_eval(key: [u8; KEY_SIZE], input: &[bool]) -> [u8; KEY_SIZE] {
     input.iter().fold(key, |prf_out, &input_bit| {
         let prg_out = double_prg(&prf_out);

@@ -4,10 +4,7 @@ use super::scalar_party::{
 use super::vector_party::{
     OfflineSparseVoleKey as VectorPartyOfflineKey, PcgItem as VectorPcgItem,
 };
-use crate::{
-    fields::{FieldElement, GF128, GF2},
-    pcg::codes::EACode,
-};
+use crate::fields::{FieldElement, GF128, GF2};
 
 pub struct SparseVoleScalarPartyPackedOfflineKey<const PACK: usize> {
     accumulated_vector: Vec<[GF128; PACK]>,
@@ -29,7 +26,7 @@ impl<const PACK: usize> SparseVoleScalarPartyPackedOfflineKey<PACK> {
             );
         }
 
-        let mut accumulated_vector: Vec<[GF128; PACK]> = (0..accumulated_vector_len)
+        let accumulated_vector: Vec<[GF128; PACK]> = (0..accumulated_vector_len)
             .into_iter()
             .map(|idx| {
                 core::array::from_fn(|key_idx| offline_keys[key_idx].accumulated_vector[idx])
@@ -113,7 +110,7 @@ impl<const PACK: usize> SparseVoleVectorPartyPackedOfflineKey<PACK> {
             );
         }
 
-        let mut accumulated_vector: Vec<[(GF2, GF128); PACK]> = (0..accumulated_vector_len)
+        let accumulated_vector: Vec<[(GF2, GF128); PACK]> = (0..accumulated_vector_len)
             .into_iter()
             .map(|idx| {
                 core::array::from_fn(|key_idx| {

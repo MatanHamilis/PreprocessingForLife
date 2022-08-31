@@ -3,7 +3,6 @@ use std::mem::size_of;
 use aes::cipher::{BlockEncrypt, BlockSizeUser, KeyInit};
 use aes::{Aes128, Block};
 use core::mem::transmute;
-use rand::{Fill, SeedableRng};
 
 #[derive(Debug)]
 pub struct EACode<const WEIGHT: usize> {

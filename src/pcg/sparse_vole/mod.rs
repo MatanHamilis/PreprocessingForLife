@@ -8,10 +8,7 @@
 //! In other words, the ScalarParty sums $PRF(i)$ for all $i$ in the input domain of the PRF in a value $s$ and sends $(s+x)\in \mathbb{F}_{2^128}$ to the VectorParty$.
 //! By subtracting from the value it received the sum of all points in the PPRF, the VectorParty can obtain the $p+x$ where $p$ is the value of the PRF at the puncturing point.
 
-use self::packed::{
-    SparseVoleScalarPartyPackedOfflineKey, SparseVoleScalarPartyPackedOnlineKey,
-    SparseVoleVectorPartyPackedOfflineKey, SparseVoleVectorPartyPackedOnlineKey,
-};
+use self::packed::{SparseVoleScalarPartyPackedOfflineKey, SparseVoleVectorPartyPackedOfflineKey};
 use self::scalar_party::{
     OfflineSparseVoleKey as ScalarSparseVoleOfflineKey, SparseVolePcgScalarKeyGenState,
 };
@@ -61,8 +58,8 @@ pub fn trusted_deal<const PRF_INPUT_BITLEN: usize, const CODE_WEIGHT: usize>(
 
     // Create code
     let code_seed = [0; 32];
-    let mut scalar_code = EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), code_seed);
-    let mut vector_code = EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), code_seed);
+    let scalar_code = EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), code_seed);
+    let vector_code = EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), code_seed);
 
     // Create online keys
     let scalar_online_key = scalar_offline_key.provide_online_key(scalar_code);
@@ -115,7 +112,6 @@ pub fn trusted_deal_packed_offline_keys<const PACK: usize, const PRF_INPUT_BITLE
             },
         );
 
-    let p = std::ptr::addr_of!(scalar_keys);
     (
         SparseVoleScalarPartyPackedOfflineKey::new(unsafe {
             scalar_keys
