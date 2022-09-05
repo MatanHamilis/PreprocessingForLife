@@ -16,6 +16,10 @@ pub fn double_prg_many_bench(c: &mut Criterion) {
             });
         }
     }
+
+    c.bench_function("double_prg_small_array", |b| {
+        b.iter(|| double_prg_many(&blocks_a[0..8], &mut blocks_b[0..16]))
+    });
 }
 
 criterion_group!(benches, double_prg_many_bench);

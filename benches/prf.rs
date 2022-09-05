@@ -6,7 +6,7 @@ pub fn bench_prf(c: &mut Criterion) {
     let prf_key = [0u8; KEY_SIZE];
 
     const MAX_RANGE: usize = 20;
-    const MIN_RANGE: usize = 8;
+    const MIN_RANGE: usize = 19;
     let mut output = vec![[0u8; KEY_SIZE]; 1 << MAX_RANGE];
     for i in MIN_RANGE..=MAX_RANGE {
         c.bench_with_input(BenchmarkId::new("prf_eval", i), &i, |b, &s| {

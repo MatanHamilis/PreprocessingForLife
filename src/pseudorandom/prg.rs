@@ -5,7 +5,6 @@ use aes::{
     Aes128, Block,
 };
 use once_cell::sync::Lazy;
-use rayon::prelude::*;
 pub const PRG_KEY_SIZE: usize = 16;
 
 #[cfg(not(feature = "aesni"))]
@@ -48,8 +47,8 @@ pub fn double_prg_many(input: &[Block], output: &mut [Block]) {
     const SINGLE_THREAD_THRESH: usize = 1 << 10;
     let length = std::cmp::min(BLOCK_SIZE, input.len());
     output
-        .par_chunks_mut(2 * SINGLE_THREAD_THRESH)
-        .zip(input.par_chunks(SINGLE_THREAD_THRESH))
+        .chunks_mut(2 * SINGLE_THREAD_THRESH)
+        .zip(input.chunks(SINGLE_THREAD_THRESH))
         .for_each(|(output_chunk, input_chunk)| {
             output_chunk
                 .chunks_mut(2 * BLOCK_SIZE)

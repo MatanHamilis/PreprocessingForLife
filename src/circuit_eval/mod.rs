@@ -1,6 +1,9 @@
 pub mod bristol_fashion;
 
+use std::io::{Read, Write};
+
 use crate::{
+    communicator::Communicator,
     fields::{FieldElement, GF2},
     pcg::bit_beaver_triples::BeaverTripletShare,
 };
@@ -308,6 +311,42 @@ impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionWaitingT
     }
 }
 
+pub fn eval_circuit<C: Read + Write, T: Iterator<Item = BeaverTripletShare<GF2>>>(
+    circuit: &Circuit,
+    (mut my_input, peer_input): (Vec<GF2>, Vec<GF2>),
+    correlations: T,
+    communicator: &mut Communicator<C>,
+    is_first: bool,
+) -> Result<Vec<GF2>, ()> {
+    assert_eq!(my_input.len(), peer_input.len());
+    let mut received_input = communicator.exchange(peer_input).ok_or(())?;
+    if is_first {
+        my_input.append(&mut received_input);
+    } else {
+        received_input.append(&mut my_input);
+        my_input = received_input;
+    }
+    let mut session = CircuitEvalSessionState::new(circuit, &my_input[..], correlations, is_first);
+    let party_output = loop {
+        let (session_temp, queries_to_send) = match session {
+            CircuitEvalSessionState::WaitingToSend(session) => session.fetch_layer_messages(),
+            _ => panic!(),
+        };
+        session = session_temp;
+        let queries_received = communicator.exchange(queries_to_send).ok_or(())?;
+        session = match session {
+            CircuitEvalSessionState::WaitingToReceive(session) => {
+                session.handle_layer_responses(queries_received)
+            }
+            _ => panic!(),
+        };
+        if let CircuitEvalSessionState::Finished(party_output) = session {
+            break party_output;
+        }
+    };
+    Ok(party_output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::bristol_fashion::parse_bristol;
@@ -431,7 +470,7 @@ mod tests {
         // Test MPC eval.
         const WEIGHT: u8 = 10;
         const INPUT_BITLEN: usize = 3;
-        const CODE_WEIGHT: usize = 7;
+        const CODE_WEIGHT: usize = 8;
         let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
         let prf_keys = get_prf_keys(WEIGHT);
         let puncturing_points: Vec<[bool; INPUT_BITLEN]> = get_puncturing_points(WEIGHT);

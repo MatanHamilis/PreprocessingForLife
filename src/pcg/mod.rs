@@ -1,5 +1,6 @@
 pub mod bit_beaver_triples;
 pub mod codes;
+pub mod packed_random_bit_ot;
 pub mod pprf_aggregator;
 pub mod preprocessor;
 pub mod random_bit_ot;

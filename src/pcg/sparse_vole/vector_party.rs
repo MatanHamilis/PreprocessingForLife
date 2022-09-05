@@ -20,14 +20,17 @@ pub type VectorFirstMessage<const INPUT_BITLEN: usize> = Vec<[ReceiverFirstMessa
 
 #[derive(Clone)]
 pub struct OfflineSparseVoleKey {
-    pub(super) accumulated_scalar_vector: Vec<GF128>,
-    pub(super) accumulated_sparse_subfield_vector: Vec<GF2>,
+    pub(super) accumulated_scalar_vector: Vec<(GF2, GF128)>,
+    // pub(super) accumulated_sparse_subfield_vector: Vec<GF2>,
 }
 
 #[derive(Debug)]
-pub struct OnlineSparseVoleKey<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> {
-    accumulated_scalar_vector: Vec<GF128>,
-    accumulated_sparse_subfield_vector: Vec<GF2>,
+pub struct OnlineSparseVoleKey<
+    const CODE_WEIGHT: usize,
+    S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>,
+> {
+    accumulated_scalar_vector: Vec<(GF2, GF128)>,
+    // accumulated_sparse_subfield_vector: Vec<GF2>,
     code: S,
 }
 
@@ -77,15 +80,17 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgVectorKeyGenStateInitial<INPUT_BITL
 
 impl<const INPUT_BITLEN: usize> SparseVolePcgVectorKeyGenStateFinal<INPUT_BITLEN> {
     pub fn keygen_offline<T: PprfAggregator>(&self) -> OfflineSparseVoleKey {
-        let (accumulated_scalar_vector, mut numeric_puncturing_points) = T::aggregate_punctured(
+        let (mut accumulated_scalar_vector, mut numeric_puncturing_points) = T::aggregate_punctured(
             &self.pprf_keys,
             &self.puncturing_points,
             &self.punctured_values,
         );
 
+        let mut accumulated_scalar_vector: Vec<(GF2, GF128)> = accumulated_scalar_vector
+            .into_iter()
+            .map(|i| (GF2::zero(), i))
+            .collect();
         numeric_puncturing_points.sort_unstable();
-        let mut accumulated_sparse_subfield_vector =
-            vec![GF2::zero(); accumulated_scalar_vector.len()];
         (0..numeric_puncturing_points.len())
             .step_by(2)
             .for_each(|i| {
@@ -93,24 +98,17 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgVectorKeyGenStateFinal<INPUT_BITLEN
                 let end_index = *numeric_puncturing_points
                     .get(i + 1)
                     .unwrap_or(&(1 << INPUT_BITLEN));
-                for item in accumulated_sparse_subfield_vector
+                for item in accumulated_scalar_vector
                     .iter_mut()
                     .take(end_index)
                     .skip(starting_index)
                 {
-                    *item = GF2::one();
+                    item.0 = GF2::one();
                 }
             });
-        let mut sum = GF128::zero();
         OfflineSparseVoleKey {
-            accumulated_scalar_vector: accumulated_scalar_vector
-                .into_iter()
-                .map(|e| {
-                    sum += GF128::from(e);
-                    sum
-                })
-                .collect(),
-            accumulated_sparse_subfield_vector,
+            accumulated_scalar_vector,
+            // accumulated_sparse_subfield_vector,
         }
     }
 }
@@ -118,14 +116,14 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgVectorKeyGenStateFinal<INPUT_BITLEN
 impl OfflineSparseVoleKey {
     pub fn provide_online_key<
         const CODE_WEIGHT: usize,
-        S: Iterator<Item = [usize; CODE_WEIGHT]>,
+        S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>,
     >(
         self,
         code: S,
     ) -> OnlineSparseVoleKey<CODE_WEIGHT, S> {
         OnlineSparseVoleKey {
             accumulated_scalar_vector: self.accumulated_scalar_vector,
-            accumulated_sparse_subfield_vector: self.accumulated_sparse_subfield_vector,
+            // accumulated_sparse_subfield_vector: self.accumulated_sparse_subfield_vector,
             code,
         }
     }
@@ -134,20 +132,27 @@ impl OfflineSparseVoleKey {
     }
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> Iterator
+impl<const CODE_WEIGHT: usize, S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>> Iterator
     for OnlineSparseVoleKey<CODE_WEIGHT, S>
 {
     type Item = PcgItem;
     fn next(&mut self) -> Option<Self::Item> {
         self.code.next().map(|v| {
-            (
-                v.iter()
-                    .map(|idx| self.accumulated_sparse_subfield_vector[*idx])
-                    .sum(),
-                v.iter()
-                    .map(|idx| self.accumulated_scalar_vector[*idx])
-                    .sum(),
-            )
+            v.iter()
+                .map(|idxs| {
+                    (
+                        self.accumulated_scalar_vector[idxs[0] as usize],
+                        self.accumulated_scalar_vector[idxs[1] as usize],
+                        self.accumulated_scalar_vector[idxs[2] as usize],
+                        self.accumulated_scalar_vector[idxs[3] as usize],
+                    )
+                })
+                .fold((GF2::zero(), GF128::zero()), |acc, cur| {
+                    (
+                        acc.0 + cur.0 .0 + cur.1 .0 + cur.2 .0 + cur.3 .0,
+                        acc.1 + cur.0 .1 + cur.1 .1 + cur.2 .1 + cur.3 .1,
+                    )
+                })
         })
     }
 }

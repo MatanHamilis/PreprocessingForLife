@@ -43,7 +43,7 @@ impl<const PACK: usize> SparseVoleScalarPartyPackedOfflineKey<PACK> {
 pub struct SparseVoleScalarPartyPackedOnlineKey<
     const PACK: usize,
     const CODE_WEIGHT: usize,
-    S: Iterator<Item = [usize; CODE_WEIGHT]>,
+    S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>,
 > {
     accumulated_vector: Vec<[GF128; PACK]>,
     scalars: [GF128; PACK],
@@ -52,7 +52,7 @@ pub struct SparseVoleScalarPartyPackedOnlineKey<
     cache_index: usize,
 }
 
-impl<const PACK: usize, const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
+impl<const PACK: usize, const CODE_WEIGHT: usize, S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>>
     SparseVoleScalarPartyPackedOnlineKey<PACK, CODE_WEIGHT, S>
 {
     pub fn new(code: S, offline_key: SparseVoleScalarPartyPackedOfflineKey<PACK>) -> Self {
@@ -66,13 +66,13 @@ impl<const PACK: usize, const CODE_WEIGHT: usize, S: Iterator<Item = [usize; COD
     }
 }
 
-impl<const PACK: usize, const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> Iterator
-    for SparseVoleScalarPartyPackedOnlineKey<PACK, CODE_WEIGHT, S>
+impl<const PACK: usize, const CODE_WEIGHT: usize, S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>>
+    Iterator for SparseVoleScalarPartyPackedOnlineKey<PACK, CODE_WEIGHT, S>
 {
     type Item = ScalarPcgItem;
     fn next(&mut self) -> Option<Self::Item> {
         if self.cache_index == 0 {
-            let code_idxs: [usize; CODE_WEIGHT] = match self.code.next() {
+            let code_idxs: [[u32; 4]; CODE_WEIGHT] = match self.code.next() {
                 None => {
                     return None;
                 }
@@ -80,7 +80,13 @@ impl<const PACK: usize, const CODE_WEIGHT: usize, S: Iterator<Item = [usize; COD
             };
             let sums = code_idxs
                 .into_iter()
-                .map(|idx| self.accumulated_vector[idx])
+                .map(|idxs| {
+                    idxs.into_iter()
+                        .map(|i| self.accumulated_vector[i as usize])
+                        .fold([GF128::default(); PACK], |acc, cur| {
+                            core::array::from_fn(|idx| acc[idx] + cur[idx])
+                        })
+                })
                 .fold([GF128::zero(); PACK], |acc, cur| {
                     core::array::from_fn(|arr_idx| acc[arr_idx] + cur[arr_idx])
                 });
@@ -113,12 +119,7 @@ impl<const PACK: usize> SparseVoleVectorPartyPackedOfflineKey<PACK> {
         let accumulated_vector: Vec<[(GF2, GF128); PACK]> = (0..accumulated_vector_len)
             .into_iter()
             .map(|idx| {
-                core::array::from_fn(|key_idx| {
-                    (
-                        offline_keys[key_idx].accumulated_sparse_subfield_vector[idx],
-                        offline_keys[key_idx].accumulated_scalar_vector[idx],
-                    )
-                })
+                core::array::from_fn(|key_idx| offline_keys[key_idx].accumulated_scalar_vector[idx])
             })
             .collect();
 
@@ -129,7 +130,7 @@ impl<const PACK: usize> SparseVoleVectorPartyPackedOfflineKey<PACK> {
 pub struct SparseVoleVectorPartyPackedOnlineKey<
     const PACK: usize,
     const CODE_WEIGHT: usize,
-    S: Iterator<Item = [usize; CODE_WEIGHT]>,
+    S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>,
 > {
     accumulated_vector: Vec<[(GF2, GF128); PACK]>,
     code: S,
@@ -137,7 +138,7 @@ pub struct SparseVoleVectorPartyPackedOnlineKey<
     cache_index: usize,
 }
 
-impl<const PACK: usize, const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>>
+impl<const PACK: usize, const CODE_WEIGHT: usize, S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>>
     SparseVoleVectorPartyPackedOnlineKey<PACK, CODE_WEIGHT, S>
 {
     pub fn new(code: S, offline_key: SparseVoleVectorPartyPackedOfflineKey<PACK>) -> Self {
@@ -150,13 +151,13 @@ impl<const PACK: usize, const CODE_WEIGHT: usize, S: Iterator<Item = [usize; COD
     }
 }
 
-impl<const PACK: usize, const CODE_WEIGHT: usize, S: Iterator<Item = [usize; CODE_WEIGHT]>> Iterator
-    for SparseVoleVectorPartyPackedOnlineKey<PACK, CODE_WEIGHT, S>
+impl<const PACK: usize, const CODE_WEIGHT: usize, S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>>
+    Iterator for SparseVoleVectorPartyPackedOnlineKey<PACK, CODE_WEIGHT, S>
 {
     type Item = VectorPcgItem;
     fn next(&mut self) -> Option<Self::Item> {
         if self.cache_index == 0 {
-            let code_idxs: [usize; CODE_WEIGHT] = match self.code.next() {
+            let code_idxs: [[u32; 4]; CODE_WEIGHT] = match self.code.next() {
                 None => {
                     return None;
                 }
@@ -164,12 +165,27 @@ impl<const PACK: usize, const CODE_WEIGHT: usize, S: Iterator<Item = [usize; COD
             };
             self.cache = code_idxs
                 .into_iter()
-                .map(|idx| self.accumulated_vector[idx])
+                .map(|idxs| {
+                    (
+                        self.accumulated_vector[idxs[0] as usize],
+                        self.accumulated_vector[idxs[1] as usize],
+                        self.accumulated_vector[idxs[2] as usize],
+                        self.accumulated_vector[idxs[3] as usize],
+                    )
+                })
                 .fold([(GF2::zero(), GF128::zero()); PACK], |acc, cur| {
                     core::array::from_fn(|arr_idx| {
                         (
-                            acc[arr_idx].0 + cur[arr_idx].0,
-                            acc[arr_idx].1 + cur[arr_idx].1,
+                            acc[arr_idx].0
+                                + cur.0[arr_idx].0
+                                + cur.1[arr_idx].0
+                                + cur.2[arr_idx].0
+                                + cur.3[arr_idx].0,
+                            acc[arr_idx].1
+                                + cur.0[arr_idx].1
+                                + cur.1[arr_idx].1
+                                + cur.2[arr_idx].1
+                                + cur.3[arr_idx].1,
                         )
                     })
                 });

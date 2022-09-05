@@ -1,16 +1,37 @@
-use std::mem::size_of;
+use std::mem::{size_of, MaybeUninit};
+use std::simd::u32x4;
 
-use aes::cipher::{BlockEncrypt, BlockSizeUser, KeyInit};
+use aes::cipher::{BlockEncrypt, KeyInit};
 use aes::{Aes128, Block};
 use core::mem::transmute;
 
+use crate::xor_arrays;
+
+use super::KEY_SIZE;
+
+pub fn accumulate(vec: &mut Vec<[u8; KEY_SIZE]>) {
+    let vec_len = vec.len();
+    let mut vec_iter = vec.iter_mut();
+    let cur = vec_iter.next();
+    if cur.is_none() {
+        return;
+    }
+    let mut cur = cur.unwrap();
+
+    for _ in 1..vec_len {
+        let prev = cur;
+        cur = vec_iter.next().unwrap();
+        xor_arrays(&mut cur, &prev)
+    }
+}
 #[derive(Debug)]
 pub struct EACode<const WEIGHT: usize> {
     width: usize,
     // height: usize,
     cur_height: usize,
+    rng_index: usize,
     aes: Aes128,
-    preprocessed_vec: Option<Vec<[usize; WEIGHT]>>,
+    preprocessed_vec: Option<Vec<[[u32; 4]; WEIGHT]>>,
 }
 
 impl<const WEIGHT: usize> EACode<WEIGHT> {
@@ -19,6 +40,7 @@ impl<const WEIGHT: usize> EACode<WEIGHT> {
             width,
             // height,
             cur_height: 0,
+            rng_index: 0,
             aes: Aes128::new_from_slice(&seed[0..16]).unwrap(),
             preprocessed_vec: None,
         }
@@ -30,7 +52,8 @@ impl<const WEIGHT: usize> EACode<WEIGHT> {
 }
 
 impl<const WEIGHT: usize> Iterator for EACode<WEIGHT> {
-    type Item = [usize; WEIGHT];
+    type Item = [[u32; 4]; WEIGHT];
+    #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         // if self.height == self.cur_height {
         //     return None;
@@ -44,16 +67,22 @@ impl<const WEIGHT: usize> Iterator for EACode<WEIGHT> {
         }
 
         //AES
-        let mut output: [usize; WEIGHT] = [0; WEIGHT];
-        let step_size = aes::Aes128::block_size() / size_of::<u32>();
-        for i in (0..WEIGHT - 3).step_by(step_size) {
-            let mut b = Block::from((self.cur_height as u128).to_be_bytes());
-            self.aes.encrypt_block(&mut b);
-            let b: [u32; 4] = unsafe { transmute(b) };
-            for j in 0..step_size {
-                output[i + j] = (b[j] as usize) % self.width
-            }
+        let mut output: [Block; WEIGHT] =
+            std::array::from_fn(|i| Block::from(((self.rng_index + i) as u128).to_le_bytes()));
+        self.rng_index += WEIGHT;
+        self.aes.encrypt_blocks(&mut output);
+        let mut output: [[u32; 4]; WEIGHT] = unsafe { *output.as_ptr().cast() };
+        for i in 0..WEIGHT {
+            output[i] = (u32x4::from(output[i]) & u32x4::splat((self.width - 1) as u32)).into();
         }
+        // for i in (0..WEIGHT - 3).step_by(STEP_SIZE) {
+        //     let mut b = Block::from((self.cur_height as u128).to_be_bytes());
+        //     self.aes.encrypt_block(&mut b);
+        //     let b: [u32; 4] = unsafe { transmute(b) };
+        //     for j in 0..STEP_SIZE {
+        //         output[i + j] = (b[j] as usize) & (self.width - 1);
+        //     }
+        // }
         Some(output)
     }
 }

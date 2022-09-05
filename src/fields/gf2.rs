@@ -1,5 +1,6 @@
 use super::FieldElement;
 use rand_core::{CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
 use std::{
     iter::Sum,
     ops::{
@@ -8,7 +9,7 @@ use std::{
     },
 };
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct GF2 {
     v: u8,
 }

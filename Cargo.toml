@@ -10,8 +10,10 @@ rayon = "1.5.3"
 curve25519-dalek = "3"
 blake3 = "1"
 rand_core = { version="^0.5", features=["getrandom"], default-features=false}
-rand = "0.8.5"
-log = "0.4.17"
+rand = "0.8"
+log = "0.4"
+serde = { version = "1.0", features=["derive"]}
+ciborium = "0.2"
 
 [dev-dependencies]
 criterion = "0.3"
@@ -44,5 +46,7 @@ harness = false
 name = "dpf"
 harness = false
 
-[profile.bench]
-debug = true
+[[bench]]
+name = "hash"
+harness = false
+

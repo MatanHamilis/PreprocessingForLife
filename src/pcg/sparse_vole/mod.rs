@@ -23,7 +23,6 @@ use super::codes::EACode;
 use super::pprf_aggregator::RegularErrorPprfAggregator;
 use crate::fields::GF128;
 use crate::pseudorandom::KEY_SIZE;
-use rayon::prelude::*;
 
 pub mod packed;
 pub mod scalar_party;
@@ -80,11 +79,11 @@ pub fn trusted_deal_packed_offline_keys<const PACK: usize, const PRF_INPUT_BITLE
     let mut vector_keys: [std::mem::MaybeUninit<VectorSparseVoleOfflineKey>; PACK] =
         std::mem::MaybeUninit::uninit_array();
     prf_keys
-        .into_par_iter()
-        .zip(scalar.into_par_iter())
-        .zip(puncturing_points.into_par_iter())
-        .zip(scalar_keys.par_iter_mut())
-        .zip(vector_keys.par_iter_mut())
+        .into_iter()
+        .zip(scalar.into_iter())
+        .zip(puncturing_points.into_iter())
+        .zip(scalar_keys.iter_mut())
+        .zip(vector_keys.iter_mut())
         .for_each(
             |((((prf_key, scalar), puncturing_points), scalar_key), vector_key)| {
                 // Define Gen State
@@ -149,12 +148,12 @@ pub(crate) mod tests {
     pub(crate) fn get_correlation(
         scalar: &GF128,
     ) -> (
-        OnlineSparseVoleKeyScalar<10, EACode<10>>,
-        OnlineSparseVoleKeyVector<10, EACode<10>>,
+        OnlineSparseVoleKeyScalar<2, EACode<2>>,
+        OnlineSparseVoleKeyVector<2, EACode<2>>,
     ) {
         // Define constants
         const WEIGHT: usize = 128;
-        const CODE_WEIGHT: usize = 10;
+        const CODE_WEIGHT: usize = 2;
         const INPUT_BITLEN: usize = 10;
         let prf_keys = (0..WEIGHT)
             .map(|num| {
@@ -179,12 +178,11 @@ pub(crate) mod tests {
     pub(crate) fn get_packed_correlation<const PACK: usize>(
         scalars: &[GF128; PACK],
     ) -> (
-        SparseVoleScalarPartyPackedOnlineKey<PACK, 10, EACode<10>>,
-        SparseVoleVectorPartyPackedOnlineKey<PACK, 10, EACode<10>>,
+        SparseVoleScalarPartyPackedOnlineKey<PACK, 8, EACode<8>>,
+        SparseVoleVectorPartyPackedOnlineKey<PACK, 8, EACode<8>>,
     ) {
         // Define constants
         const WEIGHT: usize = 128;
-        const CODE_WEIGHT: usize = 10;
         const INPUT_BITLEN: usize = 10;
         let prf_keys: [Vec<[u8; KEY_SIZE]>; PACK] = core::array::from_fn(|idx| {
             (0..WEIGHT)
@@ -228,9 +226,11 @@ pub(crate) mod tests {
         let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
         let (scalar_online_key, vector_online_key) = get_correlation(&scalar);
         // Expand the online keys
+        let mut i = 0;
         for ((scalar_gf, scalar_pcg), (vector_bit, vector_gf)) in
             scalar_online_key.zip(vector_online_key).take(3000)
         {
+            i = dbg!(i) + 1;
             assert_eq!(scalar_pcg, scalar);
             if vector_bit.is_one() {
                 assert_eq!((scalar_gf + vector_gf), scalar);

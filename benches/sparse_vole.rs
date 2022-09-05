@@ -124,7 +124,7 @@ pub fn get_offline_keys() -> (ScalarOfflineSparseVoleKey, VectorOfflineSparseVol
 }
 pub fn packing_pcg(c: &mut Criterion) {
     let CODE_SEED: [u8; 32] = [0u8; 32];
-    const CODE_WEIGHT: usize = 8;
+    const CODE_WEIGHT: usize = 2;
     let mut group = c.benchmark_group("packing_pcg");
     pack_test!(group, 1, CODE_SEED);
     pack_test!(group, 2, CODE_SEED);
@@ -139,7 +139,7 @@ pub fn packing_pcg(c: &mut Criterion) {
 }
 
 pub fn online_pcg(c: &mut Criterion) {
-    const CODE_WEIGHT: usize = 8;
+    const CODE_WEIGHT: usize = 2;
     // Create Offline Keys
     let (scalar_offline_key, vector_offline_key) = get_offline_keys();
 

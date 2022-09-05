@@ -3,7 +3,6 @@ use super::double_prg_many;
 use super::KEY_SIZE;
 #[cfg(feature = "aesni")]
 use aes::Block;
-use rayon::prelude::*;
 use std::mem::transmute;
 pub fn prf_eval(key: [u8; KEY_SIZE], input: &[bool]) -> [u8; KEY_SIZE] {
     input.iter().fold(key, |prf_out, &input_bit| {
@@ -77,14 +76,15 @@ pub fn prf_eval_all_into_slice(key: &[u8; KEY_SIZE], depth: usize, output: &mut 
             .for_each(|block_idx| output[block_idx << level_depth] = output[block_idx]);
 
         output
-            .par_chunks_mut(1 << level_depth)
-            .zip(helper.par_chunks_mut(1 << level_depth))
+            .chunks_mut(1 << level_depth)
+            .zip(helper.chunks_mut(1 << level_depth))
             .for_each(|(output, helper)| {
                 prf_eval_block_inside_cache(level_depth, output[0], output, helper)
             });
     }
 }
 
+// Returns the sum of the leafs.
 pub fn prf_eval_block_inside_cache(
     depth: usize,
     key: Block,
@@ -99,6 +99,7 @@ pub fn prf_eval_block_inside_cache(
         (aux, output)
     };
     from[0] = key;
+
     for i in 0..depth {
         double_prg_many(&from[0..1 << i], &mut to[0..1 << (i + 1)]);
         (from, to) = (to, from);

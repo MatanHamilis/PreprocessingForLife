@@ -88,7 +88,7 @@ pub fn circuit_eval_bench(c: &mut Criterion) {
     // Test MPC eval.
     const WEIGHT: u8 = 125;
     const INPUT_BITLEN: usize = 18;
-    const CODE_WEIGHT: usize = 7;
+    const CODE_WEIGHT: usize = 8;
     let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
     let prf_keys = get_prf_keys(WEIGHT);
     let puncturing_points: Vec<[bool; INPUT_BITLEN]> = get_puncturing_points(WEIGHT);
