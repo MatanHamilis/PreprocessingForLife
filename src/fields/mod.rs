@@ -1,10 +1,22 @@
 mod gf128;
 mod gf2;
+mod packed_gf2;
 pub use gf128::GF128;
 pub use gf2::GF2;
-use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+pub use packed_gf2::PackedGF2U64;
+use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 pub trait FieldElement:
-    Add + Sub + Mul + Div + AddAssign + SubAssign + MulAssign + DivAssign + Neg + Sized + Eq
+    Add<Output = Self>
+    + Sub<Output = Self>
+    + Mul<Output = Self>
+    + Div<Output = Self>
+    + AddAssign
+    + SubAssign
+    + MulAssign
+    + DivAssign
+    + Sized
+    + Eq
+    + Copy
 {
     fn one() -> Self;
     fn is_one(&self) -> bool;

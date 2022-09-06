@@ -9,31 +9,31 @@ use crate::{
 };
 
 mod and_gate {
-    use crate::fields::GF2;
+    use crate::fields::{FieldElement, GF2};
     use crate::pcg::bit_beaver_triples::BeaverTripletShare;
-    pub fn eval(x: GF2, y: GF2) -> GF2 {
+    pub fn eval<S: FieldElement>(x: S, y: S) -> S {
         x * y
     }
     // u = Open(x + a);
     // v = Open(y + b);
     // [xy] = ((x+a)-a)((y+b)-b)=uv-[a]v-[b]u+[ab]=
     //          [x]v-[b]u+[ab]
-    pub fn mpc_make_msgs(
-        x_share: GF2,
-        y_share: GF2,
-        beaver_triplet_shares: &BeaverTripletShare<GF2>,
-    ) -> (GF2, GF2) {
+    pub fn mpc_make_msgs<S: FieldElement>(
+        x_share: S,
+        y_share: S,
+        beaver_triplet_shares: &BeaverTripletShare<S>,
+    ) -> (S, S) {
         let u = beaver_triplet_shares.a_share + x_share;
         let v = beaver_triplet_shares.b_share + y_share;
         (u, v)
     }
-    pub fn mpc_handle_msgs(
-        x_share: GF2,
-        y_share: GF2,
-        x_response: GF2,
-        y_response: GF2,
-        beaver_triplet_shares: &BeaverTripletShare<GF2>,
-    ) -> GF2 {
+    pub fn mpc_handle_msgs<S: FieldElement>(
+        x_share: S,
+        y_share: S,
+        x_response: S,
+        y_response: S,
+        beaver_triplet_shares: &BeaverTripletShare<S>,
+    ) -> S {
         let u = beaver_triplet_shares.a_share + x_share + x_response;
         let v = beaver_triplet_shares.b_share + y_share + y_response;
         x_share * v - beaver_triplet_shares.b_share * u + beaver_triplet_shares.ab_share
@@ -41,25 +41,24 @@ mod and_gate {
 }
 
 mod xor_gate {
-    use crate::fields::GF2;
-    pub fn eval(x: GF2, y: GF2) -> GF2 {
+    use crate::fields::FieldElement;
+    pub fn eval<S: FieldElement>(x: S, y: S) -> S {
         x + y
     }
-    pub fn eval_mpc(x_share: GF2, y_share: GF2) -> GF2 {
+    pub fn eval_mpc<S: FieldElement>(x_share: S, y_share: S) -> S {
         x_share + y_share
     }
 }
 
 mod not_gate {
-    use crate::fields::GF2;
-    pub fn eval(mut x: GF2) -> GF2 {
-        x.flip();
-        x
+    use crate::fields::FieldElement;
+    pub fn eval<S: FieldElement>(mut x: S) -> S {
+        S::one() - x
     }
 
-    pub fn eval_mpc(mut x_share: GF2, should_flip: bool) -> GF2 {
+    pub fn eval_mpc<S: FieldElement>(mut x_share: S, should_flip: bool) -> S {
         if should_flip {
-            x_share.flip();
+            x_share = S::one() - x_share
         }
         x_share
     }
@@ -136,46 +135,56 @@ impl Circuit {
 }
 
 #[derive(Debug)]
-pub enum CircuitEvalSessionState<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> {
-    WaitingToSend(CircuitEvalSessionWaitingToSend<'a, T>),
-    WaitingToReceive(CircuitEvalSessionWaitingToReceive<'a, T>),
-    Finished(Vec<GF2>),
+pub enum CircuitEvalSessionState<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> {
+    WaitingToSend(CircuitEvalSessionWaitingToSend<'a, S, T>),
+    WaitingToReceive(CircuitEvalSessionWaitingToReceive<'a, S, T>),
+    Finished(Vec<S>),
 }
 #[derive(Debug)]
-struct CircuitEvalSession<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> {
+struct CircuitEvalSession<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> {
     circuit: &'a Circuit,
-    wires: Vec<GF2>,
+    wires: Vec<S>,
     layer_to_process: usize,
     beaver_triple_gen: T,
-    beaver_triples_current_layer: Vec<BeaverTripletShare<GF2>>,
+    beaver_triples_current_layer: Vec<BeaverTripletShare<S>>,
     party_id: bool,
 }
 
 // We use three different structs to enforce certain actions to be done only in certain states by the typing system.
 
 #[derive(Debug)]
-pub struct CircuitEvalSessionWaitingToSend<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> {
-    session: CircuitEvalSession<'a, T>,
+pub struct CircuitEvalSessionWaitingToSend<
+    'a,
+    S: FieldElement,
+    T: Iterator<Item = BeaverTripletShare<S>>,
+> {
+    session: CircuitEvalSession<'a, S, T>,
 }
 #[derive(Debug)]
-pub struct CircuitEvalSessionWaitingToReceive<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> {
-    session: CircuitEvalSession<'a, T>,
+pub struct CircuitEvalSessionWaitingToReceive<
+    'a,
+    S: FieldElement,
+    T: Iterator<Item = BeaverTripletShare<S>>,
+> {
+    session: CircuitEvalSession<'a, S, T>,
 }
 
-impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSession<'a, T> {}
+impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> CircuitEvalSession<'a, S, T> {}
 
-impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionState<'a, T> {
+impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
+    CircuitEvalSessionState<'a, S, T>
+{
     pub fn new(
         circuit: &'a Circuit,
-        input_shares: &[GF2],
+        input_shares: &[S],
         beaver_triple_gen: T,
         party_id: bool,
     ) -> Self {
         assert_eq!(circuit.input_wire_count, input_shares.len());
-        let wires: Vec<GF2> = input_shares
+        let wires: Vec<S> = input_shares
             .into_iter()
             .chain(
-                [GF2::zero()]
+                [S::zero()]
                     .iter()
                     .cycle()
                     .take(circuit.total_wire_count - circuit.input_wire_count),
@@ -194,8 +203,10 @@ impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionState<'a
     }
 }
 
-impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionWaitingToSend<'a, T> {
-    pub fn fetch_layer_messages(self) -> (CircuitEvalSessionState<'a, T>, Vec<(GF2, GF2)>) {
+impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
+    CircuitEvalSessionWaitingToSend<'a, S, T>
+{
+    pub fn fetch_layer_messages(self) -> (CircuitEvalSessionState<'a, S, T>, Vec<(S, S)>) {
         // Prepare beaver triples for this layer.
         let mut session = self.session;
         let layer_id = session.layer_to_process;
@@ -214,9 +225,12 @@ impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionWaitingT
             .iter()
             .filter_map(|g| {
                 session.wires[g.output_wire] = match g.gate_type {
-                    GateType::TwoInput { input, op } => {
-                        let x_share = session.wires[input[0]];
-                        let y_share = session.wires[input[1]];
+                    GateType::TwoInput {
+                        input: input_wires,
+                        op,
+                    } => {
+                        let x_share = session.wires[input_wires[0]];
+                        let y_share = session.wires[input_wires[1]];
                         match op {
                             GateTwoInputOp::Xor => xor_gate::eval_mpc(x_share, y_share),
                             GateTwoInputOp::And => {
@@ -225,8 +239,8 @@ impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionWaitingT
                                     .next()
                                     .expect("Beaver triples generator is exhausted.");
                                 let msg = Some(and_gate::mpc_make_msgs(
-                                    session.wires[input[0]],
-                                    session.wires[input[1]],
+                                    session.wires[input_wires[0]],
+                                    session.wires[input_wires[1]],
                                     &triple,
                                 ));
                                 session.beaver_triples_current_layer.push(triple);
@@ -251,11 +265,13 @@ impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionWaitingT
     }
 }
 
-impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionWaitingToReceive<'a, T> {
+impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
+    CircuitEvalSessionWaitingToReceive<'a, S, T>
+{
     pub fn handle_layer_responses(
         self,
-        responses: Vec<(GF2, GF2)>,
-    ) -> CircuitEvalSessionState<'a, T> {
+        responses: Vec<(S, S)>,
+    ) -> CircuitEvalSessionState<'a, S, T> {
         let mut session = self.session;
         let layer_id = session.layer_to_process;
         let current_layer = session
@@ -311,41 +327,41 @@ impl<'a, T: Iterator<Item = BeaverTripletShare<GF2>>> CircuitEvalSessionWaitingT
     }
 }
 
-pub fn eval_circuit<C: Read + Write, T: Iterator<Item = BeaverTripletShare<GF2>>>(
-    circuit: &Circuit,
-    (mut my_input, peer_input): (Vec<GF2>, Vec<GF2>),
-    correlations: T,
-    communicator: &mut Communicator<C>,
-    is_first: bool,
-) -> Result<Vec<GF2>, ()> {
-    assert_eq!(my_input.len(), peer_input.len());
-    let mut received_input = communicator.exchange(peer_input).ok_or(())?;
-    if is_first {
-        my_input.append(&mut received_input);
-    } else {
-        received_input.append(&mut my_input);
-        my_input = received_input;
-    }
-    let mut session = CircuitEvalSessionState::new(circuit, &my_input[..], correlations, is_first);
-    let party_output = loop {
-        let (session_temp, queries_to_send) = match session {
-            CircuitEvalSessionState::WaitingToSend(session) => session.fetch_layer_messages(),
-            _ => panic!(),
-        };
-        session = session_temp;
-        let queries_received = communicator.exchange(queries_to_send).ok_or(())?;
-        session = match session {
-            CircuitEvalSessionState::WaitingToReceive(session) => {
-                session.handle_layer_responses(queries_received)
-            }
-            _ => panic!(),
-        };
-        if let CircuitEvalSessionState::Finished(party_output) = session {
-            break party_output;
-        }
-    };
-    Ok(party_output)
-}
+// pub fn eval_circuit<C: Read + Write, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>(
+//     circuit: &Circuit,
+//     (mut my_input, peer_input): (Vec<S>, Vec<S>),
+//     correlations: T,
+//     communicator: &mut Communicator<C>,
+//     is_first: bool,
+// ) -> Result<Vec<S>, ()> {
+//     assert_eq!(my_input.len(), peer_input.len());
+//     let mut received_input = communicator.exchange(peer_input).ok_or(())?;
+//     if is_first {
+//         my_input.append(&mut received_input);
+//     } else {
+//         received_input.append(&mut my_input);
+//         my_input = received_input;
+//     }
+//     let mut session = CircuitEvalSessionState::new(circuit, &my_input[..], correlations, is_first);
+//     let party_output = loop {
+//         let (session_temp, queries_to_send) = match session {
+//             CircuitEvalSessionState::WaitingToSend(session) => session.fetch_layer_messages(),
+//             _ => panic!(),
+//         };
+//         session = session_temp;
+//         let queries_received = communicator.exchange(queries_to_send).ok_or(())?;
+//         session = match session {
+//             CircuitEvalSessionState::WaitingToReceive(session) => {
+//                 session.handle_layer_responses(queries_received)
+//             }
+//             _ => panic!(),
+//         };
+//         if let CircuitEvalSessionState::Finished(party_output) = session {
+//             break party_output;
+//         }
+//     };
+//     Ok(party_output)
+// }
 
 #[cfg(test)]
 mod tests {
@@ -376,15 +392,12 @@ mod tests {
             .collect()
     }
 
-    fn share_inputs(input: &[GF2]) -> (Vec<GF2>, Vec<GF2>) {
+    fn share_inputs<S: FieldElement>(random_elements: &[S], input: &mut [S]) {
+        assert_eq!(input.len(), random_elements.len());
         input
-            .iter()
-            .enumerate()
-            .map(|(idx, val)| {
-                let random_element = GF2::from(idx % 2 == 1);
-                (random_element, *val - random_element)
-            })
-            .unzip()
+            .iter_mut()
+            .zip(random_elements.iter())
+            .for_each(|(input_e, random_e)| *input_e += *random_e)
     }
 
     fn eval_mpc_circuit<
@@ -394,8 +407,8 @@ mod tests {
         circuit: &Circuit,
         input_a: &[GF2],
         input_b: &[GF2],
-        beaver_triple_scalar_key: &mut BeaverTripletScalarPartyOnlinePCGKey<S>,
-        beaver_triple_vector_key: &mut BeaverTripletBitPartyOnlinePCGKey<T>,
+        beaver_triple_scalar_key: &mut BeaverTripletScalarPartyOnlinePCGKey<GF2, S>,
+        beaver_triple_vector_key: &mut BeaverTripletBitPartyOnlinePCGKey<GF2, T>,
     ) -> (Vec<GF2>, Vec<GF2>) {
         let mut first_party_session =
             CircuitEvalSessionState::new(&circuit, &input_a, beaver_triple_scalar_key, false);
@@ -479,12 +492,15 @@ mod tests {
             CODE_WEIGHT,
         >(&scalar, puncturing_points, prf_keys);
 
-        let mut beaver_triple_scalar_key: BeaverTripletScalarPartyOnlinePCGKey<_> =
+        let mut beaver_triple_scalar_key: BeaverTripletScalarPartyOnlinePCGKey<GF2, _> =
             scalar_online_key.into();
-        let mut beaver_triple_vector_key: BeaverTripletBitPartyOnlinePCGKey<_> =
+        let mut beaver_triple_vector_key: BeaverTripletBitPartyOnlinePCGKey<GF2, _> =
             vector_online_key.into();
 
-        let (input_a, input_b) = share_inputs(&vec![GF2::zero(), GF2::zero()]);
+        // let random_element
+        let mut input_a = vec![GF2::zero(), GF2::zero()];
+        let input_b = vec![GF2::one(), GF2::zero()];
+        share_inputs(&input_b[..], &mut input_a[..]);
         let (output_a, output_b) = eval_mpc_circuit(
             &circuit,
             &input_a,

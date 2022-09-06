@@ -56,7 +56,7 @@ pub fn trusted_deal<const PRF_INPUT_BITLEN: usize, const CODE_WEIGHT: usize>(
         vector_keygen_state_final.keygen_offline::<RegularErrorPprfAggregator>();
 
     // Create code
-    let code_seed = [0; 32];
+    let code_seed = [0; 16];
     let scalar_code = EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), code_seed);
     let vector_code = EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), code_seed);
 
@@ -212,7 +212,7 @@ pub(crate) mod tests {
             scalars, puncturing_points, prf_keys
         );
 
-        const CODE_SEED: [u8; 32] = [0; 32];
+        const CODE_SEED: [u8; 16] = [0; 16];
         let code_scalar = EACode::new(scalar_offline_key.len(), CODE_SEED);
         let code_vector = EACode::new(scalar_offline_key.len(), CODE_SEED);
         // Create online keys

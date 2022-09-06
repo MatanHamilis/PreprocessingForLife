@@ -123,7 +123,7 @@ pub fn get_offline_keys() -> (ScalarOfflineSparseVoleKey, VectorOfflineSparseVol
     (scalar_offline_key, vector_offline_key)
 }
 pub fn packing_pcg(c: &mut Criterion) {
-    let CODE_SEED: [u8; 32] = [0u8; 32];
+    let CODE_SEED: [u8; 16] = [0u8; 16];
     const CODE_WEIGHT: usize = 8;
     let mut group = c.benchmark_group("packing_pcg");
     pack_test!(group, 1, CODE_SEED);
@@ -144,7 +144,7 @@ pub fn online_pcg(c: &mut Criterion) {
     let (scalar_offline_key, vector_offline_key) = get_offline_keys();
 
     // Create code
-    let code_seed = [0; 32];
+    let code_seed = [0; 16];
     let scalar_code = EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), code_seed);
     let vector_code = EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), code_seed);
     let scalar_code: Vec<[u32; CODE_WEIGHT]> =
@@ -165,7 +165,7 @@ pub fn online_pcg(c: &mut Criterion) {
     });
 
     let (scalar_offline_key, vector_offline_key) = get_offline_keys();
-    let code_seed = [0; 32];
+    let code_seed = [0; 16];
     let scalar_code = EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), code_seed);
     let vector_code = EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), code_seed);
     let mut scalar_online_key = scalar_offline_key.provide_online_key(scalar_code);

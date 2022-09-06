@@ -1,13 +1,10 @@
 #![feature(maybe_uninit_uninit_array)]
 #![feature(portable_simd)]
-use std::{
-    mem::MaybeUninit,
-    simd::{u8x32, u8x64},
-};
+use std::{mem::MaybeUninit, simd::u8x64};
 
 use criterion::{
     black_box, criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, BenchmarkId,
-    Criterion, PlotConfiguration, Throughput,
+    Criterion, Throughput,
 };
 use silent_party::dpf::{
     dpf_pir::{answer_query_batched, dpf_to_simd_vec, gen_query},

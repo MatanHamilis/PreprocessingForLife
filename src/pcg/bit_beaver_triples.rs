@@ -13,12 +13,12 @@ pub struct BeaverTripletShare<T: FieldElement> {
 }
 
 #[derive(Debug)]
-pub struct BeaverTripletBitPartyOnlinePCGKey<T: Iterator<Item = ReceiverRandomBitOtPcgItem>> {
+pub struct BeaverTripletBitPartyOnlinePCGKey<S: FieldElement, T: Iterator<Item = (S, S)>> {
     ot_receiver_pcg_key: T,
 }
 
-impl<T: Iterator<Item = ReceiverRandomBitOtPcgItem>> From<T>
-    for BeaverTripletBitPartyOnlinePCGKey<T>
+impl<S: FieldElement, T: Iterator<Item = (S, S)>> From<T>
+    for BeaverTripletBitPartyOnlinePCGKey<S, T>
 {
     fn from(ot_receiver_pcg_key: T) -> Self {
         Self {
@@ -30,6 +30,7 @@ impl<T: Iterator<Item = ReceiverRandomBitOtPcgItem>> From<T>
 impl<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>>
     From<VectorPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>
     for BeaverTripletBitPartyOnlinePCGKey<
+        GF2,
         RandomBitOTReceiverOnlinePCGKey<
             RandomOTReceiverOnlinePCGKey<VectorPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>,
         >,
@@ -42,10 +43,10 @@ impl<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>>
     }
 }
 
-impl<T: Iterator<Item = ReceiverRandomBitOtPcgItem>> Iterator
-    for BeaverTripletBitPartyOnlinePCGKey<T>
+impl<S: FieldElement, T: Iterator<Item = (S, S)>> Iterator
+    for BeaverTripletBitPartyOnlinePCGKey<S, T>
 {
-    type Item = BeaverTripletShare<GF2>;
+    type Item = BeaverTripletShare<S>;
     fn next(&mut self) -> Option<Self::Item> {
         let (b0, m_b0) = self.ot_receiver_pcg_key.next()?;
         let (b1, m_b1) = self.ot_receiver_pcg_key.next()?;
@@ -58,12 +59,12 @@ impl<T: Iterator<Item = ReceiverRandomBitOtPcgItem>> Iterator
 }
 
 #[derive(Debug)]
-pub struct BeaverTripletScalarPartyOnlinePCGKey<T: Iterator<Item = SenderRandomBitOtPcgItem>> {
+pub struct BeaverTripletScalarPartyOnlinePCGKey<S, T: Iterator<Item = (S, S)>> {
     ot_sender_pcg_key: T,
 }
 
-impl<T: Iterator<Item = SenderRandomBitOtPcgItem>> From<T>
-    for BeaverTripletScalarPartyOnlinePCGKey<T>
+impl<S: FieldElement, T: Iterator<Item = (S, S)>> From<T>
+    for BeaverTripletScalarPartyOnlinePCGKey<S, T>
 {
     fn from(ot_sender_pcg_key: T) -> Self {
         Self { ot_sender_pcg_key }
@@ -73,6 +74,7 @@ impl<T: Iterator<Item = SenderRandomBitOtPcgItem>> From<T>
 impl<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>>
     From<ScalarPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>
     for BeaverTripletScalarPartyOnlinePCGKey<
+        GF2,
         RandomBitOTSenderOnlinePCGKey<
             RandomOTSenderOnlinePCGKey<ScalarPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>,
         >,
@@ -85,10 +87,10 @@ impl<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>>
     }
 }
 
-impl<T: Iterator<Item = SenderRandomBitOtPcgItem>> Iterator
-    for BeaverTripletScalarPartyOnlinePCGKey<T>
+impl<S: FieldElement, T: Iterator<Item = (S, S)>> Iterator
+    for BeaverTripletScalarPartyOnlinePCGKey<S, T>
 {
-    type Item = BeaverTripletShare<GF2>;
+    type Item = BeaverTripletShare<S>;
     fn next(&mut self) -> Option<Self::Item> {
         let (x_0, mut y_0) = self.ot_sender_pcg_key.next()?;
         let (x_1, mut y_1) = self.ot_sender_pcg_key.next()?;
@@ -104,7 +106,7 @@ impl<T: Iterator<Item = SenderRandomBitOtPcgItem>> Iterator
 
 #[cfg(test)]
 mod tests {
-    use crate::fields::GF128;
+    use crate::fields::{GF128, GF2};
 
     use super::{BeaverTripletBitPartyOnlinePCGKey, BeaverTripletScalarPartyOnlinePCGKey};
     #[test]
@@ -112,9 +114,9 @@ mod tests {
         let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
         let (scalar_sparse_vole_key, vector_sparse_vole_key) =
             super::super::sparse_vole::tests::get_correlation(&scalar);
-        let scalar_bit_beaver_triplet_online_key: BeaverTripletScalarPartyOnlinePCGKey<_> =
+        let scalar_bit_beaver_triplet_online_key: BeaverTripletScalarPartyOnlinePCGKey<GF2, _> =
             scalar_sparse_vole_key.into();
-        let vector_bit_beaver_triplet_online_key: BeaverTripletBitPartyOnlinePCGKey<_> =
+        let vector_bit_beaver_triplet_online_key: BeaverTripletBitPartyOnlinePCGKey<GF2, _> =
             vector_sparse_vole_key.into();
 
         scalar_bit_beaver_triplet_online_key

@@ -34,13 +34,13 @@ pub struct EACode<const WEIGHT: usize> {
 }
 
 impl<const WEIGHT: usize> EACode<WEIGHT> {
-    pub fn new(width: usize, seed: [u8; 32]) -> Self {
+    pub fn new(width: usize, seed: [u8; 16]) -> Self {
         EACode {
             width,
             // height,
             cur_height: 0,
             rng_index: 0,
-            aes: Aes128::new_from_slice(&seed[0..16]).unwrap(),
+            aes: Aes128::new_from_slice(&seed[..]).unwrap(),
             preprocessed_vec: None,
         }
     }
@@ -91,7 +91,7 @@ mod tests {
     use super::EACode;
     #[test]
     pub fn test_sanity() {
-        let code = EACode::<8>::new(12, [1; 32]);
+        let code = EACode::<8>::new(12, [1; 16]);
         let mut i = 0;
         for v in code.take(100) {
             i += 1;
