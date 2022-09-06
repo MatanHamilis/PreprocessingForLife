@@ -124,7 +124,7 @@ pub fn get_offline_keys() -> (ScalarOfflineSparseVoleKey, VectorOfflineSparseVol
 }
 pub fn packing_pcg(c: &mut Criterion) {
     let CODE_SEED: [u8; 32] = [0u8; 32];
-    const CODE_WEIGHT: usize = 2;
+    const CODE_WEIGHT: usize = 8;
     let mut group = c.benchmark_group("packing_pcg");
     pack_test!(group, 1, CODE_SEED);
     pack_test!(group, 2, CODE_SEED);
@@ -139,7 +139,7 @@ pub fn packing_pcg(c: &mut Criterion) {
 }
 
 pub fn online_pcg(c: &mut Criterion) {
-    const CODE_WEIGHT: usize = 2;
+    const CODE_WEIGHT: usize = 8;
     // Create Offline Keys
     let (scalar_offline_key, vector_offline_key) = get_offline_keys();
 
@@ -147,17 +147,21 @@ pub fn online_pcg(c: &mut Criterion) {
     let code_seed = [0; 32];
     let scalar_code = EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), code_seed);
     let vector_code = EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), code_seed);
-    let scalar_code = Preprocessor::new(10_000_000usize, scalar_code);
-    let vector_code = Preprocessor::new(10_000_000usize, vector_code);
+    let scalar_code: Vec<[u32; CODE_WEIGHT]> =
+        Preprocessor::new(10_000_000usize, scalar_code).collect();
+    let vector_code: Vec<[u32; CODE_WEIGHT]> =
+        Preprocessor::new(10_000_000usize, vector_code).collect();
 
     // Create online keys
-    let mut scalar_online_key = scalar_offline_key.provide_online_key(scalar_code);
-    let mut vector_online_key = vector_offline_key.provide_online_key(vector_code);
+    let mut scalar_online_key =
+        scalar_offline_key.provide_online_key(scalar_code.into_iter().cycle());
+    let mut vector_online_key =
+        vector_offline_key.provide_online_key(vector_code.into_iter().cycle());
     c.bench_function("scalar_online_preprocessing", |b| {
-        b.iter(|| scalar_online_key.next())
+        b.iter(|| black_box(scalar_online_key.next().unwrap()))
     });
     c.bench_function("vector_online_preprocessing", |b| {
-        b.iter(|| vector_online_key.next())
+        b.iter(|| black_box(vector_online_key.next().unwrap()))
     });
 
     let (scalar_offline_key, vector_offline_key) = get_offline_keys();
@@ -170,7 +174,7 @@ pub fn online_pcg(c: &mut Criterion) {
         b.iter(|| black_box(scalar_online_key.next().unwrap()))
     });
     c.bench_function("vector_online_no_preprocessing", |b| {
-        b.iter(|| vector_online_key.next().unwrap())
+        b.iter(|| black_box(vector_online_key.next().unwrap()))
     });
 }
 pub fn offline_pcg(c: &mut Criterion) {

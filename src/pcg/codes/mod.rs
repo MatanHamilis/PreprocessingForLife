@@ -1,5 +1,4 @@
 use std::mem::{size_of, MaybeUninit};
-use std::simd::u32x4;
 
 use aes::cipher::{BlockEncrypt, KeyInit};
 use aes::{Aes128, Block};
@@ -31,7 +30,7 @@ pub struct EACode<const WEIGHT: usize> {
     cur_height: usize,
     rng_index: usize,
     aes: Aes128,
-    preprocessed_vec: Option<Vec<[[u32; 4]; WEIGHT]>>,
+    preprocessed_vec: Option<Vec<[u32; WEIGHT]>>,
 }
 
 impl<const WEIGHT: usize> EACode<WEIGHT> {
@@ -52,7 +51,7 @@ impl<const WEIGHT: usize> EACode<WEIGHT> {
 }
 
 impl<const WEIGHT: usize> Iterator for EACode<WEIGHT> {
-    type Item = [[u32; 4]; WEIGHT];
+    type Item = [u32; WEIGHT];
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         // if self.height == self.cur_height {
@@ -71,9 +70,9 @@ impl<const WEIGHT: usize> Iterator for EACode<WEIGHT> {
             std::array::from_fn(|i| Block::from(((self.rng_index + i) as u128).to_le_bytes()));
         self.rng_index += WEIGHT;
         self.aes.encrypt_blocks(&mut output);
-        let mut output: [[u32; 4]; WEIGHT] = unsafe { *output.as_ptr().cast() };
+        let mut output: [u32; WEIGHT] = unsafe { *output.as_ptr().cast() };
         for i in 0..WEIGHT {
-            output[i] = (u32x4::from(output[i]) & u32x4::splat((self.width - 1) as u32)).into();
+            output[i] &= (self.width - 1) as u32;
         }
         // for i in (0..WEIGHT - 3).step_by(STEP_SIZE) {
         //     let mut b = Block::from((self.cur_height as u128).to_be_bytes());
@@ -92,11 +91,11 @@ mod tests {
     use super::EACode;
     #[test]
     pub fn test_sanity() {
-        let code = EACode::<5>::new(12, [1; 32]);
+        let code = EACode::<8>::new(12, [1; 32]);
         let mut i = 0;
         for v in code.take(100) {
             i += 1;
-            assert_eq!(v.len(), 5);
+            assert_eq!(v.len(), 8);
         }
         assert_eq!(i, 100);
     }

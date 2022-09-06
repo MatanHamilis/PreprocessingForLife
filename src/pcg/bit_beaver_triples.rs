@@ -27,7 +27,7 @@ impl<T: Iterator<Item = ReceiverRandomBitOtPcgItem>> From<T>
     }
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>>
+impl<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>>
     From<VectorPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>
     for BeaverTripletBitPartyOnlinePCGKey<
         RandomBitOTReceiverOnlinePCGKey<
@@ -70,7 +70,7 @@ impl<T: Iterator<Item = SenderRandomBitOtPcgItem>> From<T>
     }
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>>
+impl<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>>
     From<ScalarPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>
     for BeaverTripletScalarPartyOnlinePCGKey<
         RandomBitOTSenderOnlinePCGKey<

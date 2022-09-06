@@ -18,10 +18,7 @@ pub struct OfflineSparseVoleKey {
 }
 
 #[derive(Debug)]
-pub struct OnlineSparseVoleKey<
-    const CODE_WEIGHT: usize,
-    S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>,
-> {
+pub struct OnlineSparseVoleKey<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>> {
     pub(super) accumulated_vector: Vec<GF128>,
     code: S,
     index: usize,
@@ -82,10 +79,7 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgScalarKeyGenState<INPUT_BITLEN> {
 }
 
 impl OfflineSparseVoleKey {
-    pub fn provide_online_key<
-        const CODE_WEIGHT: usize,
-        S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>,
-    >(
+    pub fn provide_online_key<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>>(
         self,
         code: S,
     ) -> OnlineSparseVoleKey<CODE_WEIGHT, S> {
@@ -101,7 +95,7 @@ impl OfflineSparseVoleKey {
     }
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>> Iterator
+impl<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>> Iterator
     for OnlineSparseVoleKey<CODE_WEIGHT, S>
 {
     type Item = PcgItem;
@@ -112,12 +106,7 @@ impl<const CODE_WEIGHT: usize, S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>> Iter
                 self.index += 1;
                 Some((
                     v.into_iter()
-                        .map(|idxs| {
-                            self.accumulated_vector[idxs[0] as usize]
-                                + self.accumulated_vector[idxs[1] as usize]
-                                + self.accumulated_vector[idxs[2] as usize]
-                                + self.accumulated_vector[idxs[3] as usize]
-                        })
+                        .map(|idx| self.accumulated_vector[idx as usize])
                         .sum(),
                     self.scalar,
                 ))

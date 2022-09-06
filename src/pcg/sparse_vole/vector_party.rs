@@ -25,10 +25,7 @@ pub struct OfflineSparseVoleKey {
 }
 
 #[derive(Debug)]
-pub struct OnlineSparseVoleKey<
-    const CODE_WEIGHT: usize,
-    S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>,
-> {
+pub struct OnlineSparseVoleKey<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>> {
     accumulated_scalar_vector: Vec<(GF2, GF128)>,
     // accumulated_sparse_subfield_vector: Vec<GF2>,
     code: S,
@@ -114,10 +111,7 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgVectorKeyGenStateFinal<INPUT_BITLEN
 }
 
 impl OfflineSparseVoleKey {
-    pub fn provide_online_key<
-        const CODE_WEIGHT: usize,
-        S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>,
-    >(
+    pub fn provide_online_key<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>>(
         self,
         code: S,
     ) -> OnlineSparseVoleKey<CODE_WEIGHT, S> {
@@ -132,26 +126,16 @@ impl OfflineSparseVoleKey {
     }
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [[u32; 4]; CODE_WEIGHT]>> Iterator
+impl<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>> Iterator
     for OnlineSparseVoleKey<CODE_WEIGHT, S>
 {
     type Item = PcgItem;
     fn next(&mut self) -> Option<Self::Item> {
         self.code.next().map(|v| {
-            v.iter()
-                .map(|idxs| {
-                    (
-                        self.accumulated_scalar_vector[idxs[0] as usize],
-                        self.accumulated_scalar_vector[idxs[1] as usize],
-                        self.accumulated_scalar_vector[idxs[2] as usize],
-                        self.accumulated_scalar_vector[idxs[3] as usize],
-                    )
-                })
+            v.into_iter()
+                .map(|idx| self.accumulated_scalar_vector[idx as usize])
                 .fold((GF2::zero(), GF128::zero()), |acc, cur| {
-                    (
-                        acc.0 + cur.0 .0 + cur.1 .0 + cur.2 .0 + cur.3 .0,
-                        acc.1 + cur.0 .1 + cur.1 .1 + cur.2 .1 + cur.3 .1,
-                    )
+                    (acc.0 + cur.0, acc.1 + cur.1)
                 })
         })
     }
