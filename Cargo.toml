@@ -39,6 +39,10 @@ name = "circuit_eval"
 harness = false
 
 [[bench]]
+name = "codes"
+harness = false
+
+[[bench]]
 name = "prf"
 harness = false
 
