@@ -153,10 +153,10 @@ pub fn online_pcg(c: &mut Criterion) {
     // Create online keys
     let mut scalar_online_key = scalar_offline_key.provide_online_key(scalar_code);
     let mut vector_online_key = vector_offline_key.provide_online_key(vector_code);
-    c.bench_function("online_pcg_scalar_with_preprocessing", |b| {
+    c.bench_function("scalar_online_preprocessing", |b| {
         b.iter(|| scalar_online_key.next())
     });
-    c.bench_function("online_pcg_vector_with_preprocessing", |b| {
+    c.bench_function("vector_online_preprocessing", |b| {
         b.iter(|| vector_online_key.next())
     });
 
@@ -166,10 +166,10 @@ pub fn online_pcg(c: &mut Criterion) {
     let vector_code = EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), code_seed);
     let mut scalar_online_key = scalar_offline_key.provide_online_key(scalar_code);
     let mut vector_online_key = vector_offline_key.provide_online_key(vector_code);
-    c.bench_function("online_pcg_scalar", |b| {
+    c.bench_function("scalar_online_no_preprocessing", |b| {
         b.iter(|| black_box(scalar_online_key.next().unwrap()))
     });
-    c.bench_function("online_pcg_vector", |b| {
+    c.bench_function("vector_online_no_preprocessing", |b| {
         b.iter(|| vector_online_key.next().unwrap())
     });
 }
