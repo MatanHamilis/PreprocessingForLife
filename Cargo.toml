@@ -54,3 +54,7 @@ harness = false
 name = "hash"
 harness = false
 
+[[bench]]
+name = "mem"
+harness = false
+
