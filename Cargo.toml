@@ -1,5 +1,6 @@
 [package]
 name = "silent_party"
+authors = ["Matan Hamilis <matan.hamilis@gmail.com>"]
 version = "0.1.0"
 edition = "2021"
 
