@@ -70,7 +70,6 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgScalarKeyGenState<INPUT_BITLEN> {
 
     pub fn keygen_offline<T: PprfAggregator>(&self) -> OfflineSparseVoleKey {
         let accumulated_vector = T::aggregate(&self.prf_keys, INPUT_BITLEN);
-        let mut sum = GF128::zero();
         OfflineSparseVoleKey {
             scalar: self.scalar,
             accumulated_vector,

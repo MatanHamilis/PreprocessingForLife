@@ -1,5 +1,4 @@
 use super::random_bit_ot::{RandomBitOTReceiverOnlinePCGKey, RandomBitOTSenderOnlinePCGKey};
-use super::random_bit_ot::{ReceiverRandomBitOtPcgItem, SenderRandomBitOtPcgItem};
 use super::random_ot::{RandomOTReceiverOnlinePCGKey, RandomOTSenderOnlinePCGKey};
 use super::sparse_vole::scalar_party::OnlineSparseVoleKey as ScalarPartySparseVoleOnlinePCGKey;
 use super::sparse_vole::vector_party::OnlineSparseVoleKey as VectorPartySparseVoleOnlinePCGKey;

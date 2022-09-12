@@ -77,7 +77,7 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgVectorKeyGenStateInitial<INPUT_BITL
 
 impl<const INPUT_BITLEN: usize> SparseVolePcgVectorKeyGenStateFinal<INPUT_BITLEN> {
     pub fn keygen_offline<T: PprfAggregator>(&self) -> OfflineSparseVoleKey {
-        let (mut accumulated_scalar_vector, mut numeric_puncturing_points) = T::aggregate_punctured(
+        let (accumulated_scalar_vector, mut numeric_puncturing_points) = T::aggregate_punctured(
             &self.pprf_keys,
             &self.puncturing_points,
             &self.punctured_values,

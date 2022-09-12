@@ -2,6 +2,8 @@ pub mod bristol_fashion;
 
 use std::io::{Read, Write};
 
+use serde::{de::DeserializeOwned, Serialize};
+
 use crate::{
     communicator::Communicator,
     fields::{FieldElement, GF2},
@@ -9,7 +11,7 @@ use crate::{
 };
 
 mod and_gate {
-    use crate::fields::{FieldElement, GF2};
+    use crate::fields::FieldElement;
     use crate::pcg::bit_beaver_triples::BeaverTripletShare;
     pub fn eval<S: FieldElement>(x: S, y: S) -> S {
         x * y
@@ -52,7 +54,7 @@ mod xor_gate {
 
 mod not_gate {
     use crate::fields::FieldElement;
-    pub fn eval<S: FieldElement>(mut x: S) -> S {
+    pub fn eval<S: FieldElement>(x: S) -> S {
         S::one() - x
     }
 

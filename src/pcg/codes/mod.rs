@@ -1,8 +1,5 @@
-use std::mem::{size_of, MaybeUninit};
-
 use aes::cipher::{BlockEncrypt, KeyInit};
 use aes::{Aes128, Block};
-use core::mem::transmute;
 
 use crate::xor_arrays;
 
