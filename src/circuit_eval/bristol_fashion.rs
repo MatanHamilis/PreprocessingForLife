@@ -97,11 +97,11 @@ fn parse_regular_gate_line(line: &str) -> Option<(GateType, usize)> {
     Some((gate_type, output_wire))
 }
 
-pub fn parse_bristol<'a, T: Iterator<Item = &'a str>>(mut lines: T) -> Option<Circuit> {
-    let (gates_num, total_wire_count) = parse_first_line(lines.next()?)?;
-    let (_, inputs_lengths) = parse_io_lines(lines.next()?)?;
+pub fn parse_bristol<T: Iterator<Item = String>>(mut lines: T) -> Option<Circuit> {
+    let (gates_num, total_wire_count) = parse_first_line(lines.next()?.as_str())?;
+    let (_, inputs_lengths) = parse_io_lines(lines.next()?.as_str())?;
     let input_wire_count: usize = inputs_lengths.iter().sum();
-    let (_, outputs_lengths) = parse_io_lines(lines.next()?)?;
+    let (_, outputs_lengths) = parse_io_lines(lines.next()?.as_str())?;
     let output_wire_count: usize = outputs_lengths.iter().sum();
     if input_wire_count + output_wire_count > total_wire_count {
         return None;
@@ -111,7 +111,7 @@ pub fn parse_bristol<'a, T: Iterator<Item = &'a str>>(mut lines: T) -> Option<Ci
     let mut wire_toplogical_idx = HashMap::<usize, usize>::new();
     let mut used_wires = HashSet::<usize>::new();
     for gate_line in lines.take(gates_num + 1) {
-        let (gate_type, output_wire) = parse_regular_gate_line(gate_line)?;
+        let (gate_type, output_wire) = parse_regular_gate_line(gate_line.as_str())?;
         let input_wires = match &gate_type {
             GateType::TwoInput { input, op: _ } => &input[..],
             GateType::OneInput { input, op: _ } => &input[..],

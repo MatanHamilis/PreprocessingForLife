@@ -91,7 +91,7 @@ fn eval_mpc_circuit<
 }
 
 pub fn circuit_eval_bench(c: &mut Criterion) {
-    let circuit = parse_bristol(AES_CIRCUIT.lines()).unwrap();
+    let circuit = parse_bristol(AES_CIRCUIT.lines().map(|s| s.to_string())).unwrap();
     // Test MPC eval.
     const WEIGHT: u8 = 128;
     const INPUT_BITLEN: usize = 18;
@@ -148,7 +148,7 @@ pub fn circuit_eval_bench(c: &mut Criterion) {
 }
 
 pub fn circuit_eval_bench_packed(c: &mut Criterion) {
-    let circuit = parse_bristol(AES_CIRCUIT.lines()).unwrap();
+    let circuit = parse_bristol(AES_CIRCUIT.lines().map(|s| s.to_string())).unwrap();
     // Test MPC eval.
     const WEIGHT: u8 = 128;
     const INPUT_BITLEN: usize = 18;

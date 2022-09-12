@@ -462,7 +462,8 @@ mod tests {
             "2 1 2 3 4 AND",
             "1 1 4 5 INV",
         ];
-        let circuit = parse_bristol(logical_or_circuit.into_iter()).expect("Failed to parse");
+        let circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
+            .expect("Failed to parse");
 
         // Test classical eval.
         assert_eq!(
