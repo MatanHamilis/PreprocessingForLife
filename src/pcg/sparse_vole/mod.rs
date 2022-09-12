@@ -183,7 +183,7 @@ pub(crate) mod tests {
     ) {
         // Define constants
         const WEIGHT: usize = 128;
-        const INPUT_BITLEN: usize = 10;
+        const INPUT_BITLEN: usize = 8;
         let prf_keys: [Vec<[u8; KEY_SIZE]>; PACK] = core::array::from_fn(|idx| {
             (0..WEIGHT)
                 .map(|num| {
@@ -241,7 +241,7 @@ pub(crate) mod tests {
     }
     #[test]
     fn test_full_correlation_packed() {
-        const PACK: usize = 10;
+        const PACK: usize = 3;
         const TESTS: usize = 3000;
         let scalar = [GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]); PACK];
         let (scalar_online_key, vector_online_key) = get_packed_correlation(&scalar);
