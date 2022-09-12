@@ -107,10 +107,11 @@ pub fn parse_bristol<T: Iterator<Item = String>>(mut lines: T) -> Option<Circuit
         return None;
     }
     lines.next();
+
     let mut gates: Vec<Vec<Gate>> = Vec::<Vec<Gate>>::new();
     let mut wire_toplogical_idx = HashMap::<usize, usize>::new();
     let mut used_wires = HashSet::<usize>::new();
-    for gate_line in lines.take(gates_num + 1) {
+    for gate_line in lines.take(gates_num) {
         let (gate_type, output_wire) = parse_regular_gate_line(gate_line.as_str())?;
         let input_wires = match &gate_type {
             GateType::TwoInput { input, op: _ } => &input[..],
