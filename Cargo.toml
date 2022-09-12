@@ -47,10 +47,6 @@ name = "prf"
 harness = false
 
 [[bench]]
-name = "dpf"
-harness = false
-
-[[bench]]
 name = "hash"
 harness = false
 
