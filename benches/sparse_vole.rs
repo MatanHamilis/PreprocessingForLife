@@ -19,6 +19,7 @@ use silent_party::pcg::sparse_vole::vector_party::{
     OfflineSparseVoleKey as VectorOfflineSparseVoleKey, SparseVolePcgVectorKeyGenStateFinal,
 };
 use silent_party::pprf::usize_to_bits;
+use silent_party::pseudorandom::prf::PrfInput;
 use silent_party::pseudorandom::{prf, KEY_SIZE};
 
 macro_rules! pack_test {
@@ -66,9 +67,9 @@ pub fn get_packed_offline_keys<
             u8::try_from(i).unwrap(),
         ])
     });
-    let puncturing_points: [Vec<[bool; INPUT_BITLEN]>; PACK] = core::array::from_fn(|idx| {
+    let puncturing_points: [Vec<PrfInput<INPUT_BITLEN>>; PACK] = core::array::from_fn(|idx| {
         (0..PRF_KEYS_NUM)
-            .map(|i| usize_to_bits((i + idx) * (100 + idx)))
+            .map(|i| usize_to_bits((i + idx) * (100 + idx)).into())
             .collect()
     });
     let prf_keys = core::array::from_fn(|idx| {
@@ -112,15 +113,15 @@ pub fn gen_material_for_offline_keys<const INPUT_BITLEN: usize>(
     let mut scalar_keygen_state =
         SparseVolePcgScalarKeyGenState::<INPUT_BITLEN>::new(scalar.clone(), prf_keys);
 
-    let puncturing_points = (0..prf_keys_num).map(|i| usize_to_bits(i * 100)).collect();
+    let puncturing_points = (0..prf_keys_num).map(|i| PrfInput::from(i * 100)).collect();
 
     let mut vector_keygen_state_init =
         SparseVolePcgVectorKeyGenStateInitial::new(puncturing_points);
 
     // Run Gen Algorithm
     let scalar_first_message = scalar_keygen_state.create_first_message();
-    let vector_msg = vector_keygen_state_init.create_first_message(&scalar_first_message);
-    let scalar_second_message = scalar_keygen_state.create_second_message(&vector_msg);
+    let vector_msg = vector_keygen_state_init.create_first_message(scalar_first_message);
+    let scalar_second_message = scalar_keygen_state.create_second_message(vector_msg);
     let vector_keygen_state_final =
         vector_keygen_state_init.handle_second_message(scalar_second_message);
     (scalar_keygen_state, vector_keygen_state_final)
@@ -256,15 +257,15 @@ pub fn offline_pcg(c: &mut Criterion) {
     let mut scalar_keygen_state =
         SparseVolePcgScalarKeyGenState::<INPUT_BITLEN>::new(scalar.clone(), prf_keys);
 
-    let puncturing_points = (0..PRF_KEYS_NUM).map(|i| usize_to_bits(i * 100)).collect();
+    let puncturing_points = (0..PRF_KEYS_NUM).map(|i| PrfInput::from(i * 100)).collect();
 
     let mut vector_keygen_state_init =
         SparseVolePcgVectorKeyGenStateInitial::new(puncturing_points);
 
     // Run Gen Algorithm
     let scalar_first_message = scalar_keygen_state.create_first_message();
-    let vector_msg = vector_keygen_state_init.create_first_message(&scalar_first_message);
-    let scalar_second_message = scalar_keygen_state.create_second_message(&vector_msg);
+    let vector_msg = vector_keygen_state_init.create_first_message(scalar_first_message);
+    let scalar_second_message = scalar_keygen_state.create_second_message(vector_msg);
     let vector_keygen_state_final =
         vector_keygen_state_init.handle_second_message(scalar_second_message);
 

@@ -1,16 +1,19 @@
+use std::io::{Read, Write};
+use std::ops::{Deref, DerefMut};
+
+use serde::{Deserialize, Serialize};
+
 use super::super::pprf_aggregator::PprfAggregator;
 use super::super::{xor_arrays, KEY_SIZE};
 use super::vector_party::VectorFirstMessage;
-use crate::fields::{FieldElement, GF128};
-use crate::pprf::distributed_generation::{Puncturer, SenderFirstMessage, SenderSecondMessage};
+use super::FirstMessageItem;
+use crate::communicator::Communicator;
+use crate::fields::GF128;
+use crate::pcg::pprf_aggregator::RegularErrorPprfAggregator;
+use crate::pprf::distributed_generation::{Puncturer, SenderSecondMessage};
+use serde_big_array::BigArray;
 
 pub type PcgItem = (GF128, GF128);
-
-pub struct SparseVolePcgScalarKeyGenState<const INPUT_BITLEN: usize> {
-    prf_keys: Vec<[u8; KEY_SIZE]>,
-    scalar: GF128,
-    puncturers: Vec<Puncturer<KEY_SIZE, INPUT_BITLEN>>,
-}
 
 pub struct OfflineSparseVoleKey {
     pub scalar: GF128,
@@ -25,12 +28,43 @@ pub struct OnlineSparseVoleKey<const CODE_WEIGHT: usize, S: Iterator<Item = [u32
     pub scalar: GF128,
 }
 
-pub type ScalarFirstMessage<const INPUT_BITLEN: usize> = Vec<[SenderFirstMessage; INPUT_BITLEN]>;
+pub type ScalarFirstMessage<const INPUT_BITLEN: usize> = Vec<FirstMessageItem<INPUT_BITLEN>>;
 
-pub type ScalarSecondMessage<const INPUT_BITLEN: usize> = Vec<(
-    [SenderSecondMessage<KEY_SIZE>; INPUT_BITLEN],
-    [u8; KEY_SIZE],
-)>;
+#[derive(Serialize, Deserialize)]
+pub struct ScalarSecondMessageItem<const INPUT_BITLEN: usize> {
+    #[serde(with = "BigArray")]
+    pub(super) ots: [SenderSecondMessage<KEY_SIZE>; INPUT_BITLEN],
+    #[serde(with = "BigArray")]
+    pub(super) sums: [u8; KEY_SIZE],
+}
+
+impl<const INPUT_BITLEN: usize>
+    From<(
+        [SenderSecondMessage<KEY_SIZE>; INPUT_BITLEN],
+        [u8; KEY_SIZE],
+    )> for ScalarSecondMessageItem<INPUT_BITLEN>
+{
+    fn from(
+        v: (
+            [SenderSecondMessage<KEY_SIZE>; INPUT_BITLEN],
+            [u8; KEY_SIZE],
+        ),
+    ) -> Self {
+        Self {
+            ots: v.0,
+            sums: v.1,
+        }
+    }
+}
+
+pub type ScalarSecondMessage<const INPUT_BITLEN: usize> =
+    Vec<ScalarSecondMessageItem<INPUT_BITLEN>>;
+
+pub struct SparseVolePcgScalarKeyGenState<const INPUT_BITLEN: usize> {
+    prf_keys: Vec<[u8; KEY_SIZE]>,
+    scalar: GF128,
+    puncturers: Vec<Puncturer<KEY_SIZE, INPUT_BITLEN>>,
+}
 
 impl<const INPUT_BITLEN: usize> SparseVolePcgScalarKeyGenState<INPUT_BITLEN> {
     /// Generates the first message of the Scalar party
@@ -49,21 +83,22 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgScalarKeyGenState<INPUT_BITLEN> {
     pub fn create_first_message(&mut self) -> ScalarFirstMessage<INPUT_BITLEN> {
         self.puncturers
             .iter_mut()
-            .map(|puncturer| puncturer.make_first_msg())
+            .map(|puncturer| puncturer.make_first_msg().into())
             .collect()
     }
 
     pub fn create_second_message(
         &mut self,
-        vector_msg: &VectorFirstMessage<INPUT_BITLEN>,
+        vector_msg: VectorFirstMessage<INPUT_BITLEN>,
     ) -> ScalarSecondMessage<INPUT_BITLEN> {
         self.puncturers
             .iter_mut()
-            .enumerate()
-            .map(|(i, puncturer)| {
+            .zip(vector_msg.into_iter())
+            .map(|(puncturer, vector_msg_item)| {
                 let mut s = puncturer.get_full_sum();
                 xor_arrays(&mut s, &self.scalar.into());
-                (puncturer.make_second_msg(vector_msg[i]), s)
+                &s;
+                (puncturer.make_second_msg(vector_msg_item.into()), s).into()
             })
             .collect()
     }
@@ -112,4 +147,29 @@ impl<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>> Iterator
             }
         }
     }
+}
+
+pub fn distributed_generation<const PRF_INPUT_BITLEN: usize, T: Write + Read>(
+    scalar: &GF128,
+    comm: &mut Communicator<T>,
+) -> Option<OfflineSparseVoleKey> {
+    // Define Gen State
+    let prf_keys: Vec<[u8; KEY_SIZE]> = match comm.receive() {
+        Some(v) => v,
+        None => {
+            return None;
+        }
+    };
+    let mut scalar_keygen_state =
+        SparseVolePcgScalarKeyGenState::<PRF_INPUT_BITLEN>::new(*scalar, prf_keys);
+
+    let scalar_first_message = scalar_keygen_state.create_first_message();
+    comm.send(scalar_first_message);
+    let vector_msg: VectorFirstMessage<PRF_INPUT_BITLEN> = comm.receive()?;
+    let scalar_second_message = scalar_keygen_state.create_second_message(vector_msg);
+    comm.send(scalar_second_message);
+
+    // Create Offline Keys
+    let scalar_offline_key = scalar_keygen_state.keygen_offline::<RegularErrorPprfAggregator>();
+    Some(scalar_offline_key)
 }

@@ -11,7 +11,9 @@ use std::convert::{From, Into};
 use rand::{RngCore, SeedableRng};
 #[cfg(not(feature = "aesni"))]
 use rand_chacha::ChaCha8Rng;
-#[derive(PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 pub enum Direction {
     Left,
     Right,
@@ -26,7 +28,9 @@ impl From<bool> for Direction {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct PuncturedKey<const INPUT_BITLEN: usize> {
+    #[serde(with = "BigArray")]
     keys: [([u8; KEY_SIZE], Direction); INPUT_BITLEN],
 }
 
@@ -86,6 +90,7 @@ impl<const INPUT_BITLEN: usize> PuncturedKey<INPUT_BITLEN> {
         for v in output.iter() {
             xor_arrays(&mut punctured_point_val, v)
         }
+
         output[mid] = punctured_point_val;
     }
 

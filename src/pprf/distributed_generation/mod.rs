@@ -13,6 +13,7 @@ use crate::ot::receiver::OTReceiver;
 pub use crate::ot::sender::FirstMessage as SenderFirstMessage;
 use crate::ot::sender::OTSender;
 pub use crate::ot::sender::SecondMessage as SenderSecondMessage;
+use crate::pseudorandom::prf::PrfInput;
 use crate::pseudorandom::{double_prg, KEY_SIZE};
 
 fn xor_arrays<const LENGTH: usize>(a: &mut [u8; LENGTH], b: &[u8; LENGTH]) {
@@ -105,7 +106,7 @@ enum PunctureeState {
 pub struct Puncturee<const KEY_WIDTH: usize, const DEPTH: usize> {
     ots: [OTReceiver<KEY_WIDTH>; DEPTH],
     state: PunctureeState,
-    punctured_point: Option<[bool; DEPTH]>,
+    punctured_point: Option<PrfInput<DEPTH>>,
 }
 
 impl<const KEY_WIDTH: usize, const DEPTH: usize> Default for Puncturee<KEY_WIDTH, DEPTH> {
@@ -121,14 +122,15 @@ impl<const KEY_WIDTH: usize, const DEPTH: usize> Puncturee<KEY_WIDTH, DEPTH> {
     pub fn make_first_msg(
         &mut self,
         sender_msg: [SenderFirstMessage; DEPTH],
-        punctured_point: [bool; DEPTH],
+        punctured_point: PrfInput<DEPTH>,
     ) -> [ReceiverFirstMessage; DEPTH] {
         assert!(self.state == PunctureeState::Initialized);
         self.state = PunctureeState::FirstMessageSent;
         self.punctured_point = Some(punctured_point);
         let mut output = [ReceiverFirstMessage::default(); DEPTH];
         for i in 0..DEPTH {
-            output[i] = self.ots[i].handle_first_sender_message(sender_msg[i], !punctured_point[i])
+            output[i] =
+                self.ots[i].handle_first_sender_message(sender_msg[i], !punctured_point.as_ref()[i])
         }
         output
     }
@@ -157,7 +159,8 @@ impl<const KEY_WIDTH: usize, const DEPTH: usize> Puncturee<KEY_WIDTH, DEPTH> {
                 left_new_keys.push(left);
                 right_new_keys.push(right);
             });
-            let (keys_to_xor, direction) = match self.punctured_point.unwrap()[i].into() {
+            let point = self.punctured_point.unwrap();
+            let (keys_to_xor, direction) = match point.as_ref()[i].into() {
                 // If the puncturing point goes to the right, we learn the left subtree.
                 Direction::Right => (&left_new_keys, Direction::Left),
                 // Otherwise learn the right subtree.
@@ -183,7 +186,7 @@ impl<const KEY_WIDTH: usize, const DEPTH: usize> Puncturee<KEY_WIDTH, DEPTH> {
 #[cfg(test)]
 mod tests {
     use super::{PuncturedKey, Puncturee, Puncturer};
-    use crate::pseudorandom::prf::prf_eval;
+    use crate::pseudorandom::prf::{prf_eval, PrfInput};
     use crate::pseudorandom::KEY_SIZE;
 
     fn int_to_bool_array<const BITS: usize>(mut num: u32) -> [bool; BITS] {
@@ -199,7 +202,7 @@ mod tests {
 
     fn simulate_protocol<const DEPTH: usize>(
         prf_key: [u8; KEY_SIZE],
-        punctured_point: [bool; DEPTH],
+        punctured_point: PrfInput<DEPTH>,
     ) -> Option<PuncturedKey<DEPTH>> {
         let mut puncturer = Puncturer::<KEY_SIZE, DEPTH>::new(&prf_key);
         let mut puncturee = Puncturee::<KEY_SIZE, DEPTH>::default();
@@ -213,7 +216,7 @@ mod tests {
     fn one_bit_output() {
         let prf_key = [0u8; KEY_SIZE];
         let puncture_point = [true];
-        let punctured_key = simulate_protocol(prf_key, puncture_point).unwrap();
+        let punctured_key = simulate_protocol(prf_key, puncture_point.into()).unwrap();
         assert!(punctured_key.try_eval(puncture_point).is_none());
         assert_eq!(
             punctured_key.try_eval([false]).unwrap(),
@@ -225,10 +228,10 @@ mod tests {
     fn check_large_domain() {
         let prf_key = [11u8; KEY_SIZE];
         let puncture_num = 0b1010101;
-        let puncture_point = int_to_bool_array::<10>(puncture_num);
-        let punctured_key = simulate_protocol(prf_key, puncture_point).unwrap();
+        let puncture_point = int_to_bool_array::<12>(puncture_num);
+        let punctured_key = simulate_protocol(prf_key, puncture_point.into()).unwrap();
         for i in 0..1 << puncture_point.len() {
-            let prf_input = int_to_bool_array::<10>(i);
+            let prf_input = int_to_bool_array::<12>(i);
             if i != puncture_num {
                 assert_eq!(
                     punctured_key.try_eval(prf_input).unwrap(),

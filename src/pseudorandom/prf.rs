@@ -1,9 +1,51 @@
+use crate::pcg::xor_arrays;
+use crate::pprf::bits_to_usize;
+use crate::pprf::usize_to_bits;
+
 use super::double_prg;
 use super::double_prg_many;
 use super::KEY_SIZE;
 #[cfg(feature = "aesni")]
 use aes::Block;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_big_array::BigArray;
 use std::mem::transmute;
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+pub struct PrfInput<const INPUT_LEN: usize>(#[serde(with = "BigArray")] [bool; INPUT_LEN]);
+impl<const INPUT_LEN: usize> From<[bool; INPUT_LEN]> for PrfInput<INPUT_LEN> {
+    fn from(v: [bool; INPUT_LEN]) -> Self {
+        Self { 0: v }
+    }
+}
+
+impl<const INPUT_BITLEN: usize> Into<[bool; INPUT_BITLEN]> for PrfInput<INPUT_BITLEN> {
+    fn into(self) -> [bool; INPUT_BITLEN] {
+        self.0
+    }
+}
+
+impl<const INPUT_BITLEN: usize> AsRef<[bool; INPUT_BITLEN]> for PrfInput<INPUT_BITLEN> {
+    fn as_ref(&self) -> &[bool; INPUT_BITLEN] {
+        &self.0
+    }
+}
+
+impl<const INPUT_BITLEN: usize> From<usize> for PrfInput<INPUT_BITLEN> {
+    fn from(v: usize) -> Self {
+        Self {
+            0: usize_to_bits(v),
+        }
+    }
+}
+
+impl<const INPUT_BITLEN: usize> From<&PrfInput<INPUT_BITLEN>> for usize {
+    fn from(v: &PrfInput<INPUT_BITLEN>) -> Self {
+        bits_to_usize(v.as_ref())
+    }
+}
+
 pub fn prf_eval(key: [u8; KEY_SIZE], input: &[bool]) -> [u8; KEY_SIZE] {
     input.iter().fold(key, |prf_out, &input_bit| {
         let prg_out = double_prg(&prf_out);
@@ -67,19 +109,21 @@ pub fn prf_eval_all_into_slice(key: &[u8; KEY_SIZE], depth: usize, output: &mut 
     assert!(output.len() == (1 << depth));
     let mut helper = block_vec(output.len());
     output[0] = *key;
-    let output: &mut [Block] = unsafe { transmute(output) };
+    let output_blocks: &mut [Block] =
+        unsafe { std::slice::from_raw_parts_mut(output.as_mut_ptr().cast(), output.len()) };
 
     for input_depth in (0..depth).step_by(cache_depth) {
         let level_depth = std::cmp::min(cache_depth, depth - input_depth);
         // Spread output for next evaluation.
-        ((1 << input_depth) - 1..=0)
-            .for_each(|block_idx| output[block_idx << level_depth] = output[block_idx]);
+        (0..(1 << input_depth)).rev().for_each(|block_idx| {
+            output_blocks[block_idx << level_depth] = output_blocks[block_idx]
+        });
 
-        output
+        output_blocks
             .chunks_mut(1 << level_depth)
             .zip(helper.chunks_mut(1 << level_depth))
-            .for_each(|(output, helper)| {
-                prf_eval_block_inside_cache(level_depth, output[0], output, helper)
+            .for_each(|(output_chunk, helper)| {
+                prf_eval_block_inside_cache(level_depth, output_chunk[0], output_chunk, helper)
             });
     }
 }

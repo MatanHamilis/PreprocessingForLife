@@ -33,6 +33,12 @@ impl Into<Block> for GF128 {
     }
 }
 
+impl From<Block> for GF128 {
+    fn from(b: Block) -> Self {
+        unsafe { std::mem::transmute(b) }
+    }
+}
+
 impl Sum for GF128 {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(GF128::zero(), |acc, v| acc + v)

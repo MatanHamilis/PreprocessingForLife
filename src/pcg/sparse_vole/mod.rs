@@ -8,6 +8,10 @@
 //! In other words, the ScalarParty sums $PRF(i)$ for all $i$ in the input domain of the PRF in a value $s$ and sends $(s+x)\in \mathbb{F}_{2^128}$ to the VectorParty$.
 //! By subtracting from the value it received the sum of all points in the PPRF, the VectorParty can obtain the $p+x$ where $p$ is the value of the PRF at the puncturing point.
 
+use std::ops::{Deref, DerefMut};
+
+use curve25519_dalek::ristretto::RistrettoPoint;
+
 use self::packed::{SparseVoleScalarPartyPackedOfflineKey, SparseVoleVectorPartyPackedOfflineKey};
 use self::scalar_party::{
     OfflineSparseVoleKey as ScalarSparseVoleOfflineKey, SparseVolePcgScalarKeyGenState,
@@ -22,15 +26,68 @@ use self::{
 use super::codes::EACode;
 use super::pprf_aggregator::RegularErrorPprfAggregator;
 use crate::fields::GF128;
+use crate::pseudorandom::prf::PrfInput;
 use crate::pseudorandom::KEY_SIZE;
+use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 
 pub mod packed;
 pub mod scalar_party;
 pub mod vector_party;
 
+#[derive(Serialize, Deserialize)]
+pub struct FirstMessageItem<const INPUT_BITLEN: usize>(
+    #[serde(with = "BigArray")] [RistrettoPoint; INPUT_BITLEN],
+);
+
+impl<const INPUT_BITLEN: usize> AsRef<[RistrettoPoint; INPUT_BITLEN]>
+    for FirstMessageItem<INPUT_BITLEN>
+{
+    fn as_ref(&self) -> &[RistrettoPoint; INPUT_BITLEN] {
+        &self.0
+    }
+}
+
+impl<const INPUT_BITLEN: usize> AsMut<[RistrettoPoint; INPUT_BITLEN]>
+    for FirstMessageItem<INPUT_BITLEN>
+{
+    fn as_mut(&mut self) -> &mut [RistrettoPoint; INPUT_BITLEN] {
+        &mut self.0
+    }
+}
+
+impl<const INPUT_BITLEN: usize> Deref for FirstMessageItem<INPUT_BITLEN> {
+    type Target = [RistrettoPoint; INPUT_BITLEN];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<const INPUT_BITLEN: usize> DerefMut for FirstMessageItem<INPUT_BITLEN> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<const INPUT_BITLEN: usize> From<[RistrettoPoint; INPUT_BITLEN]>
+    for FirstMessageItem<INPUT_BITLEN>
+{
+    fn from(v: [RistrettoPoint; INPUT_BITLEN]) -> Self {
+        Self { 0: v }
+    }
+}
+
+impl<const INPUT_BITLEN: usize> Into<[RistrettoPoint; INPUT_BITLEN]>
+    for FirstMessageItem<INPUT_BITLEN>
+{
+    fn into(self) -> [RistrettoPoint; INPUT_BITLEN] {
+        self.0
+    }
+}
+
 pub fn trusted_deal<const PRF_INPUT_BITLEN: usize, const CODE_WEIGHT: usize>(
     scalar: &GF128,
-    puncturing_points: Vec<[bool; PRF_INPUT_BITLEN]>,
+    puncturing_points: Vec<PrfInput<PRF_INPUT_BITLEN>>,
     prf_keys: Vec<[u8; KEY_SIZE]>,
 ) -> (
     OnlineSparseVoleKeyScalar<CODE_WEIGHT, EACode<CODE_WEIGHT>>,
@@ -45,8 +102,8 @@ pub fn trusted_deal<const PRF_INPUT_BITLEN: usize, const CODE_WEIGHT: usize>(
 
     // Run Gen Algorithm
     let scalar_first_message = scalar_keygen_state.create_first_message();
-    let vector_msg = vector_keygen_state_init.create_first_message(&scalar_first_message);
-    let scalar_second_message = scalar_keygen_state.create_second_message(&vector_msg);
+    let vector_msg = vector_keygen_state_init.create_first_message(scalar_first_message);
+    let scalar_second_message = scalar_keygen_state.create_second_message(vector_msg);
     let vector_keygen_state_final =
         vector_keygen_state_init.handle_second_message(scalar_second_message);
 
@@ -68,7 +125,7 @@ pub fn trusted_deal<const PRF_INPUT_BITLEN: usize, const CODE_WEIGHT: usize>(
 
 pub fn trusted_deal_packed_offline_keys<const PACK: usize, const PRF_INPUT_BITLEN: usize>(
     scalar: &[GF128; PACK],
-    puncturing_points: [Vec<[bool; PRF_INPUT_BITLEN]>; PACK],
+    puncturing_points: [Vec<PrfInput<PRF_INPUT_BITLEN>>; PACK],
     prf_keys: [Vec<[u8; KEY_SIZE]>; PACK],
 ) -> (
     SparseVoleScalarPartyPackedOfflineKey<PACK>,
@@ -96,8 +153,8 @@ pub fn trusted_deal_packed_offline_keys<const PACK: usize, const PRF_INPUT_BITLE
                 // Run Gen Algorithm
                 let scalar_first_message = scalar_keygen_state.create_first_message();
                 let vector_msg =
-                    vector_keygen_state_init.create_first_message(&scalar_first_message);
-                let scalar_second_message = scalar_keygen_state.create_second_message(&vector_msg);
+                    vector_keygen_state_init.create_first_message(scalar_first_message);
+                let scalar_second_message = scalar_keygen_state.create_second_message(vector_msg);
                 let vector_keygen_state_final =
                     vector_keygen_state_init.handle_second_message(scalar_second_message);
 
@@ -140,6 +197,7 @@ pub(crate) mod tests {
     };
     use crate::pcg::codes::EACode;
     use crate::pprf::usize_to_bits;
+    use crate::pseudorandom::prf::PrfInput;
     use crate::{
         fields::{FieldElement, GF128},
         pcg::sparse_vole::{trusted_deal, trusted_deal_packed_offline_keys},
@@ -168,7 +226,7 @@ pub(crate) mod tests {
             })
             .collect();
         let puncturing_points = (0..WEIGHT)
-            .map(|i| usize_to_bits::<INPUT_BITLEN>(i * 100))
+            .map(|i| usize_to_bits::<INPUT_BITLEN>(i * 100).into())
             .collect();
 
         // Create online keys
@@ -198,9 +256,9 @@ pub(crate) mod tests {
                 })
                 .collect()
         });
-        let puncturing_points: [Vec<[bool; INPUT_BITLEN]>; PACK] = core::array::from_fn(|idx| {
+        let puncturing_points: [Vec<PrfInput<INPUT_BITLEN>>; PACK] = core::array::from_fn(|idx| {
             (0..WEIGHT)
-                .map(|i| usize_to_bits::<INPUT_BITLEN>(i * (100 + idx)))
+                .map(|i| usize_to_bits::<INPUT_BITLEN>(i * (100 + idx)).into())
                 .collect()
         });
 

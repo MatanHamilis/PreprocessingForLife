@@ -10,6 +10,7 @@ use silent_party::pcg::packed_random_bit_ot::{
 };
 use silent_party::pcg::preprocessor::Preprocessor;
 use silent_party::pprf::usize_to_bits;
+use silent_party::pseudorandom::prf::PrfInput;
 use silent_party::pseudorandom::KEY_SIZE;
 
 fn share_inputs<S: FieldElement>(input: &[S]) -> (Vec<S>, Vec<S>) {
@@ -36,9 +37,9 @@ fn get_prf_keys(amount: u8) -> Vec<[u8; KEY_SIZE]> {
         .collect()
 }
 
-fn get_puncturing_points<const INPUT_BITLEN: usize>(amount: u8) -> Vec<[bool; INPUT_BITLEN]> {
+fn get_puncturing_points<const INPUT_BITLEN: usize>(amount: u8) -> Vec<PrfInput<INPUT_BITLEN>> {
     (0..amount)
-        .map(|i| usize_to_bits(100 * usize::from(i)))
+        .map(|i| PrfInput::from(100 * i as usize))
         .collect()
 }
 
@@ -98,7 +99,7 @@ pub fn circuit_eval_bench(c: &mut Criterion) {
     const CODE_WEIGHT: usize = 8;
     let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
     let prf_keys = get_prf_keys(WEIGHT);
-    let puncturing_points: Vec<[bool; INPUT_BITLEN]> = get_puncturing_points(WEIGHT);
+    let puncturing_points: Vec<PrfInput<INPUT_BITLEN>> = get_puncturing_points(WEIGHT);
     let (scalar_online_key, vector_online_key) = silent_party::pcg::sparse_vole::trusted_deal::<
         INPUT_BITLEN,
         CODE_WEIGHT,
@@ -155,7 +156,7 @@ pub fn circuit_eval_bench_packed(c: &mut Criterion) {
     const CODE_WEIGHT: usize = 8;
     let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
     let prf_keys = get_prf_keys(WEIGHT);
-    let puncturing_points: Vec<[bool; INPUT_BITLEN]> = get_puncturing_points(WEIGHT);
+    let puncturing_points: Vec<PrfInput<INPUT_BITLEN>> = get_puncturing_points(WEIGHT);
     let (scalar_online_key, vector_online_key) = silent_party::pcg::sparse_vole::trusted_deal::<
         INPUT_BITLEN,
         CODE_WEIGHT,
