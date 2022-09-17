@@ -129,10 +129,13 @@ fn handle_server(circuit: &Circuit, local_port: u16) {
     let ea_code = EACode::<8>::new(pcg_offline_key.vector_length(), [0u8; 16]);
     let pcg_online_key = pcg_offline_key.provide_online_key(ea_code);
     info!("PCG offline key generated successfully!");
+    info!("Preparing input...");
     let my_input = vec![GF2::default(); circuit.input_wire_count() / 2];
     let peer_input_share = vec![GF2::default(); circuit.input_wire_count() / 2];
+    info!("Generating online keys...");
     let beaver_triplet_pcg_online_key: BeaverTripletBitPartyOnlinePCGKey<GF2, _> =
         pcg_online_key.into();
+    info!("Starting circuit evaluation NOW!");
     let output = eval_circuit(
         circuit,
         (my_input, peer_input_share),
@@ -142,6 +145,8 @@ fn handle_server(circuit: &Circuit, local_port: u16) {
     )
     .unwrap();
     info!("Finished computation Successfully!");
+    info!("Total bytes sent: {}", communicator.total_byte_write());
+    info!("Total bytes received: {}", communicator.total_bytes_read());
     info!("Output:");
     for (idx, val) in output.iter().enumerate() {
         trace!("output[{}]={:?}", idx, val);
@@ -167,10 +172,13 @@ fn handle_client(circuit: &Circuit, peer_address: SocketAddrV4) {
     let ea_code = EACode::<8>::new(pcg_offline_key.vector_length(), [0u8; 16]);
     let pcg_online_key = pcg_offline_key.provide_online_key(ea_code);
     info!("PCG offline key generated successfully!");
+    info!("Preparing input...");
     let my_input = vec![GF2::default(); circuit.input_wire_count() / 2];
     let peer_input_share = vec![GF2::default(); circuit.input_wire_count() / 2];
+    info!("Generating online keys...");
     let beaver_triplet_pcg_online_key: BeaverTripletScalarPartyOnlinePCGKey<GF2, _> =
         pcg_online_key.into();
+    info!("Starting circuit evaluation NOW!");
     let output = eval_circuit(
         circuit,
         (my_input, peer_input_share),
@@ -180,6 +188,8 @@ fn handle_client(circuit: &Circuit, peer_address: SocketAddrV4) {
     )
     .unwrap();
     info!("Finished computation Successfully!");
+    info!("Total bytes sent: {}", communicator.total_byte_write());
+    info!("Total bytes received: {}", communicator.total_bytes_read());
     info!("Output:");
     for (idx, val) in output.iter().enumerate() {
         trace!("output[{}]={:?}", idx, val);
