@@ -145,6 +145,7 @@ impl Circuit {
 #[derive(Debug)]
 pub enum CircuitEvalSessionState<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> {
     WaitingToSend(CircuitEvalSessionWaitingToSend<'a, S, T>),
+    WaitingToGenCorrelation(CircuitEvalSessionWaitingToGenCorrelation<'a, S, T>),
     WaitingToReceive(CircuitEvalSessionWaitingToReceive<'a, S, T>),
     Finished(Vec<S>),
 }
@@ -154,7 +155,8 @@ struct CircuitEvalSession<'a, S: FieldElement, T: Iterator<Item = BeaverTripletS
     wires: Vec<S>,
     layer_to_process: usize,
     beaver_triple_gen: T,
-    beaver_triples_current_layer: Vec<BeaverTripletShare<S>>,
+    beaver_triples_current_layer: Option<Vec<BeaverTripletShare<S>>>,
+    beaver_triples_next_layer: Option<Vec<BeaverTripletShare<S>>>,
     party_id: bool,
 }
 
@@ -162,6 +164,14 @@ struct CircuitEvalSession<'a, S: FieldElement, T: Iterator<Item = BeaverTripletS
 
 #[derive(Debug)]
 pub struct CircuitEvalSessionWaitingToSend<
+    'a,
+    S: FieldElement,
+    T: Iterator<Item = BeaverTripletShare<S>>,
+> {
+    session: CircuitEvalSession<'a, S, T>,
+}
+#[derive(Debug)]
+pub struct CircuitEvalSessionWaitingToGenCorrelation<
     'a,
     S: FieldElement,
     T: Iterator<Item = BeaverTripletShare<S>>,
@@ -177,7 +187,28 @@ pub struct CircuitEvalSessionWaitingToReceive<
     session: CircuitEvalSession<'a, S, T>,
 }
 
-impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> CircuitEvalSession<'a, S, T> {}
+impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> CircuitEvalSession<'a, S, T> {
+    fn generate_beaver_triples_for_layer(
+        &mut self,
+        layer: usize,
+    ) -> Result<Vec<BeaverTripletShare<S>>, ()> {
+        let layer = self.circuit.gates.get(layer).ok_or(())?;
+        Ok(layer
+            .iter()
+            .filter_map(|gate| match gate.gate_type {
+                GateType::OneInput { input: _, op: _ } => None,
+                GateType::TwoInput { input, op } => match op {
+                    GateTwoInputOp::Xor => None,
+                    GateTwoInputOp::And => Some(
+                        self.beaver_triple_gen
+                            .next()
+                            .expect("Correlation generator error! Shouldn't happen"),
+                    ),
+                },
+            })
+            .collect())
+    }
+}
 
 impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
     CircuitEvalSessionState<'a, S, T>
@@ -199,14 +230,20 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
             )
             .copied()
             .collect();
-        let session = CircuitEvalSession {
+        let mut session = CircuitEvalSession {
             circuit,
             wires,
             beaver_triple_gen,
-            beaver_triples_current_layer: vec![],
+            beaver_triples_current_layer: None,
+            beaver_triples_next_layer: None,
             layer_to_process: 0,
             party_id,
         };
+        session.beaver_triples_next_layer = Some(
+            session
+                .generate_beaver_triples_for_layer(0)
+                .expect("Error generating beaver triples for first layer"),
+        );
         CircuitEvalSessionState::WaitingToSend(CircuitEvalSessionWaitingToSend { session })
     }
 }
@@ -223,11 +260,13 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
             .gates
             .get(layer_id)
             .expect("Missing layer, corrupt state!");
-        session.beaver_triples_current_layer.clear();
-        session
-            .beaver_triples_current_layer
-            .reserve_exact(current_layer.len());
+        session.beaver_triples_current_layer = session.beaver_triples_next_layer.take();
 
+        let mut triples = session
+            .beaver_triples_current_layer
+            .as_ref()
+            .expect("No beaver triples ready for next layer!")
+            .iter();
         // Generate the messages.
         let msgs = current_layer
             .iter()
@@ -242,16 +281,14 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
                         match op {
                             GateTwoInputOp::Xor => xor_gate::eval_mpc(x_share, y_share),
                             GateTwoInputOp::And => {
-                                let triple = session
-                                    .beaver_triple_gen
+                                let triple = triples
                                     .next()
                                     .expect("Beaver triples generator is exhausted.");
                                 let msg = Some(and_gate::mpc_make_msgs(
                                     session.wires[input_wires[0]],
                                     session.wires[input_wires[1]],
-                                    &triple,
+                                    triple,
                                 ));
-                                session.beaver_triples_current_layer.push(triple);
                                 return msg;
                             }
                         }
@@ -265,14 +302,31 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
                 None
             })
             .collect();
-        let new_state =
-            CircuitEvalSessionState::WaitingToReceive(CircuitEvalSessionWaitingToReceive {
-                session,
-            });
+        let new_state = CircuitEvalSessionState::WaitingToGenCorrelation(
+            CircuitEvalSessionWaitingToGenCorrelation { session },
+        );
         (new_state, msgs)
     }
 }
 
+impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
+    CircuitEvalSessionWaitingToGenCorrelation<'a, S, T>
+{
+    pub fn gen_correlation_for_next_layer(mut self) -> CircuitEvalSessionState<'a, S, T> {
+        if self.session.circuit.gates.len() == self.session.layer_to_process + 1 {
+            self.session.beaver_triples_next_layer = None;
+        } else {
+            self.session.beaver_triples_next_layer = Some(
+                self.session
+                    .generate_beaver_triples_for_layer(self.session.layer_to_process + 1)
+                    .expect("Failed to generate beaver triples for next layer!"),
+            );
+        }
+        CircuitEvalSessionState::WaitingToReceive(CircuitEvalSessionWaitingToReceive {
+            session: self.session,
+        })
+    }
+}
 impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
     CircuitEvalSessionWaitingToReceive<'a, S, T>
 {
@@ -288,7 +342,11 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
             .get(layer_id)
             .expect("Current layer id missing, corrupt struct");
         let mut responses_iter = responses.into_iter();
-        let mut beaver_triples_iter = session.beaver_triples_current_layer.iter();
+        let mut beaver_triples_iter = session
+            .beaver_triples_current_layer
+            .as_ref()
+            .expect("Failed to fetch triples for current layer!")
+            .iter();
         for g in current_layer {
             if let GateType::TwoInput {
                 input,
@@ -315,7 +373,7 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
             panic!("Malformed response from peer! Data too long");
         }
         session.layer_to_process = layer_id + 1;
-        session.beaver_triples_current_layer.clear();
+        session.beaver_triples_current_layer = None;
         if session
             .circuit
             .gates
@@ -361,7 +419,14 @@ pub fn eval_circuit<
             _ => panic!(),
         };
         session = session_temp;
-        let queries_received = communicator.exchange(queries_to_send).ok_or(())?;
+        communicator.send(queries_to_send).ok_or(())?;
+        session = match session {
+            CircuitEvalSessionState::WaitingToGenCorrelation(session) => {
+                session.gen_correlation_for_next_layer()
+            }
+            _ => panic!(),
+        };
+        let queries_received: Vec<_> = communicator.receive().ok_or(())?;
         session = match session {
             CircuitEvalSessionState::WaitingToReceive(session) => {
                 session.handle_layer_responses(queries_received)
@@ -444,8 +509,20 @@ mod tests {
             };
             second_party_session = second_party_session_temp;
             first_party_session = match first_party_session {
+                CircuitEvalSessionState::WaitingToGenCorrelation(session) => {
+                    session.gen_correlation_for_next_layer()
+                }
+                _ => panic!(),
+            };
+            first_party_session = match first_party_session {
                 CircuitEvalSessionState::WaitingToReceive(session) => {
                     session.handle_layer_responses(second_party_queries)
+                }
+                _ => panic!(),
+            };
+            second_party_session = match second_party_session {
+                CircuitEvalSessionState::WaitingToGenCorrelation(session) => {
+                    session.gen_correlation_for_next_layer()
                 }
                 _ => panic!(),
             };
