@@ -120,6 +120,7 @@ fn handle_server(circuit: &Circuit, local_port: u16) {
             return;
         }
     };
+    stream.set_nodelay(true).expect("Failed to set nodelay");
     let mut communicator = Communicator::from(stream);
     info!("Starting PCG Generation...");
     let prf_keys = get_prf_keys(WEIGHT);
@@ -163,6 +164,7 @@ fn handle_client(circuit: &Circuit, peer_address: SocketAddrV4) {
             return;
         }
     };
+    stream.set_nodelay(true).expect("Failed to set nodelay");
     trace!("Connected to peer succesfully");
     let mut communicator = Communicator::from(stream);
     let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
