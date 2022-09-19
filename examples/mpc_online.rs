@@ -136,6 +136,7 @@ fn handle_server(circuit: &Circuit, local_port: u16) {
     info!("Generating online keys...");
     let beaver_triplet_pcg_online_key: BeaverTripletBitPartyOnlinePCGKey<GF2, _> =
         pcg_online_key.into();
+    let eval_start = Instant::now();
     info!("Starting circuit evaluation NOW!");
     let output = eval_circuit(
         circuit,
@@ -145,7 +146,9 @@ fn handle_server(circuit: &Circuit, local_port: u16) {
         true,
     )
     .unwrap();
-    info!("Finished computation Successfully!");
+    let time = eval_start.elapsed();
+    info!("Finished computation Successfully! Here are some statistics:");
+    info!("Circuit Evaluation Took: {} millisecond", time.as_millis());
     info!("Total bytes sent: {}", communicator.total_byte_write());
     info!("Total bytes received: {}", communicator.total_bytes_read());
     info!("Output:");
@@ -181,6 +184,7 @@ fn handle_client(circuit: &Circuit, peer_address: SocketAddrV4) {
     let beaver_triplet_pcg_online_key: BeaverTripletScalarPartyOnlinePCGKey<GF2, _> =
         pcg_online_key.into();
     info!("Starting circuit evaluation NOW!");
+    let eval_start = Instant::now();
     let output = eval_circuit(
         circuit,
         (my_input, peer_input_share),
@@ -189,7 +193,9 @@ fn handle_client(circuit: &Circuit, peer_address: SocketAddrV4) {
         false,
     )
     .unwrap();
-    info!("Finished computation Successfully!");
+    let time = eval_start.elapsed();
+    info!("Finished computation Successfully! Here are some statistics:");
+    info!("Circuit Evaluation Took: {} millisecond", time.as_millis());
     info!("Total bytes sent: {}", communicator.total_byte_write());
     info!("Total bytes received: {}", communicator.total_bytes_read());
     info!("Output:");
