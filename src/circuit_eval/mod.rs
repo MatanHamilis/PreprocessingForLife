@@ -137,6 +137,9 @@ impl Circuit {
     pub fn input_wire_count(&self) -> usize {
         self.input_wire_count
     }
+    pub fn get_layer_count(&self) -> usize {
+        self.gates.len()
+    }
     pub fn output_wire_count(&self) -> usize {
         self.output_wire_count
     }
