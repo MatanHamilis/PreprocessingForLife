@@ -148,6 +148,7 @@ impl Into<[u8; 16]> for GF128 {
 }
 
 impl FieldElement for GF128 {
+    const BITS: usize = 128;
     fn one() -> Self {
         GF128(GF128::U64X2_ONE)
     }
@@ -162,6 +163,18 @@ impl FieldElement for GF128 {
 
     fn is_zero(&self) -> bool {
         self.0 == GF128::U64X2_ZERO
+    }
+    fn from_bits(bits: &[bool]) -> Option<Self> {
+        if bits.len() != Self::BITS {
+            return None;
+        }
+        let mut output = u64x2::default();
+        for (idx, bit) in bits.iter().enumerate() {
+            if *bit {
+                GF128::toggle_bit(&mut output, idx as u32);
+            }
+        }
+        Some(GF128(output))
     }
 }
 

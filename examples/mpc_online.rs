@@ -1,22 +1,20 @@
 use pretty_env_logger::env_logger;
-use rayon::vec;
 use std::{
     fs::File,
     io::BufRead,
     net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::exit,
-    str::FromStr,
     time::Instant,
 };
 
 use clap::{Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
 use log::{debug, error, info, trace, warn};
+use silent_party::pcg::sparse_vole::vector_party::distributed_generation as vector_distributed_generation;
 use silent_party::{
     circuit_eval::{bristol_fashion::parse_bristol, eval_circuit, Circuit},
     communicator::Communicator,
-    fields::GF128,
+    fields::{FieldElement, PackedGF2Array, GF128},
     pcg::{
         bit_beaver_triples::{
             BeaverTripletBitPartyOnlinePCGKey, BeaverTripletScalarPartyOnlinePCGKey,
@@ -27,11 +25,8 @@ use silent_party::{
     pprf::usize_to_bits,
     pseudorandom::{prf::PrfInput, KEY_SIZE},
 };
-use silent_party::{
-    fields::GF2,
-    pcg::sparse_vole::vector_party::distributed_generation as vector_distributed_generation,
-};
 
+const INPUT_WIDTH: usize = 2;
 /// Two Party PCG-based Semi-Honest MPC for boolean circuits.
 #[derive(Parser, Debug)]
 #[clap(name = "MPC Runner")]
@@ -133,11 +128,14 @@ fn handle_server(circuit: &Circuit, local_port: u16) {
     let pcg_online_key = pcg_offline_key.provide_online_key(ea_code);
     info!("PCG offline key generated successfully!");
     info!("Preparing input...");
-    let my_input = vec![GF2::default(); circuit.input_wire_count() / 2];
-    let peer_input_share = vec![GF2::default(); circuit.input_wire_count() / 2];
+    let my_input = vec![PackedGF2Array::<INPUT_WIDTH>::zero(); circuit.input_wire_count() / 2];
+    let peer_input_share =
+        vec![PackedGF2Array::<INPUT_WIDTH>::zero(); circuit.input_wire_count() / 2];
     info!("Generating online keys...");
-    let beaver_triplet_pcg_online_key: BeaverTripletBitPartyOnlinePCGKey<GF2, _> =
-        pcg_online_key.into();
+    let beaver_triplet_pcg_online_key: BeaverTripletBitPartyOnlinePCGKey<
+        PackedGF2Array<INPUT_WIDTH>,
+        _,
+    > = pcg_online_key.into();
     let eval_start = Instant::now();
     info!("Starting circuit evaluation NOW!");
     let output = eval_circuit(
@@ -180,11 +178,14 @@ fn handle_client(circuit: &Circuit, peer_address: SocketAddrV4) {
     let pcg_online_key = pcg_offline_key.provide_online_key(ea_code);
     info!("PCG offline key generated successfully!");
     info!("Preparing input...");
-    let my_input = vec![GF2::default(); circuit.input_wire_count() / 2];
-    let peer_input_share = vec![GF2::default(); circuit.input_wire_count() / 2];
+    let my_input = vec![PackedGF2Array::<INPUT_WIDTH>::zero(); circuit.input_wire_count() / 2];
+    let peer_input_share =
+        vec![PackedGF2Array::<INPUT_WIDTH>::zero(); circuit.input_wire_count() / 2];
     info!("Generating online keys...");
-    let beaver_triplet_pcg_online_key: BeaverTripletScalarPartyOnlinePCGKey<GF2, _> =
-        pcg_online_key.into();
+    let beaver_triplet_pcg_online_key: BeaverTripletScalarPartyOnlinePCGKey<
+        PackedGF2Array<INPUT_WIDTH>,
+        _,
+    > = pcg_online_key.into();
     info!("Starting circuit evaluation NOW!");
     let eval_start = Instant::now();
     let output = eval_circuit(

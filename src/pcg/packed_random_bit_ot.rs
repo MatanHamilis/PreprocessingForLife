@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use super::{
     random_bit_ot::{
         RandomBitOTReceiverOnlinePCGKey, RandomBitOTSenderOnlinePCGKey, ReceiverRandomBitOtPcgItem,
@@ -6,82 +8,116 @@ use super::{
     random_ot::{RandomOTReceiverOnlinePCGKey, RandomOTSenderOnlinePCGKey},
     sparse_vole::{scalar_party, vector_party},
 };
-use crate::fields::PackedGF2U64;
+use crate::fields::FieldElement;
 
-pub struct PackedRandomBitOtReceiverU64<T: Iterator<Item = ReceiverRandomBitOtPcgItem>> {
+pub struct PackedRandomBitOtReceiverPcgKey<
+    S: FieldElement,
+    T: Iterator<Item = ReceiverRandomBitOtPcgItem>,
+> {
     iter: T,
+    phantom_data: PhantomData<S>,
+    buffer_one: Vec<bool>,
+    buffer_two: Vec<bool>,
 }
 
-impl<T: Iterator<Item = ReceiverRandomBitOtPcgItem>> From<T> for PackedRandomBitOtReceiverU64<T> {
+impl<S: FieldElement, T: Iterator<Item = ReceiverRandomBitOtPcgItem>> From<T>
+    for PackedRandomBitOtReceiverPcgKey<S, T>
+{
     fn from(iter: T) -> Self {
-        Self { iter }
+        Self {
+            iter,
+            phantom_data: PhantomData,
+            buffer_one: vec![false; S::BITS],
+            buffer_two: vec![false; S::BITS],
+        }
     }
 }
 
-impl<T: Iterator<Item = vector_party::PcgItem>> From<T>
-    for PackedRandomBitOtReceiverU64<
+impl<S: FieldElement, T: Iterator<Item = vector_party::PcgItem>> From<T>
+    for PackedRandomBitOtReceiverPcgKey<
+        S,
         RandomBitOTReceiverOnlinePCGKey<RandomOTReceiverOnlinePCGKey<T>>,
     >
 {
     fn from(iter: T) -> Self {
-        Self { iter: iter.into() }
+        Self {
+            iter: iter.into(),
+            phantom_data: PhantomData,
+            buffer_one: vec![false; S::BITS],
+            buffer_two: vec![false; S::BITS],
+        }
     }
 }
 
-impl<T: Iterator<Item = ReceiverRandomBitOtPcgItem>> PackedRandomBitOtReceiverU64<T> {
-    const BIT_LEN: usize = 64;
-}
-
-impl<T: Iterator<Item = ReceiverRandomBitOtPcgItem>> Iterator for PackedRandomBitOtReceiverU64<T> {
-    type Item = (PackedGF2U64, PackedGF2U64);
+impl<S: FieldElement, T: Iterator<Item = ReceiverRandomBitOtPcgItem>> Iterator
+    for PackedRandomBitOtReceiverPcgKey<S, T>
+{
+    type Item = (S, S);
     fn next(&mut self) -> Option<Self::Item> {
-        let out = (0..Self::BIT_LEN).map_while(|_| self.iter.next()).fold(
-            (0u64, 0u64),
-            |(acc0, acc1), (cur0, cur1)| {
-                (
-                    (acc0 << 1) ^ u64::from(u8::from(cur0)),
-                    (acc1 << 1) ^ u64::from(u8::from(cur1)),
-                )
-            },
-        );
-        Some((out.0.into(), out.1.into()))
+        for idx in 0..S::BITS {
+            let (b0, b1) = self.iter.next()?;
+            self.buffer_one[idx] = b0.into();
+            self.buffer_two[idx] = b1.into();
+        }
+        Some((
+            S::from_bits(&self.buffer_one)?,
+            S::from_bits(&self.buffer_two)?,
+        ))
     }
 }
 
-pub struct PackedRandomBitOtSenderU64<T: Iterator<Item = SenderRandomBitOtPcgItem>> {
+pub struct PackedRandomBitOtSenderPcgKey<
+    S: FieldElement,
+    T: Iterator<Item = SenderRandomBitOtPcgItem>,
+> {
     iter: T,
+    phantom_data: PhantomData<S>,
+    buffer_one: Vec<bool>,
+    buffer_two: Vec<bool>,
 }
 
-impl<T: Iterator<Item = SenderRandomBitOtPcgItem>> From<T> for PackedRandomBitOtSenderU64<T> {
-    fn from(iter: T) -> Self {
-        Self { iter }
-    }
-}
-
-impl<T: Iterator<Item = scalar_party::PcgItem>> From<T>
-    for PackedRandomBitOtSenderU64<RandomBitOTSenderOnlinePCGKey<RandomOTSenderOnlinePCGKey<T>>>
+impl<S: FieldElement, T: Iterator<Item = SenderRandomBitOtPcgItem>> From<T>
+    for PackedRandomBitOtSenderPcgKey<S, T>
 {
     fn from(iter: T) -> Self {
-        Self { iter: iter.into() }
+        Self {
+            iter,
+            phantom_data: PhantomData,
+            buffer_one: vec![false; S::BITS],
+            buffer_two: vec![false; S::BITS],
+        }
     }
 }
 
-impl<T: Iterator<Item = SenderRandomBitOtPcgItem>> PackedRandomBitOtSenderU64<T> {
-    const BIT_LEN: usize = 64;
+impl<S: FieldElement, T: Iterator<Item = scalar_party::PcgItem>> From<T>
+    for PackedRandomBitOtSenderPcgKey<
+        S,
+        RandomBitOTSenderOnlinePCGKey<RandomOTSenderOnlinePCGKey<T>>,
+    >
+{
+    fn from(iter: T) -> Self {
+        Self {
+            iter: iter.into(),
+            phantom_data: PhantomData,
+            buffer_one: vec![false; S::BITS],
+            buffer_two: vec![false; S::BITS],
+        }
+    }
 }
 
-impl<T: Iterator<Item = SenderRandomBitOtPcgItem>> Iterator for PackedRandomBitOtSenderU64<T> {
-    type Item = (PackedGF2U64, PackedGF2U64);
+impl<S: FieldElement, T: Iterator<Item = SenderRandomBitOtPcgItem>> Iterator
+    for PackedRandomBitOtSenderPcgKey<S, T>
+{
+    type Item = (S, S);
     fn next(&mut self) -> Option<Self::Item> {
-        let out = (0..Self::BIT_LEN).map_while(|_| self.iter.next()).fold(
-            (0u64, 0u64),
-            |(acc0, acc1), (cur0, cur1)| {
-                (
-                    (acc0 << 1) ^ u64::from(u8::from(cur0)),
-                    (acc1 << 1) ^ u64::from(u8::from(cur1)),
-                )
-            },
-        );
-        Some((out.0.into(), out.1.into()))
+        for idx in 0..S::BITS {
+            let (b0, b1) = self.iter.next()?;
+            self.buffer_one[idx] = b0.into();
+            self.buffer_two[idx] = b1.into();
+        }
+        Some((
+            S::from_bits(&self.buffer_one)?,
+            S::from_bits(&self.buffer_two)?,
+        ))
     }
 }

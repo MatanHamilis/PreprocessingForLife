@@ -64,6 +64,7 @@ impl Sum for GF2 {
     }
 }
 impl FieldElement for GF2 {
+    const BITS: usize = 1;
     fn one() -> Self {
         Self { v: 1u8 }
     }
@@ -78,6 +79,14 @@ impl FieldElement for GF2 {
 
     fn is_zero(&self) -> bool {
         self.v == 0
+    }
+
+    fn from_bits(bits: &[bool]) -> Option<Self> {
+        if bits.len() != Self::BITS {
+            None
+        } else {
+            Some(GF2::from(bits[0]))
+        }
     }
 }
 

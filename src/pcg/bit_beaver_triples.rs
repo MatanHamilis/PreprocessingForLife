@@ -1,3 +1,6 @@
+use std::marker::PhantomData;
+
+use super::packed_random_bit_ot::{PackedRandomBitOtReceiverPcgKey, PackedRandomBitOtSenderPcgKey};
 use super::random_bit_ot::{RandomBitOTReceiverOnlinePCGKey, RandomBitOTSenderOnlinePCGKey};
 use super::random_ot::{RandomOTReceiverOnlinePCGKey, RandomOTSenderOnlinePCGKey};
 use super::sparse_vole::scalar_party::OnlineSparseVoleKey as ScalarPartySparseVoleOnlinePCGKey;
@@ -14,6 +17,7 @@ pub struct BeaverTripletShare<T: FieldElement> {
 #[derive(Debug)]
 pub struct BeaverTripletBitPartyOnlinePCGKey<S: FieldElement, T: Iterator<Item = (S, S)>> {
     ot_receiver_pcg_key: T,
+    phantom_data: PhantomData<S>,
 }
 
 impl<S: FieldElement, T: Iterator<Item = (S, S)>> From<T>
@@ -22,22 +26,27 @@ impl<S: FieldElement, T: Iterator<Item = (S, S)>> From<T>
     fn from(ot_receiver_pcg_key: T) -> Self {
         Self {
             ot_receiver_pcg_key,
+            phantom_data: PhantomData,
         }
     }
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>>
+impl<const CODE_WEIGHT: usize, F: FieldElement, S: Iterator<Item = [u32; CODE_WEIGHT]>>
     From<VectorPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>
     for BeaverTripletBitPartyOnlinePCGKey<
-        GF2,
-        RandomBitOTReceiverOnlinePCGKey<
-            RandomOTReceiverOnlinePCGKey<VectorPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>,
+        F,
+        PackedRandomBitOtReceiverPcgKey<
+            F,
+            RandomBitOTReceiverOnlinePCGKey<
+                RandomOTReceiverOnlinePCGKey<VectorPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>,
+            >,
         >,
     >
 {
     fn from(key: VectorPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>) -> Self {
         Self {
             ot_receiver_pcg_key: key.into(),
+            phantom_data: PhantomData,
         }
     }
 }
@@ -70,12 +79,15 @@ impl<S: FieldElement, T: Iterator<Item = (S, S)>> From<T>
     }
 }
 
-impl<const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_WEIGHT]>>
+impl<const CODE_WEIGHT: usize, F: FieldElement, S: Iterator<Item = [u32; CODE_WEIGHT]>>
     From<ScalarPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>
     for BeaverTripletScalarPartyOnlinePCGKey<
-        GF2,
-        RandomBitOTSenderOnlinePCGKey<
-            RandomOTSenderOnlinePCGKey<ScalarPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>,
+        F,
+        PackedRandomBitOtSenderPcgKey<
+            F,
+            RandomBitOTSenderOnlinePCGKey<
+                RandomOTSenderOnlinePCGKey<ScalarPartySparseVoleOnlinePCGKey<CODE_WEIGHT, S>>,
+            >,
         >,
     >
 {

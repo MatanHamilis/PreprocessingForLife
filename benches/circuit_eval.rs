@@ -6,7 +6,7 @@ use silent_party::pcg::bit_beaver_triples::{
     BeaverTripletBitPartyOnlinePCGKey, BeaverTripletScalarPartyOnlinePCGKey, BeaverTripletShare,
 };
 use silent_party::pcg::packed_random_bit_ot::{
-    PackedRandomBitOtReceiverU64, PackedRandomBitOtSenderU64,
+    PackedRandomBitOtReceiverPcgKey, PackedRandomBitOtSenderPcgKey,
 };
 use silent_party::pcg::preprocessor::Preprocessor;
 use silent_party::pprf::usize_to_bits;
@@ -162,8 +162,8 @@ pub fn circuit_eval_bench_packed(c: &mut Criterion) {
         CODE_WEIGHT,
     >(&scalar, puncturing_points, prf_keys);
 
-    let receiver_pack_bit_ot_key = PackedRandomBitOtReceiverU64::from(vector_online_key);
-    let sender_pack_bit_ot_key = PackedRandomBitOtSenderU64::from(scalar_online_key);
+    let receiver_pack_bit_ot_key = PackedRandomBitOtReceiverPcgKey::from(vector_online_key);
+    let sender_pack_bit_ot_key = PackedRandomBitOtSenderPcgKey::from(scalar_online_key);
     let mut beaver_triple_scalar_key: BeaverTripletScalarPartyOnlinePCGKey<PackedGF2U64, _> =
         sender_pack_bit_ot_key.into();
     let mut beaver_triple_vector_key: BeaverTripletBitPartyOnlinePCGKey<PackedGF2U64, _> =
