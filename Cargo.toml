@@ -20,8 +20,8 @@ serde-big-array = "0.4"
 [dev-dependencies]
 criterion = "0.3"
 pretty_env_logger = "0.4.0"
-clap = { version="3.2", features = ["derive"]}
-clap-verbosity-flag = "1.0.1"
+clap = { version="4", features = ["derive"]}
+clap-verbosity-flag = "2"
 
 [features]
 default = ["aesni"]
