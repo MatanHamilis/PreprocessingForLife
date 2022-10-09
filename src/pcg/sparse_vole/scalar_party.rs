@@ -10,6 +10,7 @@ use crate::communicator::Communicator;
 use crate::fields::GF128;
 use crate::pcg::pprf_aggregator::RegularErrorPprfAggregator;
 use crate::pprf::distributed_generation::{Puncturer, SenderSecondMessage};
+use crate::pseudorandom::prg::PrgValue;
 use serde_big_array::BigArray;
 
 pub type PcgItem = (GF128, GF128);
@@ -33,22 +34,13 @@ pub type ScalarFirstMessage<const INPUT_BITLEN: usize> = Vec<FirstMessageItem<IN
 pub struct ScalarSecondMessageItem<const INPUT_BITLEN: usize> {
     #[serde(with = "BigArray")]
     pub(super) ots: [SenderSecondMessage<KEY_SIZE>; INPUT_BITLEN],
-    #[serde(with = "BigArray")]
-    pub(super) sums: [u8; KEY_SIZE],
+    pub(super) sums: PrgValue,
 }
 
-impl<const INPUT_BITLEN: usize>
-    From<(
-        [SenderSecondMessage<KEY_SIZE>; INPUT_BITLEN],
-        [u8; KEY_SIZE],
-    )> for ScalarSecondMessageItem<INPUT_BITLEN>
+impl<const INPUT_BITLEN: usize> From<([SenderSecondMessage<KEY_SIZE>; INPUT_BITLEN], PrgValue)>
+    for ScalarSecondMessageItem<INPUT_BITLEN>
 {
-    fn from(
-        v: (
-            [SenderSecondMessage<KEY_SIZE>; INPUT_BITLEN],
-            [u8; KEY_SIZE],
-        ),
-    ) -> Self {
+    fn from(v: ([SenderSecondMessage<KEY_SIZE>; INPUT_BITLEN], PrgValue)) -> Self {
         Self {
             ots: v.0,
             sums: v.1,
@@ -60,14 +52,14 @@ pub type ScalarSecondMessage<const INPUT_BITLEN: usize> =
     Vec<ScalarSecondMessageItem<INPUT_BITLEN>>;
 
 pub struct SparseVolePcgScalarKeyGenState<const INPUT_BITLEN: usize> {
-    prf_keys: Vec<[u8; KEY_SIZE]>,
+    prf_keys: Vec<PrgValue>,
     scalar: GF128,
     puncturers: Vec<Puncturer<KEY_SIZE, INPUT_BITLEN>>,
 }
 
 impl<const INPUT_BITLEN: usize> SparseVolePcgScalarKeyGenState<INPUT_BITLEN> {
     /// Generates the first message of the Scalar party
-    pub fn new(scalar: GF128, prf_keys: Vec<[u8; KEY_SIZE]>) -> Self {
+    pub fn new(scalar: GF128, prf_keys: Vec<PrgValue>) -> Self {
         let puncturers = prf_keys
             .iter()
             .map(Puncturer::<KEY_SIZE, INPUT_BITLEN>::new)
@@ -152,7 +144,7 @@ pub fn distributed_generation<const PRF_INPUT_BITLEN: usize, T: Write + Read>(
     comm: &mut Communicator<T>,
 ) -> Option<OfflineSparseVoleKey> {
     // Define Gen State
-    let prf_keys: Vec<[u8; KEY_SIZE]> = match comm.receive() {
+    let prf_keys: Vec<PrgValue> = match comm.receive() {
         Some(v) => v,
         None => {
             return None;

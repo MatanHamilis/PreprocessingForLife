@@ -2,27 +2,27 @@ use std::mem::forget;
 
 use super::codes::accumulate;
 use super::xor_arrays;
-use super::KEY_SIZE;
 use crate::fields::GF128;
 use crate::pprf::{bits_to_usize, PuncturedKey};
 use crate::pseudorandom::prf::PrfInput;
 use crate::pseudorandom::prf::{prf_eval_all, prf_eval_all_into_slice};
+use crate::pseudorandom::prg::PrgValue;
 use rayon::prelude::*;
 
 pub trait PprfAggregator {
-    fn aggregate(prf_keys: &[[u8; KEY_SIZE]], pprf_input_bitlen: usize) -> Vec<GF128>;
+    fn aggregate(prf_keys: &[PrgValue], pprf_input_bitlen: usize) -> Vec<GF128>;
     fn aggregate_punctured<const INPUT_BITLEN: usize>(
         pprf_keys: &[PuncturedKey<INPUT_BITLEN>],
         punctured_points: &[PrfInput<INPUT_BITLEN>],
-        punctured_values_plus_leaves_sum: &[[u8; KEY_SIZE]],
+        punctured_values_plus_leaves_sum: &[PrgValue],
     ) -> (Vec<GF128>, Vec<usize>);
 }
 
 pub struct RandomErrorPprfAggregator {}
 impl PprfAggregator for RandomErrorPprfAggregator {
-    fn aggregate(prf_keys: &[[u8; KEY_SIZE]], pprf_input_bitlen: usize) -> Vec<GF128> {
+    fn aggregate(prf_keys: &[PrgValue], pprf_input_bitlen: usize) -> Vec<GF128> {
         let mut output = vec![GF128::default(); 1 << pprf_input_bitlen];
-        let mut accumulated_vector: Vec<[u8; KEY_SIZE]> = unsafe {
+        let mut accumulated_vector: Vec<PrgValue> = unsafe {
             Vec::from_raw_parts(output.as_mut_ptr().cast(), output.len(), output.capacity())
         };
         forget(output);
@@ -36,15 +36,23 @@ impl PprfAggregator for RandomErrorPprfAggregator {
                 })
         });
         accumulate(&mut accumulated_vector);
-        unsafe { std::mem::transmute(accumulated_vector) }
+        unsafe {
+            let t = Vec::from_raw_parts(
+                accumulated_vector.as_mut_ptr().cast(),
+                accumulated_vector.len(),
+                accumulated_vector.capacity(),
+            );
+            forget(accumulated_vector);
+            t
+        }
     }
     fn aggregate_punctured<const INPUT_BITLEN: usize>(
         pprf_keys: &[PuncturedKey<INPUT_BITLEN>],
         punctured_points: &[PrfInput<INPUT_BITLEN>],
-        punctured_values_plus_leaves_sum: &[[u8; KEY_SIZE]],
+        punctured_values_plus_leaves_sum: &[PrgValue],
     ) -> (Vec<GF128>, Vec<usize>) {
         let mut accumulated_vector_orig = vec![GF128::default(); 1 << INPUT_BITLEN];
-        let mut accumulated_vector: Vec<[u8; KEY_SIZE]> = unsafe {
+        let mut accumulated_vector: Vec<PrgValue> = unsafe {
             Vec::from_raw_parts(
                 accumulated_vector_orig.as_mut_ptr().cast(),
                 accumulated_vector_orig.len(),
@@ -63,7 +71,15 @@ impl PprfAggregator for RandomErrorPprfAggregator {
                 });
         }
         accumulate(&mut accumulated_vector);
-        let accumulated_vector = unsafe { std::mem::transmute(accumulated_vector) };
+        let accumulated_vector = unsafe {
+            let t = Vec::from_raw_parts(
+                accumulated_vector.as_mut_ptr().cast(),
+                accumulated_vector.len(),
+                accumulated_vector.capacity(),
+            );
+            forget(accumulated_vector);
+            t
+        };
         let mut numeric_punctured_points = vec![0usize; pprf_keys.len()];
         for (i, punctuerd_point) in punctured_points.iter().enumerate() {
             numeric_punctured_points[i] = punctuerd_point.into();
@@ -74,10 +90,10 @@ impl PprfAggregator for RandomErrorPprfAggregator {
 
 pub struct RegularErrorPprfAggregator {}
 impl PprfAggregator for RegularErrorPprfAggregator {
-    fn aggregate(prf_keys: &[[u8; KEY_SIZE]], pprf_input_bitlen: usize) -> Vec<GF128> {
+    fn aggregate(prf_keys: &[PrgValue], pprf_input_bitlen: usize) -> Vec<GF128> {
         let mut accumulated_vector_orig =
             vec![GF128::default(); prf_keys.len() << pprf_input_bitlen];
-        let mut accumulated_vector: Vec<[u8; KEY_SIZE]> = unsafe {
+        let mut accumulated_vector: Vec<PrgValue> = unsafe {
             Vec::from_raw_parts(
                 accumulated_vector_orig.as_mut_ptr().cast(),
                 accumulated_vector_orig.len(),
@@ -98,15 +114,23 @@ impl PprfAggregator for RegularErrorPprfAggregator {
                 )
             });
         accumulate(&mut accumulated_vector);
-        unsafe { std::mem::transmute(accumulated_vector) }
+        unsafe {
+            let t = Vec::from_raw_parts(
+                accumulated_vector.as_mut_ptr().cast(),
+                accumulated_vector.len(),
+                accumulated_vector.capacity(),
+            );
+            forget(accumulated_vector);
+            t
+        }
     }
     fn aggregate_punctured<const INPUT_BITLEN: usize>(
         pprf_keys: &[PuncturedKey<INPUT_BITLEN>],
         punctured_points: &[PrfInput<INPUT_BITLEN>],
-        punctured_values_plus_leaves_sums: &[[u8; KEY_SIZE]],
+        punctured_values_plus_leaves_sums: &[PrgValue],
     ) -> (Vec<GF128>, Vec<usize>) {
         let mut output_orig = vec![GF128::default(); pprf_keys.len() << INPUT_BITLEN];
-        let mut output: Vec<[u8; KEY_SIZE]> = unsafe {
+        let mut output: Vec<PrgValue> = unsafe {
             Vec::from_raw_parts(
                 output_orig.as_mut_ptr().cast(),
                 output_orig.len(),
@@ -127,7 +151,12 @@ impl PprfAggregator for RegularErrorPprfAggregator {
                 },
             );
         accumulate(&mut output);
-        let output = unsafe { std::mem::transmute(output) };
+        let output = unsafe {
+            let t =
+                Vec::from_raw_parts(output.as_mut_ptr().cast(), output.len(), output.capacity());
+            forget(output);
+            t
+        };
         let mut numeric_punctured_points = vec![0usize; pprf_keys.len()];
         for (i, punctuerd_point) in punctured_points.iter().enumerate() {
             numeric_punctured_points[i] =

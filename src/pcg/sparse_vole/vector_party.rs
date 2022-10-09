@@ -12,6 +12,7 @@ use crate::pcg::pprf_aggregator::RegularErrorPprfAggregator;
 use crate::pprf::distributed_generation::Puncturee;
 use crate::pprf::PuncturedKey;
 use crate::pseudorandom::prf::PrfInput;
+use crate::pseudorandom::prg::PrgValue;
 pub type PcgItem = (GF2, GF128);
 
 pub struct SparseVolePcgVectorKeyGenStateInitial<const INPUT_BITLEN: usize> {
@@ -21,7 +22,7 @@ pub struct SparseVolePcgVectorKeyGenStateInitial<const INPUT_BITLEN: usize> {
 #[derive(Serialize, Deserialize)]
 pub struct SparseVolePcgVectorKeyGenStateFinal<const INPUT_BITLEN: usize> {
     pprf_keys: Vec<PuncturedKey<INPUT_BITLEN>>,
-    punctured_values: Vec<[u8; KEY_SIZE]>,
+    punctured_values: Vec<PrgValue>,
     puncturing_points: Vec<PrfInput<INPUT_BITLEN>>,
 }
 

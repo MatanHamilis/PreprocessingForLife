@@ -2,8 +2,9 @@
 //!
 pub mod distributed_generation;
 
+use crate::pseudorandom::double_prg;
 use crate::pseudorandom::prf::{prf_eval, prf_eval_all_into_slice};
-use crate::pseudorandom::{double_prg, KEY_SIZE};
+use crate::pseudorandom::prg::PrgValue;
 use crate::xor_arrays;
 use std::convert::{From, Into};
 
@@ -31,12 +32,12 @@ impl From<bool> for Direction {
 #[derive(Serialize, Deserialize)]
 pub struct PuncturedKey<const INPUT_BITLEN: usize> {
     #[serde(with = "BigArray")]
-    keys: [([u8; KEY_SIZE], Direction); INPUT_BITLEN],
+    keys: [(PrgValue, Direction); INPUT_BITLEN],
 }
 
 impl<const INPUT_BITLEN: usize> PuncturedKey<INPUT_BITLEN> {
-    pub fn puncture(prf_key: [u8; KEY_SIZE], puncture_point: [bool; INPUT_BITLEN]) -> Self {
-        let mut current_key = prf_key;
+    pub fn puncture(prf_key: &PrgValue, puncture_point: [bool; INPUT_BITLEN]) -> Self {
+        let mut current_key = *prf_key;
         let punctured_key = puncture_point.map(|puncture_bit| {
             let (left, right) = double_prg(&current_key);
             match puncture_bit.into() {
@@ -54,10 +55,10 @@ impl<const INPUT_BITLEN: usize> PuncturedKey<INPUT_BITLEN> {
             keys: punctured_key,
         }
     }
-    pub fn try_eval(&self, input: [bool; INPUT_BITLEN]) -> Option<[u8; KEY_SIZE]> {
+    pub fn try_eval(&self, input: [bool; INPUT_BITLEN]) -> Option<PrgValue> {
         for ((i, &b), (k, direction)) in input.iter().enumerate().zip(self.keys.iter()) {
             if *direction == b.into() {
-                return Some(prf_eval(*k, &input[i + 1..]));
+                return Some(prf_eval(k, &input[i + 1..]));
             }
         }
         None
@@ -65,8 +66,8 @@ impl<const INPUT_BITLEN: usize> PuncturedKey<INPUT_BITLEN> {
 
     pub fn full_eval_with_punctured_point_into_slice(
         &self,
-        leaf_sum_plus_punctured_point_val: &[u8; KEY_SIZE],
-        output: &mut [[u8; KEY_SIZE]],
+        leaf_sum_plus_punctured_point_val: &PrgValue,
+        output: &mut [PrgValue],
     ) {
         assert_eq!(output.len(), 1 << INPUT_BITLEN);
         let mut top = 1 << INPUT_BITLEN;
@@ -86,7 +87,7 @@ impl<const INPUT_BITLEN: usize> PuncturedKey<INPUT_BITLEN> {
             }
             mid = (bottom + top) >> 1;
         }
-        let mut punctured_point_val: [u8; KEY_SIZE] = *leaf_sum_plus_punctured_point_val;
+        let mut punctured_point_val = *leaf_sum_plus_punctured_point_val;
         for v in output.iter() {
             xor_arrays(&mut punctured_point_val, v)
         }
@@ -96,9 +97,9 @@ impl<const INPUT_BITLEN: usize> PuncturedKey<INPUT_BITLEN> {
 
     pub fn full_eval_with_punctured_point(
         &self,
-        leaf_sum_plus_punctured_point_val: &[u8; KEY_SIZE],
-    ) -> Vec<[u8; KEY_SIZE]> {
-        let mut output = vec![[0u8; KEY_SIZE]; 1 << INPUT_BITLEN];
+        leaf_sum_plus_punctured_point_val: &PrgValue,
+    ) -> Vec<PrgValue> {
+        let mut output = vec![PrgValue::default(); 1 << INPUT_BITLEN];
         self.full_eval_with_punctured_point_into_slice(
             leaf_sum_plus_punctured_point_val,
             &mut output,
@@ -129,33 +130,34 @@ pub fn usize_to_bits<const BITS: usize>(mut n: usize) -> [bool; BITS] {
 mod tests {
     use super::{bits_to_usize, usize_to_bits, PuncturedKey};
     use crate::pseudorandom::prf::{prf_eval, prf_eval_all};
+    use crate::pseudorandom::prg::PrgValue;
     use crate::pseudorandom::KEY_SIZE;
     use crate::xor_arrays;
 
     #[test]
     fn one_bit_output() {
-        let prf_key = [0u8; KEY_SIZE];
+        let prf_key = PrgValue::default();
         let puncture_point = [true];
-        let punctured_key = PuncturedKey::puncture(prf_key, puncture_point);
+        let punctured_key = PuncturedKey::puncture(&prf_key, puncture_point);
         assert!(punctured_key.try_eval(puncture_point).is_none());
         assert_eq!(
             punctured_key.try_eval([false]).unwrap(),
-            prf_eval(prf_key, &[false])
+            prf_eval(&prf_key, &[false])
         );
     }
 
     #[test]
     fn check_large_domain() {
-        let prf_key = [11u8; KEY_SIZE];
+        let prf_key = PrgValue::from([11u8; KEY_SIZE]);
         let puncture_num = 0b0101010101;
         let puncture_point = usize_to_bits::<10>(puncture_num);
-        let punctured_key = PuncturedKey::puncture(prf_key, puncture_point);
+        let punctured_key = PuncturedKey::puncture(&prf_key, puncture_point);
         for i in 0..1 << puncture_point.len() {
             let prf_input = usize_to_bits::<10>(i);
             if i != puncture_num {
                 assert_eq!(
                     punctured_key.try_eval(prf_input).unwrap(),
-                    prf_eval(prf_key, &prf_input)
+                    prf_eval(&prf_key, &prf_input)
                 );
             } else {
                 assert!(punctured_key.try_eval(prf_input).is_none());
@@ -165,24 +167,24 @@ mod tests {
 
     #[test]
     fn test_full_eval_prf() {
-        let prf_key = [11u8; KEY_SIZE];
+        let prf_key = PrgValue::from([11u8; KEY_SIZE]);
         let point_num = 0b1;
         let point_arr = usize_to_bits::<1>(point_num);
         let full_eval = prf_eval_all(&prf_key, 1);
-        let prf_evaluated = prf_eval(prf_key, &point_arr);
+        let prf_evaluated = prf_eval(&prf_key, &point_arr);
         assert_eq!(prf_evaluated, full_eval[point_num]);
     }
 
     #[test]
     fn test_full_eval_punctured() {
-        let prf_key = [11u8; KEY_SIZE];
+        let prf_key = PrgValue::from([11u8; KEY_SIZE]);
         let puncture_point = 0b111;
         let puncture_point_arr = usize_to_bits::<3>(puncture_point);
-        let punctured_key = PuncturedKey::puncture(prf_key, puncture_point_arr);
+        let punctured_key = PuncturedKey::puncture(&prf_key, puncture_point_arr);
         let full_eval_regular = prf_eval_all(&prf_key, 3);
         let leaf_sum = full_eval_regular
             .iter()
-            .fold([0u8; KEY_SIZE], |mut acc, cur| {
+            .fold(PrgValue::default(), |mut acc, cur| {
                 xor_arrays(&mut acc, cur);
                 acc
             });

@@ -27,7 +27,7 @@ use super::codes::EACode;
 use super::pprf_aggregator::RegularErrorPprfAggregator;
 use crate::fields::GF128;
 use crate::pseudorandom::prf::PrfInput;
-use crate::pseudorandom::KEY_SIZE;
+use crate::pseudorandom::prg::PrgValue;
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
@@ -88,7 +88,7 @@ impl<const INPUT_BITLEN: usize> From<FirstMessageItem<INPUT_BITLEN>>
 pub fn trusted_deal<const PRF_INPUT_BITLEN: usize, const CODE_WEIGHT: usize>(
     scalar: &GF128,
     puncturing_points: Vec<PrfInput<PRF_INPUT_BITLEN>>,
-    prf_keys: Vec<[u8; KEY_SIZE]>,
+    prf_keys: Vec<PrgValue>,
 ) -> (
     OnlineSparseVoleKeyScalar<CODE_WEIGHT, EACode<CODE_WEIGHT>>,
     OnlineSparseVoleKeyVector<CODE_WEIGHT, EACode<CODE_WEIGHT>>,
@@ -126,7 +126,7 @@ pub fn trusted_deal<const PRF_INPUT_BITLEN: usize, const CODE_WEIGHT: usize>(
 pub fn trusted_deal_packed_offline_keys<const PACK: usize, const PRF_INPUT_BITLEN: usize>(
     scalar: &[GF128; PACK],
     puncturing_points: [Vec<PrfInput<PRF_INPUT_BITLEN>>; PACK],
-    prf_keys: [Vec<[u8; KEY_SIZE]>; PACK],
+    prf_keys: [Vec<PrgValue>; PACK],
 ) -> (
     SparseVoleScalarPartyPackedOfflineKey<PACK>,
     SparseVoleVectorPartyPackedOfflineKey<PACK>,
@@ -197,6 +197,7 @@ pub(crate) mod tests {
     use crate::pcg::codes::EACode;
     use crate::pprf::usize_to_bits;
     use crate::pseudorandom::prf::PrfInput;
+    use crate::pseudorandom::prg::PrgValue;
     use crate::{
         fields::{FieldElement, GF128},
         pcg::sparse_vole::{trusted_deal, trusted_deal_packed_offline_keys},
@@ -214,7 +215,7 @@ pub(crate) mod tests {
         const INPUT_BITLEN: usize = 10;
         let prf_keys = (0..WEIGHT)
             .map(|num| {
-                let mut output = [0u8; KEY_SIZE];
+                let mut output = PrgValue::from([0u8; KEY_SIZE]);
                 let bits = usize_to_bits::<KEY_SIZE>(num);
                 for (i, b) in bits.iter().enumerate() {
                     if *b {
@@ -241,10 +242,10 @@ pub(crate) mod tests {
         // Define constants
         const WEIGHT: usize = 128;
         const INPUT_BITLEN: usize = 8;
-        let prf_keys: [Vec<[u8; KEY_SIZE]>; PACK] = core::array::from_fn(|idx| {
+        let prf_keys: [Vec<PrgValue>; PACK] = core::array::from_fn(|idx| {
             (0..WEIGHT)
                 .map(|num| {
-                    let mut output = [0u8; KEY_SIZE];
+                    let mut output = PrgValue::from([0u8; KEY_SIZE]);
                     let bits = usize_to_bits::<KEY_SIZE>((num + idx) * idx);
                     for (i, b) in bits.iter().enumerate() {
                         if *b {

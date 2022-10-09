@@ -1,11 +1,10 @@
 use aes::cipher::{BlockEncrypt, KeyInit};
 use aes::{Aes128, Block};
 
+use crate::pseudorandom::prg::PrgValue;
 use crate::xor_arrays;
 
-use super::KEY_SIZE;
-
-pub fn accumulate(vec: &mut Vec<[u8; KEY_SIZE]>) {
+pub fn accumulate(vec: &mut Vec<PrgValue>) {
     let vec_len = vec.len();
     let mut vec_iter = vec.iter_mut();
     let cur = vec_iter.next();

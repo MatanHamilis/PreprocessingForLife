@@ -1,5 +1,6 @@
 use std::vec::IntoIter;
 
+#[derive(Clone, Debug)]
 pub struct Preprocessor<T: Iterator> {
     vec_iter: IntoIter<T::Item>,
 }

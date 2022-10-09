@@ -468,14 +468,15 @@ mod tests {
     use crate::pcg::sparse_vole::vector_party::OnlineSparseVoleKey as VectorOnlineSparseVoleKey;
     use crate::pprf::usize_to_bits;
     use crate::pseudorandom::prf::PrfInput;
+    use crate::pseudorandom::prg::PrgValue;
     use crate::pseudorandom::KEY_SIZE;
 
-    fn get_prf_keys(amount: u8) -> Vec<[u8; KEY_SIZE]> {
+    fn get_prf_keys(amount: u8) -> Vec<PrgValue> {
         let mut base_prf_key = [0u8; KEY_SIZE];
         (0..amount)
             .map(|i| {
                 base_prf_key[KEY_SIZE - 1] = i;
-                base_prf_key
+                base_prf_key.into()
             })
             .collect()
     }
@@ -484,14 +485,6 @@ mod tests {
         (0..amount)
             .map(|i| usize_to_bits(100 * usize::from(i) + 1).into())
             .collect()
-    }
-
-    fn share_inputs<S: FieldElement>(random_elements: &[S], input: &mut [S]) {
-        assert_eq!(input.len(), random_elements.len());
-        input
-            .iter_mut()
-            .zip(random_elements.iter())
-            .for_each(|(input_e, random_e)| *input_e += *random_e)
     }
 
     fn eval_mpc_circuit<

@@ -14,6 +14,7 @@ pub use crate::ot::sender::FirstMessage as SenderFirstMessage;
 use crate::ot::sender::OTSender;
 pub use crate::ot::sender::SecondMessage as SenderSecondMessage;
 use crate::pseudorandom::prf::PrfInput;
+use crate::pseudorandom::prg::PrgValue;
 use crate::pseudorandom::{double_prg, KEY_SIZE};
 
 fn xor_arrays<const LENGTH: usize>(a: &mut [u8; LENGTH], b: &[u8; LENGTH]) {
@@ -35,7 +36,7 @@ pub struct Puncturer<const KEY_WIDTH: usize, const DEPTH: usize> {
 }
 
 impl<const DEPTH: usize> Puncturer<KEY_SIZE, DEPTH> {
-    pub fn new(prf_key: &[u8; KEY_SIZE]) -> Self {
+    pub fn new(prf_key: &PrgValue) -> Self {
         let mut puncturer = Puncturer {
             ots: [OTSender::<KEY_SIZE>::default(); DEPTH],
             state: PuncturerState::Initialized,
@@ -84,14 +85,14 @@ impl<const DEPTH: usize> Puncturer<KEY_SIZE, DEPTH> {
         output
     }
 
-    pub fn get_full_sum(&self) -> [u8; KEY_SIZE] {
+    pub fn get_full_sum(&self) -> PrgValue {
         match self.messages.last() {
             // Not sure what you're trying to do with an empty PPRF but oh well...
-            None => [0; KEY_SIZE],
+            None => [0; KEY_SIZE].into(),
             Some((ref left, ref right)) => {
                 let mut output = *left;
                 xor_arrays(&mut output, right);
-                output
+                output.into()
             }
         }
     }
@@ -173,9 +174,9 @@ impl<const KEY_WIDTH: usize, const DEPTH: usize> Puncturee<KEY_WIDTH, DEPTH> {
             keys.clear();
             keys.append(&mut left_new_keys);
             keys.append(&mut right_new_keys);
-            keys.push(xored_keys);
+            keys.push(xored_keys.into());
             i += 1;
-            (xored_keys, direction)
+            (PrgValue::from(xored_keys), direction)
         });
         Some(PuncturedKey {
             keys: punctured_key,
@@ -187,6 +188,7 @@ impl<const KEY_WIDTH: usize, const DEPTH: usize> Puncturee<KEY_WIDTH, DEPTH> {
 mod tests {
     use super::{PuncturedKey, Puncturee, Puncturer};
     use crate::pseudorandom::prf::{prf_eval, PrfInput};
+    use crate::pseudorandom::prg::PrgValue;
     use crate::pseudorandom::KEY_SIZE;
 
     fn int_to_bool_array<const BITS: usize>(mut num: u32) -> [bool; BITS] {
@@ -201,7 +203,7 @@ mod tests {
     }
 
     fn simulate_protocol<const DEPTH: usize>(
-        prf_key: [u8; KEY_SIZE],
+        prf_key: PrgValue,
         punctured_point: PrfInput<DEPTH>,
     ) -> Option<PuncturedKey<DEPTH>> {
         let mut puncturer = Puncturer::<KEY_SIZE, DEPTH>::new(&prf_key);
@@ -214,19 +216,19 @@ mod tests {
 
     #[test]
     fn one_bit_output() {
-        let prf_key = [0u8; KEY_SIZE];
+        let prf_key: PrgValue = [0u8; KEY_SIZE].into();
         let puncture_point = [true];
         let punctured_key = simulate_protocol(prf_key, puncture_point.into()).unwrap();
         assert!(punctured_key.try_eval(puncture_point).is_none());
         assert_eq!(
             punctured_key.try_eval([false]).unwrap(),
-            prf_eval(prf_key, &[false])
+            prf_eval(&prf_key, &[false])
         );
     }
 
     #[test]
     fn check_large_domain() {
-        let prf_key = [11u8; KEY_SIZE];
+        let prf_key: PrgValue = [11u8; KEY_SIZE].into();
         let puncture_num = 0b1010101;
         let puncture_point = int_to_bool_array::<12>(puncture_num);
         let punctured_key = simulate_protocol(prf_key, puncture_point.into()).unwrap();
@@ -235,7 +237,7 @@ mod tests {
             if i != puncture_num {
                 assert_eq!(
                     punctured_key.try_eval(prf_input).unwrap(),
-                    prf_eval(prf_key, &prf_input)
+                    prf_eval(&prf_key, &prf_input)
                 );
             } else {
                 assert!(punctured_key.try_eval(prf_input).is_none());

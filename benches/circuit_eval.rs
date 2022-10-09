@@ -9,8 +9,8 @@ use silent_party::pcg::packed_random_bit_ot::{
     PackedRandomBitOtReceiverPcgKey, PackedRandomBitOtSenderPcgKey,
 };
 use silent_party::pcg::preprocessor::Preprocessor;
-use silent_party::pprf::usize_to_bits;
 use silent_party::pseudorandom::prf::PrfInput;
+use silent_party::pseudorandom::prg::PrgValue;
 use silent_party::pseudorandom::KEY_SIZE;
 
 fn share_inputs<S: FieldElement>(input: &[S]) -> (Vec<S>, Vec<S>) {
@@ -18,7 +18,7 @@ fn share_inputs<S: FieldElement>(input: &[S]) -> (Vec<S>, Vec<S>) {
         .iter()
         .enumerate()
         .map(|(idx, val)| {
-            let random_element = match (idx % 2 == 1) {
+            let random_element = match idx % 2 == 1 {
                 true => S::one(),
                 false => S::zero(),
             };
@@ -27,12 +27,12 @@ fn share_inputs<S: FieldElement>(input: &[S]) -> (Vec<S>, Vec<S>) {
         .unzip()
 }
 
-fn get_prf_keys(amount: u8) -> Vec<[u8; KEY_SIZE]> {
+fn get_prf_keys(amount: u8) -> Vec<PrgValue> {
     let mut base_prf_key = [0u8; KEY_SIZE];
     (0..amount)
         .map(|i| {
             base_prf_key[KEY_SIZE - 1] = i;
-            base_prf_key
+            base_prf_key.into()
         })
         .collect()
 }
@@ -55,9 +55,9 @@ fn eval_mpc_circuit<
     beaver_triple_vector_key: &mut S,
 ) -> (Vec<F>, Vec<F>) {
     let mut first_party_session =
-        CircuitEvalSessionState::new(&circuit, &input_a, beaver_triple_scalar_key, false);
+        CircuitEvalSessionState::new(circuit, input_a, beaver_triple_scalar_key, false);
     let mut second_party_session =
-        CircuitEvalSessionState::new(&circuit, &input_b, beaver_triple_vector_key, true);
+        CircuitEvalSessionState::new(circuit, input_b, beaver_triple_vector_key, true);
     let (first_party_output, second_party_output) = loop {
         let (first_party_session_temp, first_party_queries) = match first_party_session {
             CircuitEvalSessionState::WaitingToSend(session) => session.fetch_layer_messages(),

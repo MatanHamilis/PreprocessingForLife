@@ -6,11 +6,9 @@ use criterion::{BenchmarkGroup, BenchmarkId};
 use silent_party::fields::GF128;
 use silent_party::pcg::codes::EACode;
 use silent_party::pcg::pprf_aggregator::RegularErrorPprfAggregator;
-use silent_party::pcg::preprocessor::Preprocessor;
 use silent_party::pcg::sparse_vole::packed::SparseVoleScalarPartyPackedOfflineKey;
 use silent_party::pcg::sparse_vole::packed::SparseVoleScalarPartyPackedOnlineKey;
 use silent_party::pcg::sparse_vole::packed::SparseVoleVectorPartyPackedOfflineKey;
-use silent_party::pcg::sparse_vole::packed::SparseVoleVectorPartyPackedOnlineKey;
 use silent_party::pcg::sparse_vole::scalar_party::OfflineSparseVoleKey as ScalarOfflineSparseVoleKey;
 use silent_party::pcg::sparse_vole::scalar_party::SparseVolePcgScalarKeyGenState;
 use silent_party::pcg::sparse_vole::trusted_deal_packed_offline_keys;
@@ -20,22 +18,18 @@ use silent_party::pcg::sparse_vole::vector_party::{
 };
 use silent_party::pprf::usize_to_bits;
 use silent_party::pseudorandom::prf::PrfInput;
-use silent_party::pseudorandom::{prf, KEY_SIZE};
+use silent_party::pseudorandom::prg::PrgValue;
+use silent_party::pseudorandom::KEY_SIZE;
 
 macro_rules! pack_test {
     ($group:ident,$pack:literal,$codeseed:ident) => {
         let p = $pack;
-        $group.bench_with_input(BenchmarkId::from_parameter($pack), &p, |b, p| {
-            let (scalar_offline_key, vector_offline_key) =
-                get_packed_offline_keys::<$pack, 128, 14>();
+        $group.bench_with_input(BenchmarkId::from_parameter($pack), &p, |b, _| {
+            let (scalar_offline_key, _) = get_packed_offline_keys::<$pack, 128, 14>();
             let code_scalar = EACode::<CODE_WEIGHT>::new(scalar_offline_key.len(), $codeseed);
-            let code_vector = EACode::<CODE_WEIGHT>::new(scalar_offline_key.len(), $codeseed);
             let mut scalar_online_key =
                 SparseVoleScalarPartyPackedOnlineKey::new(code_scalar, scalar_offline_key);
             b.iter(|| scalar_online_key.next().unwrap());
-            // let mut vector_online_key =
-            //     SparseVoleVectorPartyPackedOnlineKey::new(code_vector, vector_offline_key);
-            // b.iter(|| vector_online_key.next().unwrap());
         });
     };
 }
@@ -72,10 +66,10 @@ pub fn get_packed_offline_keys<
             .map(|i| usize_to_bits((i + idx) * (100 + idx)).into())
             .collect()
     });
-    let prf_keys = core::array::from_fn(|idx| {
+    let prf_keys = core::array::from_fn(|_| {
         (0..PRF_KEYS_NUM)
             .map(|num| {
-                let mut output = [0u8; KEY_SIZE];
+                let mut output = PrgValue::default();
                 let bits = usize_to_bits::<KEY_SIZE>(num);
                 for (i, b) in bits.iter().enumerate() {
                     if *b {
@@ -98,7 +92,7 @@ pub fn gen_material_for_offline_keys<const INPUT_BITLEN: usize>(
     let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
     let prf_keys = (0..prf_keys_num)
         .map(|num| {
-            let mut output = [0u8; KEY_SIZE];
+            let mut output = PrgValue::default();
             let bits = usize_to_bits::<KEY_SIZE>(num);
             for (i, b) in bits.iter().enumerate() {
                 if *b {
@@ -111,7 +105,7 @@ pub fn gen_material_for_offline_keys<const INPUT_BITLEN: usize>(
 
     // Define Gen State
     let mut scalar_keygen_state =
-        SparseVolePcgScalarKeyGenState::<INPUT_BITLEN>::new(scalar.clone(), prf_keys);
+        SparseVolePcgScalarKeyGenState::<INPUT_BITLEN>::new(scalar, prf_keys);
 
     let puncturing_points = (0..prf_keys_num).map(|i| PrfInput::from(i * 100)).collect();
 
@@ -181,21 +175,22 @@ pub fn get_offline_keys<const INPUT_BITLEN: usize>(
     (scalar_offline_key, vector_offline_key)
 }
 pub fn packing_pcg(c: &mut Criterion) {
-    let CODE_SEED: [u8; 16] = [0u8; 16];
+    let code_seed: [u8; 16] = [0u8; 16];
     const CODE_WEIGHT: usize = 8;
     let mut group = c.benchmark_group("packing_pcg");
-    pack_test!(group, 1, CODE_SEED);
-    pack_test!(group, 2, CODE_SEED);
-    pack_test!(group, 4, CODE_SEED);
-    pack_test!(group, 8, CODE_SEED);
-    pack_test!(group, 12, CODE_SEED);
-    pack_test!(group, 16, CODE_SEED);
-    pack_test!(group, 20, CODE_SEED);
-    pack_test!(group, 24, CODE_SEED);
-    pack_test!(group, 28, CODE_SEED);
-    pack_test!(group, 32, CODE_SEED);
+    pack_test!(group, 1, code_seed);
+    pack_test!(group, 2, code_seed);
+    pack_test!(group, 4, code_seed);
+    pack_test!(group, 8, code_seed);
+    pack_test!(group, 12, code_seed);
+    pack_test!(group, 16, code_seed);
+    pack_test!(group, 20, code_seed);
+    pack_test!(group, 24, code_seed);
+    pack_test!(group, 28, code_seed);
+    pack_test!(group, 32, code_seed);
 }
 
+#[allow(clippy::needless_collect)]
 pub fn online_pcg(c: &mut Criterion) {
     const CODE_WEIGHT: usize = 8;
     // Create Offline Keys
@@ -203,12 +198,14 @@ pub fn online_pcg(c: &mut Criterion) {
 
     // Create code
     let code_seed = [0; 16];
-    let scalar_code = EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), code_seed);
-    let vector_code = EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), code_seed);
-    let scalar_code: Vec<[u32; CODE_WEIGHT]> =
-        Preprocessor::new(10_000_000usize, scalar_code).collect();
-    let vector_code: Vec<[u32; CODE_WEIGHT]> =
-        Preprocessor::new(10_000_000usize, vector_code).collect();
+    let scalar_code: Vec<_> =
+        EACode::<CODE_WEIGHT>::new(scalar_offline_key.vector_length(), code_seed)
+            .take(10_000_000usize)
+            .collect();
+    let vector_code: Vec<_> =
+        EACode::<CODE_WEIGHT>::new(vector_offline_key.vector_length(), code_seed)
+            .take(10_000_000usize)
+            .collect();
 
     // Create online keys
     let mut scalar_online_key =
@@ -242,7 +239,7 @@ pub fn offline_pcg(c: &mut Criterion) {
     let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
     let prf_keys = (0..PRF_KEYS_NUM)
         .map(|num| {
-            let mut output = [0u8; KEY_SIZE];
+            let mut output = PrgValue::default();
             let bits = usize_to_bits::<KEY_SIZE>(num);
             for (i, b) in bits.iter().enumerate() {
                 if *b {
@@ -255,7 +252,7 @@ pub fn offline_pcg(c: &mut Criterion) {
 
     // Define Gen State
     let mut scalar_keygen_state =
-        SparseVolePcgScalarKeyGenState::<INPUT_BITLEN>::new(scalar.clone(), prf_keys);
+        SparseVolePcgScalarKeyGenState::<INPUT_BITLEN>::new(scalar, prf_keys);
 
     let puncturing_points = (0..PRF_KEYS_NUM).map(|i| PrfInput::from(i * 100)).collect();
 

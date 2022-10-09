@@ -9,7 +9,7 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
-use log::{debug, error, info, trace, warn};
+use log::{error, info, trace};
 use silent_party::pcg::sparse_vole::vector_party::distributed_generation as vector_distributed_generation;
 use silent_party::{
     circuit_eval::{bristol_fashion::parse_bristol, eval_circuit, Circuit},
@@ -89,7 +89,7 @@ fn circuit_from_file(path: &Path) -> Option<Circuit> {
         n @ Some(_) => n,
         None => {
             error!("Failed to parse circuit!");
-            return None;
+            None
         }
     }
 }

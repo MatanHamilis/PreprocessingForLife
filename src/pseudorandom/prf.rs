@@ -3,7 +3,7 @@ use crate::pprf::usize_to_bits;
 
 use super::double_prg;
 use super::double_prg_many;
-use super::KEY_SIZE;
+use super::prg::PrgValue;
 #[cfg(feature = "aesni")]
 use aes::Block;
 use serde::Deserialize;
@@ -42,8 +42,8 @@ impl<const INPUT_BITLEN: usize> From<&PrfInput<INPUT_BITLEN>> for usize {
     }
 }
 
-pub fn prf_eval(key: [u8; KEY_SIZE], input: &[bool]) -> [u8; KEY_SIZE] {
-    input.iter().fold(key, |prf_out, &input_bit| {
+pub fn prf_eval(key: &PrgValue, input: &[bool]) -> PrgValue {
+    input.iter().fold(*key, |prf_out, &input_bit| {
         let prg_out = double_prg(&prf_out);
         if input_bit {
             prg_out.1
@@ -100,7 +100,7 @@ fn block_vec(size: usize) -> Vec<Block> {
 //         });
 // }
 
-pub fn prf_eval_all_into_slice(key: &[u8; KEY_SIZE], depth: usize, output: &mut [[u8; KEY_SIZE]]) {
+pub fn prf_eval_all_into_slice(key: &PrgValue, depth: usize, output: &mut [PrgValue]) {
     let cache_depth = CACHE_LEVEL_DEPTH;
     assert!(output.len() == (1 << depth));
     let mut helper = block_vec(output.len());
@@ -146,8 +146,8 @@ pub fn prf_eval_block_inside_cache(
     }
 }
 pub const CACHE_LEVEL_DEPTH: usize = 10;
-pub fn prf_eval_all(key: &[u8; KEY_SIZE], depth: usize) -> Vec<[u8; KEY_SIZE]> {
-    let mut output: Vec<[u8; KEY_SIZE]> = vec![[0u8; KEY_SIZE]; 1 << depth];
+pub fn prf_eval_all(key: &PrgValue, depth: usize) -> Vec<PrgValue> {
+    let mut output: Vec<PrgValue> = vec![PrgValue::default(); 1 << depth];
     prf_eval_all_into_slice(key, depth, &mut output);
     output
 }
