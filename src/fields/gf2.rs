@@ -29,12 +29,14 @@ impl GF2 {
 
 impl BitAnd for GF2 {
     type Output = Self;
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn bitand(self, rhs: Self) -> Self::Output {
         self * rhs
     }
 }
 
 impl BitAndAssign for GF2 {
+    #[allow(clippy::suspicious_op_assign_impl)]
     fn bitand_assign(&mut self, rhs: Self) {
         *self *= rhs;
     }
@@ -42,12 +44,14 @@ impl BitAndAssign for GF2 {
 
 impl BitXor for GF2 {
     type Output = Self;
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn bitxor(self, rhs: Self) -> Self::Output {
         self + rhs
     }
 }
 
 impl BitXorAssign for GF2 {
+    #[allow(clippy::suspicious_op_assign_impl)]
     fn bitxor_assign(&mut self, rhs: Self) {
         *self += rhs;
     }
@@ -108,12 +112,14 @@ impl From<bool> for GF2 {
 
 impl Sub for GF2 {
     type Output = Self;
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn sub(self, rhs: Self) -> Self::Output {
         self + rhs
     }
 }
 
 impl SubAssign for GF2 {
+    #[allow(clippy::suspicious_op_assign_impl)]
     fn sub_assign(&mut self, rhs: Self) {
         self.add_assign(rhs);
     }
@@ -121,12 +127,14 @@ impl SubAssign for GF2 {
 
 impl Mul for GF2 {
     type Output = Self;
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn mul(self, rhs: Self) -> Self::Output {
         Self { v: self.v & rhs.v }
     }
 }
 
 impl MulAssign for GF2 {
+    #[allow(clippy::suspicious_op_assign_impl)]
     fn mul_assign(&mut self, rhs: Self) {
         self.v &= rhs.v;
     }
@@ -134,12 +142,14 @@ impl MulAssign for GF2 {
 
 impl Add for GF2 {
     type Output = Self;
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn add(self, rhs: Self) -> Self::Output {
         Self { v: self.v ^ rhs.v }
     }
 }
 
 impl AddAssign for GF2 {
+    #[allow(clippy::suspicious_op_assign_impl)]
     fn add_assign(&mut self, rhs: Self) {
         self.v ^= rhs.v;
     }
@@ -147,6 +157,7 @@ impl AddAssign for GF2 {
 
 impl Div for GF2 {
     type Output = Self;
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn div(self, rhs: Self) -> Self::Output {
         assert!(rhs.v != 0);
         self
@@ -154,6 +165,7 @@ impl Div for GF2 {
 }
 
 impl DivAssign for GF2 {
+    #[allow(clippy::suspicious_op_assign_impl)]
     fn div_assign(&mut self, rhs: Self) {
         assert!(rhs.v != 0);
     }

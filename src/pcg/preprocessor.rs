@@ -5,6 +5,7 @@ pub struct Preprocessor<T: Iterator> {
 }
 
 impl<T: Iterator> Preprocessor<T> {
+    #[allow(clippy::needless_collect)]
     pub fn new(amount: usize, iter: T) -> Self {
         let v: Vec<_> = iter.take(amount).collect();
         Self {

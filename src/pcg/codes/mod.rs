@@ -17,7 +17,7 @@ pub fn accumulate(vec: &mut Vec<[u8; KEY_SIZE]>) {
     for _ in 1..vec_len {
         let prev = cur;
         cur = vec_iter.next().unwrap();
-        xor_arrays(&mut cur, &prev)
+        xor_arrays(cur, prev)
     }
 }
 #[derive(Debug)]
@@ -68,8 +68,8 @@ impl<const WEIGHT: usize> Iterator for EACode<WEIGHT> {
         self.rng_index += WEIGHT;
         self.aes.encrypt_blocks(&mut output);
         let mut output: [u32; WEIGHT] = unsafe { *output.as_ptr().cast() };
-        for i in 0..WEIGHT {
-            output[i] &= (self.width - 1) as u32;
+        for output_item in output.iter_mut() {
+            *output_item &= (self.width - 1) as u32;
         }
         // for i in (0..WEIGHT - 3).step_by(STEP_SIZE) {
         //     let mut b = Block::from((self.cur_height as u128).to_be_bytes());

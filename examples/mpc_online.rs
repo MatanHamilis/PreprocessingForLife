@@ -62,7 +62,7 @@ pub fn main() {
     trace!("Parsed circuit file successfully!");
     info!("Circuit layer count: {}", circuit.get_layer_count());
 
-    let socket = match args.command {
+    match args.command {
         Commands::Server { local_port } => handle_server(&circuit, local_port),
         Commands::Client { peer_address } => handle_client(&circuit, peer_address),
     };

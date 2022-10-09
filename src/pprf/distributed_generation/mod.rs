@@ -191,9 +191,9 @@ mod tests {
 
     fn int_to_bool_array<const BITS: usize>(mut num: u32) -> [bool; BITS] {
         let mut output = [false; BITS];
-        for i in 0..BITS {
+        for output_item in output.iter_mut() {
             if num & 1 == 1 {
-                output[i] = true;
+                *output_item = true;
             }
             num >>= 1;
         }

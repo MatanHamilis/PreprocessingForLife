@@ -21,13 +21,12 @@ impl<T: Iterator<Item = ScalarPcgItem>> From<T> for RandomOTSenderOnlinePCGKey<T
 impl<T: Iterator<Item = ScalarPcgItem>> Iterator for RandomOTSenderOnlinePCGKey<T> {
     type Item = SenderRandomOtPcgItem;
     fn next(&mut self) -> Option<Self::Item> {
-        match self.vole_online_key.next() {
-            None => None,
-            Some((v, scalar)) => Some((
+        self.vole_online_key.next().map(|(v, scalar)| {
+            (
                 correlation_robust_hash_block_field(v),
                 correlation_robust_hash_block_field(v + scalar),
-            )),
-        }
+            )
+        })
     }
 }
 

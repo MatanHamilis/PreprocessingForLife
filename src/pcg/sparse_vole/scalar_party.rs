@@ -1,5 +1,4 @@
 use std::io::{Read, Write};
-use std::ops::{Deref, DerefMut};
 
 use serde::{Deserialize, Serialize};
 
@@ -97,7 +96,6 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgScalarKeyGenState<INPUT_BITLEN> {
             .map(|(puncturer, vector_msg_item)| {
                 let mut s = puncturer.get_full_sum();
                 xor_arrays(&mut s, &self.scalar.into());
-                &s;
                 (puncturer.make_second_msg(vector_msg_item.into()), s).into()
             })
             .collect()

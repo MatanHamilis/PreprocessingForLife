@@ -27,9 +27,9 @@ impl From<GF2> for GF128 {
     }
 }
 
-impl Into<Block> for GF128 {
-    fn into(self) -> Block {
-        unsafe { std::mem::transmute(self) }
+impl From<GF128> for Block {
+    fn from(value: GF128) -> Self {
+        unsafe { transmute(value.0) }
     }
 }
 
@@ -53,12 +53,14 @@ impl Neg for GF128 {
 
 impl Add for GF128 {
     type Output = Self;
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn add(self, rhs: Self) -> Self::Output {
         GF128(self.0 ^ rhs.0)
     }
 }
 
 impl AddAssign for GF128 {
+    #[allow(clippy::suspicious_op_assign_impl)]
     fn add_assign(&mut self, rhs: Self) {
         self.0 ^= rhs.0
     }
@@ -66,12 +68,14 @@ impl AddAssign for GF128 {
 
 impl Sub for GF128 {
     type Output = Self;
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn sub(self, rhs: Self) -> Self::Output {
         self + rhs
     }
 }
 
 impl SubAssign for GF128 {
+    #[allow(clippy::suspicious_op_assign_impl)]
     fn sub_assign(&mut self, rhs: Self) {
         *self += rhs
     }
@@ -115,12 +119,14 @@ impl MulAssign for GF128 {
 
 impl Div for GF128 {
     type Output = Self;
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn div(self, rhs: Self) -> Self::Output {
         self * rhs.inv()
     }
 }
 
 impl DivAssign for GF128 {
+    #[allow(clippy::suspicious_op_assign_impl)]
     fn div_assign(&mut self, rhs: Self) {
         *self *= rhs.inv();
     }
@@ -141,9 +147,9 @@ impl From<[u8; 16]> for GF128 {
     }
 }
 
-impl Into<[u8; 16]> for GF128 {
-    fn into(self) -> [u8; 16] {
-        unsafe { transmute(self.0.to_array()) }
+impl From<GF128> for [u8; 16] {
+    fn from(value: GF128) -> Self {
+        unsafe { transmute(value.0) }
     }
 }
 
@@ -192,7 +198,7 @@ impl GF128 {
         v[(offset / 64) as usize] ^= 1u64 << (offset % 64);
     }
     pub fn get_bit(&self, offset: usize) -> bool {
-        (self.0[(offset / 64) as usize] >> (offset % 64)) & 1 != 0
+        (self.0[offset / 64] >> (offset % 64)) & 1 != 0
     }
 
     /// Divides IRREDUCIBLE_POLYNOMIAL by v.

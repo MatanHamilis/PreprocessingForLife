@@ -5,7 +5,7 @@ use super::random_bit_ot::{RandomBitOTReceiverOnlinePCGKey, RandomBitOTSenderOnl
 use super::random_ot::{RandomOTReceiverOnlinePCGKey, RandomOTSenderOnlinePCGKey};
 use super::sparse_vole::scalar_party::OnlineSparseVoleKey as ScalarPartySparseVoleOnlinePCGKey;
 use super::sparse_vole::vector_party::OnlineSparseVoleKey as VectorPartySparseVoleOnlinePCGKey;
-use crate::fields::{FieldElement, GF2};
+use crate::fields::FieldElement;
 
 #[derive(Debug, Clone, Copy)]
 pub struct BeaverTripletShare<T: FieldElement> {

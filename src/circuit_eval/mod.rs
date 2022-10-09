@@ -200,7 +200,7 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> CircuitEval
             .iter()
             .filter_map(|gate| match gate.gate_type {
                 GateType::OneInput { input: _, op: _ } => None,
-                GateType::TwoInput { input, op } => match op {
+                GateType::TwoInput { input: _, op } => match op {
                     GateTwoInputOp::Xor => None,
                     GateTwoInputOp::And => Some(
                         self.beaver_triple_gen
@@ -224,7 +224,7 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
     ) -> Self {
         assert_eq!(circuit.input_wire_count, input_shares.len());
         let wires: Vec<S> = input_shares
-            .into_iter()
+            .iter()
             .chain(
                 [S::zero()]
                     .iter()
@@ -396,6 +396,10 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
     }
 }
 
+#[derive(Debug)]
+pub enum CircuitEvalError {
+    CommunicatorError,
+}
 pub fn eval_circuit<
     C: Read + Write,
     S: FieldElement + Serialize + DeserializeOwned,
@@ -406,9 +410,11 @@ pub fn eval_circuit<
     correlations: T,
     communicator: &mut Communicator<C>,
     is_first: bool,
-) -> Result<Vec<S>, ()> {
+) -> Result<Vec<S>, CircuitEvalError> {
     assert_eq!(my_input.len(), peer_input.len());
-    let mut received_input = communicator.exchange(peer_input).ok_or(())?;
+    let mut received_input = communicator
+        .exchange(peer_input)
+        .ok_or(CircuitEvalError::CommunicatorError)?;
     if is_first {
         my_input.append(&mut received_input);
     } else {
@@ -422,14 +428,18 @@ pub fn eval_circuit<
             _ => panic!(),
         };
         session = session_temp;
-        communicator.send(queries_to_send).ok_or(())?;
+        communicator
+            .send(queries_to_send)
+            .ok_or(CircuitEvalError::CommunicatorError)?;
         session = match session {
             CircuitEvalSessionState::WaitingToGenCorrelation(session) => {
                 session.gen_correlation_for_next_layer()
             }
             _ => panic!(),
         };
-        let queries_received: Vec<_> = communicator.receive().ok_or(())?;
+        let queries_received: Vec<_> = communicator
+            .receive()
+            .ok_or(CircuitEvalError::CommunicatorError)?;
         session = match session {
             CircuitEvalSessionState::WaitingToReceive(session) => {
                 session.handle_layer_responses(queries_received)
@@ -445,8 +455,6 @@ pub fn eval_circuit<
 
 #[cfg(test)]
 mod tests {
-    use rand::random;
-
     use super::bristol_fashion::parse_bristol;
     use super::Circuit;
     use crate::circuit_eval::CircuitEvalSessionState;
@@ -497,9 +505,9 @@ mod tests {
         beaver_triple_vector_key: &mut BeaverTripletBitPartyOnlinePCGKey<GF2, T>,
     ) -> (Vec<GF2>, Vec<GF2>) {
         let mut first_party_session =
-            CircuitEvalSessionState::new(&circuit, &input_a, beaver_triple_scalar_key, false);
+            CircuitEvalSessionState::new(circuit, input_a, beaver_triple_scalar_key, false);
         let mut second_party_session =
-            CircuitEvalSessionState::new(&circuit, &input_b, beaver_triple_vector_key, true);
+            CircuitEvalSessionState::new(circuit, input_b, beaver_triple_vector_key, true);
         let (first_party_output, second_party_output) = loop {
             let (first_party_session_temp, first_party_queries) = match first_party_session {
                 CircuitEvalSessionState::WaitingToSend(session) => session.fetch_layer_messages(),
@@ -587,7 +595,7 @@ mod tests {
             .map(|(a, b)| *a + *b)
             .collect();
         let (output_a, output_b) = eval_mpc_circuit(
-            &circuit,
+            circuit,
             &input_a,
             &input_b,
             &mut beaver_triple_scalar_key,

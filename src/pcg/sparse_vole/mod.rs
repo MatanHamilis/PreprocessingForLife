@@ -73,15 +73,15 @@ impl<const INPUT_BITLEN: usize> From<[RistrettoPoint; INPUT_BITLEN]>
     for FirstMessageItem<INPUT_BITLEN>
 {
     fn from(v: [RistrettoPoint; INPUT_BITLEN]) -> Self {
-        Self { 0: v }
+        Self(v)
     }
 }
 
-impl<const INPUT_BITLEN: usize> Into<[RistrettoPoint; INPUT_BITLEN]>
-    for FirstMessageItem<INPUT_BITLEN>
+impl<const INPUT_BITLEN: usize> From<FirstMessageItem<INPUT_BITLEN>>
+    for [RistrettoPoint; INPUT_BITLEN]
 {
-    fn into(self) -> [RistrettoPoint; INPUT_BITLEN] {
-        self.0
+    fn from(value: FirstMessageItem<INPUT_BITLEN>) -> Self {
+        value.0
     }
 }
 
@@ -137,7 +137,7 @@ pub fn trusted_deal_packed_offline_keys<const PACK: usize, const PRF_INPUT_BITLE
         std::mem::MaybeUninit::uninit_array();
     prf_keys
         .into_iter()
-        .zip(scalar.into_iter())
+        .zip(scalar.iter())
         .zip(puncturing_points.into_iter())
         .zip(scalar_keys.iter_mut())
         .zip(vector_keys.iter_mut())
@@ -190,7 +190,6 @@ pub(crate) mod tests {
         super::scalar_party::OnlineSparseVoleKey as OnlineSparseVoleKeyScalar,
         super::vector_party::OnlineSparseVoleKey as OnlineSparseVoleKeyVector,
     };
-    use super::super::preprocessor::Preprocessor;
     use super::super::KEY_SIZE;
     use super::packed::{
         SparseVoleScalarPartyPackedOnlineKey, SparseVoleVectorPartyPackedOnlineKey,
@@ -230,7 +229,7 @@ pub(crate) mod tests {
             .collect();
 
         // Create online keys
-        trusted_deal::<INPUT_BITLEN, CODE_WEIGHT>(&scalar, puncturing_points, prf_keys)
+        trusted_deal::<INPUT_BITLEN, CODE_WEIGHT>(scalar, puncturing_points, prf_keys)
     }
 
     pub(crate) fn get_packed_correlation<const PACK: usize>(

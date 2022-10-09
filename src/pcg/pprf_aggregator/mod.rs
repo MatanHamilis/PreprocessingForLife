@@ -1,3 +1,5 @@
+use std::mem::forget;
+
 use super::codes::accumulate;
 use super::xor_arrays;
 use super::KEY_SIZE;
@@ -19,8 +21,11 @@ pub trait PprfAggregator {
 pub struct RandomErrorPprfAggregator {}
 impl PprfAggregator for RandomErrorPprfAggregator {
     fn aggregate(prf_keys: &[[u8; KEY_SIZE]], pprf_input_bitlen: usize) -> Vec<GF128> {
-        let output = vec![GF128::default(); 1 << pprf_input_bitlen];
-        let mut accumulated_vector: Vec<[u8; KEY_SIZE]> = unsafe { std::mem::transmute(output) };
+        let mut output = vec![GF128::default(); 1 << pprf_input_bitlen];
+        let mut accumulated_vector: Vec<[u8; KEY_SIZE]> = unsafe {
+            Vec::from_raw_parts(output.as_mut_ptr().cast(), output.len(), output.capacity())
+        };
+        forget(output);
         prf_eval_all_into_slice(&prf_keys[0], pprf_input_bitlen, &mut accumulated_vector);
         prf_keys[1..].iter().for_each(|k| {
             prf_eval_all(k, pprf_input_bitlen)
@@ -38,8 +43,15 @@ impl PprfAggregator for RandomErrorPprfAggregator {
         punctured_points: &[PrfInput<INPUT_BITLEN>],
         punctured_values_plus_leaves_sum: &[[u8; KEY_SIZE]],
     ) -> (Vec<GF128>, Vec<usize>) {
-        let mut accumulated_vector: Vec<[u8; KEY_SIZE]> =
-            unsafe { std::mem::transmute(vec![[GF128::default(); KEY_SIZE]; 1 << INPUT_BITLEN]) };
+        let mut accumulated_vector_orig = vec![GF128::default(); 1 << INPUT_BITLEN];
+        let mut accumulated_vector: Vec<[u8; KEY_SIZE]> = unsafe {
+            Vec::from_raw_parts(
+                accumulated_vector_orig.as_mut_ptr().cast(),
+                accumulated_vector_orig.len(),
+                accumulated_vector_orig.capacity(),
+            )
+        };
+        forget(accumulated_vector_orig);
         for idx in 0..pprf_keys.len() {
             let next_scalar_vector = pprf_keys[idx]
                 .full_eval_with_punctured_point(&punctured_values_plus_leaves_sum[idx]);
@@ -63,9 +75,16 @@ impl PprfAggregator for RandomErrorPprfAggregator {
 pub struct RegularErrorPprfAggregator {}
 impl PprfAggregator for RegularErrorPprfAggregator {
     fn aggregate(prf_keys: &[[u8; KEY_SIZE]], pprf_input_bitlen: usize) -> Vec<GF128> {
-        let accumulated_vector = vec![GF128::default(); prf_keys.len() << pprf_input_bitlen];
-        let mut accumulated_vector: Vec<[u8; KEY_SIZE]> =
-            unsafe { std::mem::transmute(accumulated_vector) };
+        let mut accumulated_vector_orig =
+            vec![GF128::default(); prf_keys.len() << pprf_input_bitlen];
+        let mut accumulated_vector: Vec<[u8; KEY_SIZE]> = unsafe {
+            Vec::from_raw_parts(
+                accumulated_vector_orig.as_mut_ptr().cast(),
+                accumulated_vector_orig.len(),
+                accumulated_vector_orig.capacity(),
+            )
+        };
+        forget(accumulated_vector_orig);
 
         let pprf_domain_size = 1 << pprf_input_bitlen;
         prf_keys
@@ -86,12 +105,15 @@ impl PprfAggregator for RegularErrorPprfAggregator {
         punctured_points: &[PrfInput<INPUT_BITLEN>],
         punctured_values_plus_leaves_sums: &[[u8; KEY_SIZE]],
     ) -> (Vec<GF128>, Vec<usize>) {
+        let mut output_orig = vec![GF128::default(); pprf_keys.len() << INPUT_BITLEN];
         let mut output: Vec<[u8; KEY_SIZE]> = unsafe {
-            std::mem::transmute(vec![
-                GF128::default();
-                pprf_keys.len() * (1 << INPUT_BITLEN)
-            ])
+            Vec::from_raw_parts(
+                output_orig.as_mut_ptr().cast(),
+                output_orig.len(),
+                output_orig.capacity(),
+            )
         };
+        forget(output_orig);
         pprf_keys
             .par_iter()
             .zip(punctured_values_plus_leaves_sums.par_iter())

@@ -170,7 +170,7 @@ mod tests {
         let point_arr = usize_to_bits::<1>(point_num);
         let full_eval = prf_eval_all(&prf_key, 1);
         let prf_evaluated = prf_eval(prf_key, &point_arr);
-        assert_eq!(prf_evaluated, full_eval[point_num as usize]);
+        assert_eq!(prf_evaluated, full_eval[point_num]);
     }
 
     #[test]
@@ -183,7 +183,7 @@ mod tests {
         let leaf_sum = full_eval_regular
             .iter()
             .fold([0u8; KEY_SIZE], |mut acc, cur| {
-                xor_arrays(&mut acc, &cur);
+                xor_arrays(&mut acc, cur);
                 acc
             });
         let full_eval_punctured = punctured_key.full_eval_with_punctured_point(&leaf_sum);

@@ -15,15 +15,15 @@ impl<const PACK: usize> SparseVoleScalarPartyPackedOfflineKey<PACK> {
     pub fn len(&self) -> usize {
         self.accumulated_vector.len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.accumulated_vector.is_empty()
+    }
 
     pub fn new(offline_keys: [ScalarPartyOfflineKey; PACK]) -> Self {
         let accumulated_vector_len = offline_keys[0].accumulated_vector.len();
         let scalars = core::array::from_fn(|i| offline_keys[i].scalar);
-        for i in 1..PACK {
-            assert_eq!(
-                accumulated_vector_len,
-                offline_keys[i].accumulated_vector.len()
-            );
+        for offline_key in offline_keys.iter() {
+            assert_eq!(accumulated_vector_len, offline_key.accumulated_vector.len());
         }
 
         let accumulated_vector: Vec<[GF128; PACK]> = (0..accumulated_vector_len)
@@ -88,7 +88,7 @@ impl<const PACK: usize, const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_
         }
         let cache_index = self.cache_index;
         self.cache_index = (cache_index + 1) % PACK;
-        return Some(self.cache[cache_index]);
+        Some(self.cache[cache_index])
     }
 }
 
@@ -100,13 +100,16 @@ impl<const PACK: usize> SparseVoleVectorPartyPackedOfflineKey<PACK> {
     pub fn len(&self) -> usize {
         self.accumulated_vector.len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.accumulated_vector.is_empty()
+    }
 
     pub fn new(offline_keys: [VectorPartyOfflineKey; PACK]) -> Self {
         let accumulated_vector_len = offline_keys[0].accumulated_scalar_vector.len();
-        for i in 1..PACK {
+        for offline_key in offline_keys.iter() {
             assert_eq!(
                 accumulated_vector_len,
-                offline_keys[i].accumulated_scalar_vector.len()
+                offline_key.accumulated_scalar_vector.len()
             );
         }
 
@@ -171,6 +174,6 @@ impl<const PACK: usize, const CODE_WEIGHT: usize, S: Iterator<Item = [u32; CODE_
         }
         let cache_index = self.cache_index;
         self.cache_index = (cache_index + 1) % PACK;
-        return Some(self.cache[cache_index]);
+        Some(self.cache[cache_index])
     }
 }

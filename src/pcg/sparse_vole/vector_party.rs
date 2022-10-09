@@ -58,10 +58,7 @@ impl<const INPUT_BITLEN: usize> SparseVolePcgVectorKeyGenStateInitial<INPUT_BITL
             .enumerate()
             .map(|(i, (puncturee, scalar_first_message_item))| {
                 puncturee
-                    .make_first_msg(
-                        scalar_first_message_item.into(),
-                        self.puncturing_points[i].into(),
-                    )
+                    .make_first_msg(scalar_first_message_item.into(), self.puncturing_points[i])
                     .into()
             })
             .collect()

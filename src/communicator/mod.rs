@@ -80,7 +80,7 @@ impl<S: Write + Read> Read for IoCounter<S> {
     }
     fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
         let res = self.io.read_exact(buf);
-        if let Ok(_) = res {
+        if res.is_ok() {
             self.total_bytes_read += buf.len();
         }
         res

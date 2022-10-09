@@ -1,4 +1,3 @@
-use crate::pcg::xor_arrays;
 use crate::pprf::bits_to_usize;
 use crate::pprf::usize_to_bits;
 
@@ -10,19 +9,18 @@ use aes::Block;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_big_array::BigArray;
-use std::mem::transmute;
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
 pub struct PrfInput<const INPUT_LEN: usize>(#[serde(with = "BigArray")] [bool; INPUT_LEN]);
 impl<const INPUT_LEN: usize> From<[bool; INPUT_LEN]> for PrfInput<INPUT_LEN> {
     fn from(v: [bool; INPUT_LEN]) -> Self {
-        Self { 0: v }
+        Self(v)
     }
 }
 
-impl<const INPUT_BITLEN: usize> Into<[bool; INPUT_BITLEN]> for PrfInput<INPUT_BITLEN> {
-    fn into(self) -> [bool; INPUT_BITLEN] {
-        self.0
+impl<const INPUT_BITLEN: usize> From<PrfInput<INPUT_BITLEN>> for [bool; INPUT_BITLEN] {
+    fn from(value: PrfInput<INPUT_BITLEN>) -> Self {
+        value.0
     }
 }
 
@@ -34,9 +32,7 @@ impl<const INPUT_BITLEN: usize> AsRef<[bool; INPUT_BITLEN]> for PrfInput<INPUT_B
 
 impl<const INPUT_BITLEN: usize> From<usize> for PrfInput<INPUT_BITLEN> {
     fn from(v: usize) -> Self {
-        Self {
-            0: usize_to_bits(v),
-        }
+        Self(usize_to_bits(v))
     }
 }
 

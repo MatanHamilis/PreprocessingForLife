@@ -21,10 +21,10 @@ impl FieldElement for PackedGF2U64 {
         self.0 == 0u64
     }
     fn one() -> Self {
-        Self { 0: u64::MAX }
+        Self(u64::MAX)
     }
     fn zero() -> Self {
-        Self { 0: 0u64 }
+        Self(0u64)
     }
     fn from_bits(bits: &[bool]) -> Option<Self> {
         if bits.len() != Self::BITS {
@@ -42,12 +42,14 @@ impl FieldElement for PackedGF2U64 {
 
 impl Add for PackedGF2U64 {
     type Output = Self;
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn add(self, rhs: Self) -> Self::Output {
-        Self { 0: self.0 ^ rhs.0 }
+        Self(self.0 ^ rhs.0)
     }
 }
 
 impl AddAssign for PackedGF2U64 {
+    #[allow(clippy::suspicious_op_assign_impl)]
     fn add_assign(&mut self, rhs: Self) {
         self.0 ^= rhs.0;
     }
@@ -55,12 +57,14 @@ impl AddAssign for PackedGF2U64 {
 
 impl Mul for PackedGF2U64 {
     type Output = Self;
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn mul(self, rhs: Self) -> Self::Output {
-        Self { 0: self.0 & rhs.0 }
+        Self(self.0 & rhs.0)
     }
 }
 
 impl MulAssign for PackedGF2U64 {
+    #[allow(clippy::suspicious_op_assign_impl)]
     fn mul_assign(&mut self, rhs: Self) {
         self.0 &= rhs.0;
     }
@@ -68,6 +72,7 @@ impl MulAssign for PackedGF2U64 {
 
 impl Div for PackedGF2U64 {
     type Output = Self;
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn div(self, rhs: Self) -> Self::Output {
         if rhs != Self::one() {
             panic!("Dividing by zero!");
@@ -76,6 +81,7 @@ impl Div for PackedGF2U64 {
     }
 }
 impl DivAssign for PackedGF2U64 {
+    #[allow(clippy::suspicious_op_assign_impl)]
     fn div_assign(&mut self, rhs: Self) {
         if rhs != Self::one() {
             panic!("Dividing by zero!");
@@ -85,11 +91,13 @@ impl DivAssign for PackedGF2U64 {
 
 impl Sub for PackedGF2U64 {
     type Output = Self;
+    #[allow(clippy::suspicious_arithmetic_impl)]
     fn sub(self, rhs: Self) -> Self::Output {
         self + rhs
     }
 }
 impl SubAssign for PackedGF2U64 {
+    #[allow(clippy::suspicious_op_assign_impl)]
     fn sub_assign(&mut self, rhs: Self) {
         *self += rhs;
     }

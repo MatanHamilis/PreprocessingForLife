@@ -89,8 +89,8 @@ fn double_prg_many_inplace_parametrized<const BLOCK_SIZE: usize>(in_out: &mut [B
         }
         AES.encrypt_blocks(output);
         for i in 0..BLOCK_SIZE {
-            xor_arrays(&mut output[2 * i].into(), &mut input[i].into());
-            xor_arrays(&mut output[2 * i + 1].into(), &mut input[i].into());
+            xor_arrays(&mut output[2 * i].into(), &input[i].into());
+            xor_arrays(&mut output[2 * i + 1].into(), &input[i].into());
             output[2 * i + 1][0] = !output[2 * i + 1][0];
         }
     }
