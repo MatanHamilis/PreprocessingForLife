@@ -1,4 +1,6 @@
 pub mod bristol_fashion;
+mod gates;
+use gates::{AndGate, Gate, NotGate, WideAnd, XorGate};
 
 use std::io::{Read, Write};
 
@@ -65,17 +67,13 @@ mod not_gate {
         x_share
     }
 }
+mod wide_and {
+    use crate::fields::FieldElement;
 
-#[derive(Clone, Copy, Debug)]
-pub enum GateType {
-    TwoInput {
-        input: [usize; 2],
-        op: GateTwoInputOp,
-    },
-    OneInput {
-        input: [usize; 1],
-        op: GateOneInputOp,
-    },
+    pub fn eval<S: FieldElement, const N: usize>(x: S, mut ys: [S; N]) -> [S; N] {
+        ys.iter_mut().for_each(|y| *y *= x);
+        ys
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -106,10 +104,17 @@ impl GateOneInputOp {
     }
 }
 
-#[derive(Debug)]
-pub struct Gate {
-    gate_type: GateType,
-    output_wire: usize,
+#[derive(Clone, Copy, Debug)]
+pub enum GateWideOp {
+    WideAnd,
+}
+
+impl GateWideOp {
+    fn eval(&self, x: GF2, ys: [GF2; 128]) -> [GF2; 128] {
+        match self {
+            Self::WideAnd => wide_and::eval(x, ys),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -117,7 +122,7 @@ pub struct Circuit {
     input_wire_count: usize,
     output_wire_count: usize,
     total_wire_count: usize,
-    gates: Vec<Vec<Gate>>,
+    gates: Vec<Vec<Box<dyn Gate>>>,
 }
 
 impl Circuit {
@@ -126,10 +131,14 @@ impl Circuit {
         let mut wires = vec![GF2::zero(); self.total_wire_count];
         wires[0..self.input_wire_count].copy_from_slice(input_wires);
         for gate in self.gates.iter().flatten() {
-            wires[gate.output_wire] = match gate.gate_type {
+            let output = match gate {
                 GateType::OneInput { input, op } => op.eval(wires[input[0]]),
                 GateType::TwoInput { input, op } => op.eval(wires[input[0]], wires[input[1]]),
+                GateType::WideGate { input, op } => {
+                    op.eval(wires[input.0], core::array::from_fn(|i| wires[input.1[i]]))
+                }
             };
+            // wires[gate.output_wire] = match gate {
         }
         wires.drain(0..(self.total_wire_count - self.output_wire_count));
         Some(wires)

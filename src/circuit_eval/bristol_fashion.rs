@@ -1,19 +1,39 @@
 //! # Bristol Fashion Circuits Parser
 //! Based on [Bristol Fashion documentation](https://homes.esat.kuleuven.be/~nsmart/MPC/).
 
+use super::gates::{AndGate, Gate, NotGate, WideAnd, XorGate};
 use log::error;
 
-use crate::circuit_eval::{GateOneInputOp, GateTwoInputOp};
+use crate::circuit_eval::GateTwoInputOp;
 
-use super::{Circuit, Gate, GateType};
-use std::collections::{HashMap, HashSet};
+use super::Circuit;
+use std::{
+    collections::{HashMap, HashSet},
+    mem::MaybeUninit,
+};
 
+#[derive(PartialEq, Eq)]
 enum GateOp {
     And,
     Xor,
     Inv,
+    WideAnd,
 }
 
+impl TryFrom<&str> for GateOp {
+    type Error = ();
+    fn try_from(op_str: &str) -> Result<Self, Self::Error> {
+        Ok(match op_str {
+            "AND" => GateOp::And,
+            "XOR" => GateOp::Xor,
+            "INV" => GateOp::Inv,
+            "wAND" => GateOp::WideAnd,
+            _ => return Err(()),
+        })
+    }
+}
+
+#[derive(Clone)]
 struct ParserIterator<'a, T: Iterator<Item = &'a str>> {
     iter: T,
 }
@@ -28,12 +48,7 @@ impl<'a, T: Iterator<Item = &'a str>> ParserIterator<'a, T> {
 
     pub fn next_gateop(&mut self) -> Option<GateOp> {
         let op_str = self.iter.next()?;
-        Some(match op_str {
-            "AND" => GateOp::And,
-            "XOR" => GateOp::Xor,
-            "INV" => GateOp::Inv,
-            _ => return None,
-        })
+        op_str.try_into().ok()
     }
 
     pub fn next_str(&mut self) -> Option<&'a str> {
@@ -63,38 +78,51 @@ fn parse_io_lines(line: &str) -> Option<(usize, Vec<usize>)> {
     Some((io_count, line_parts))
 }
 
-fn parse_regular_gate_line(line: &str) -> Option<(GateType, usize)> {
+fn parse_regular_gate_line(line: &str) -> Option<Box<dyn Gate>> {
     let mut line_iter = ParserIterator::new(line.split(' '));
     let total_input = line_iter.next_usize()?;
-    if !(1..=2).contains(&total_input) {
-        return None;
-    }
-    if line_iter.next_usize()? != 1 {
-        return None;
-    }
-    let input_wires = if total_input == 1 {
-        (line_iter.next_usize()?, None)
-    } else {
-        (line_iter.next_usize()?, Some(line_iter.next_usize()?))
-    };
+    let total_output = line_iter.next_usize()?;
+    let op = GateOp::try_from(line.split(' ').last()?).ok()?;
 
-    let output_wire = line_iter.next_usize()?;
-    let gate_op = line_iter.next_gateop()?;
-    let gate_type = match gate_op {
-        GateOp::And => GateType::TwoInput {
-            input: [input_wires.0, input_wires.1?],
-            op: GateTwoInputOp::And,
-        },
-        GateOp::Xor => GateType::TwoInput {
-            input: [input_wires.0, input_wires.1?],
-            op: GateTwoInputOp::Xor,
-        },
-        GateOp::Inv => GateType::OneInput {
-            input: [input_wires.0],
-            op: GateOneInputOp::Not,
-        },
-    };
-    Some((gate_type, output_wire))
+    Some(match op {
+        GateOp::And => {
+            assert_eq!(AndGate::input_count(), total_input);
+            assert_eq!(AndGate::output_count(), total_output);
+            let input_wires = [line_iter.next_usize()?, line_iter.next_usize()?];
+            Box::new(AndGate::new(input_wires, line_iter.next_usize()?))
+        }
+        GateOp::Xor => {
+            assert_eq!(XorGate::input_count(), total_input);
+            assert_eq!(XorGate::output_count(), total_output);
+            let input_wires = [line_iter.next_usize()?, line_iter.next_usize()?];
+            Box::new(XorGate::new(input_wires, line_iter.next_usize()?))
+        }
+        GateOp::Inv => {
+            assert_eq!(NotGate::input_count(), total_input);
+            assert_eq!(NotGate::output_count(), total_output);
+            Box::new(NotGate::new(
+                line_iter.next_usize()?,
+                line_iter.next_usize()?,
+            ))
+        }
+        GateOp::WideAnd => {
+            assert_eq!(WideAnd::input_count(), total_input);
+            assert_eq!(WideAnd::output_count(), total_output);
+            let common_input = line_iter.next_usize()?;
+            let mut wide_input: [MaybeUninit<usize>; 128] = MaybeUninit::uninit_array();
+            let mut wide_output: [MaybeUninit<usize>; 128] = MaybeUninit::uninit_array();
+            for i in 0..128 {
+                wide_input[i].write(line_iter.next_usize()?);
+            }
+            for i in 0..128 {
+                wide_output[i].write(line_iter.next_usize()?);
+            }
+            let wide_input = unsafe { std::mem::transmute(wide_input) };
+            let wide_output = unsafe { std::mem::transmute(wide_output) };
+
+            Box::new(WideAnd::new(common_input, wide_input, wide_output))
+        }
+    })
 }
 
 pub fn parse_bristol<T: Iterator<Item = String>>(mut lines: T) -> Option<Circuit> {
@@ -108,15 +136,12 @@ pub fn parse_bristol<T: Iterator<Item = String>>(mut lines: T) -> Option<Circuit
     }
     lines.next();
 
-    let mut gates: Vec<Vec<Gate>> = Vec::<Vec<Gate>>::new();
+    let mut gates: Vec<Vec<Box<dyn Gate>>> = Vec::<Vec<Box<dyn Gate>>>::new();
     let mut wire_toplogical_idx = HashMap::<usize, usize>::new();
     let mut used_wires = HashSet::<usize>::new();
     for gate_line in lines.take(gates_num) {
-        let (gate_type, output_wire) = parse_regular_gate_line(gate_line.as_str())?;
-        let input_wires = match &gate_type {
-            GateType::TwoInput { input, op: _ } => &input[..],
-            GateType::OneInput { input, op: _ } => &input[..],
-        };
+        let gate = parse_regular_gate_line(gate_line.as_str())?;
+        let input_wires = gate.input_slice();
         let mut max_topological_index = usize::MIN;
         for &input in input_wires {
             let topological_idx = if input < input_wire_count {
@@ -128,32 +153,31 @@ pub fn parse_bristol<T: Iterator<Item = String>>(mut lines: T) -> Option<Circuit
                 error!("Output wire can not be used as an input wire");
                 return None;
             }
+            if used_wires.contains(&input) {
+                return None;
+            }
             used_wires.insert(input);
             max_topological_index = std::cmp::max(max_topological_index, topological_idx);
         }
-        let gate = Gate {
-            gate_type,
-            output_wire,
-        };
         match gates.get_mut(max_topological_index) {
             None => gates.push(vec![gate]),
             Some(v) => v.push(gate),
         }
-        if let GateType::TwoInput {
-            input: _,
-            op: GateTwoInputOp::And,
-        } = gate_type
-        {
-            // In case of an AND gate, the output wire is on the next layer.
+        if !gate.is_linear() {
             max_topological_index += 1;
         }
-        if used_wires.contains(&output_wire) {
-            return None;
+        for &output_wire in gate.output_slice() {
+            if used_wires.contains(&output_wire) {
+                return None;
+            }
+            if output_wire < input_wire_count || output_wire >= total_wire_count {
+                return None;
+            }
+            if wire_toplogical_idx.contains_key(&output_wire) {
+                return None;
+            }
+            wire_toplogical_idx.insert(output_wire, max_topological_index);
         }
-        if output_wire < input_wire_count || output_wire >= total_wire_count {
-            return None;
-        }
-        wire_toplogical_idx.insert(output_wire, max_topological_index);
     }
     let total_gates_parsed: usize = gates.iter().map(|v| v.len()).sum();
     if total_gates_parsed != gates_num {
