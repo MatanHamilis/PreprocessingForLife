@@ -48,6 +48,12 @@ impl Add for PackedGF2U64 {
     }
 }
 
+impl Default for PackedGF2U64 {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
 impl AddAssign for PackedGF2U64 {
     #[allow(clippy::suspicious_op_assign_impl)]
     fn add_assign(&mut self, rhs: Self) {
@@ -186,5 +192,11 @@ impl<const SIZE: usize> FieldElement for PackedGF2Array<SIZE> {
             output.0[i] = PackedGF2U64::from_bits(chunk)?;
         }
         Some(output)
+    }
+}
+
+impl<const SIZE: usize> Default for PackedGF2Array<SIZE> {
+    fn default() -> Self {
+        Self::zero()
     }
 }

@@ -5,185 +5,43 @@
 //!     1. For each gate in the layer - mask all the inputs and send them to the other party.
 //!     2. Prepare the correlation for the next layer while waiting for the other party to send its queries.
 
+use std::cell::Cell;
 use std::fmt::Debug;
+
+use crate::fields::FieldElement;
+use crate::pcg::bit_beaver_triples::BeaverTripletShare;
+pub mod and;
+pub mod not;
+pub mod wide_and;
+pub mod xor;
+
+pub use and::AndGate;
+pub use not::NotGate;
+pub use wide_and::WideAndGate;
+pub use xor::XorGate;
 
 /// This represents the trait of a boolean gate.
 /// A boolean gate may possess multiple inputs and multiple outputs.
-pub trait Gate: Debug {
-    fn input_slice(&self) -> &[usize];
-    fn input_count(&self) -> usize;
+pub trait Gate<S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> {
+    fn set_input_wire(&self, index: usize, wire: &Cell<S>);
+    fn set_output_wire(&self, index: usize, wire: &Cell<S>);
 
-    fn output_slice(&self) -> &[usize];
-    fn output_count(&self) -> usize;
+    fn get_input_wire(&self, index: usize) -> Option<&Cell<S>>;
+    fn get_output_wire(&self, index: usize) -> Option<&Cell<S>>;
+
+    /// Local Computation
+    fn eval(&self);
+
+    // MPC Functions
+
+    /// The gate may fetch some correlated randomness (Beaver Triplets)
+    fn generate_correlation(&mut self, correlation_generator: &mut T) -> Result<(), ()>;
+
+    /// If the gate requires communication the be evaluated in MPC, this function returns the message to be sent to the other party.
+    fn generate_msg(&self) -> Option<&Vec<S>>;
+
+    /// If the gate sent some message, the function handles the peer's message and evaluates the gate accordingly.
+    fn handle_peer_msg(&mut self, msg: &[S]);
 
     fn is_linear(&self) -> bool;
-}
-
-#[derive(Debug)]
-pub struct NotGate {
-    input_wire: [usize; 1],
-    output_wire: [usize; 1],
-}
-
-impl NotGate {
-    pub fn new(input_wire: usize, output_wire: usize) -> Self {
-        NotGate {
-            input_wire: [input_wire],
-            output_wire: [output_wire],
-        }
-    }
-    pub fn input_count() -> usize {
-        1
-    }
-    pub fn output_count() -> usize {
-        1
-    }
-}
-
-impl Gate for NotGate {
-    fn input_count(&self) -> usize {
-        Self::input_count()
-    }
-    fn input_slice(&self) -> &[usize] {
-        &self.input_wire[..]
-    }
-    fn output_count(&self) -> usize {
-        Self::output_count()
-    }
-    fn output_slice(&self) -> &[usize] {
-        &self.output_wire[..]
-    }
-    fn is_linear(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Debug)]
-pub struct XorGate {
-    input_wires: [usize; 2],
-    output_wire: [usize; 1],
-}
-
-impl XorGate {
-    pub fn new(input_wires: [usize; 2], output_wire: usize) -> Self {
-        XorGate {
-            input_wires,
-            output_wire: [output_wire],
-        }
-    }
-    pub fn input_count() -> usize {
-        2
-    }
-    pub fn output_count() -> usize {
-        1
-    }
-}
-
-impl Gate for XorGate {
-    fn input_count(&self) -> usize {
-        Self::input_count()
-    }
-    fn input_slice(&self) -> &[usize] {
-        &self.input_wires[..]
-    }
-
-    fn output_count(&self) -> usize {
-        Self::output_count()
-    }
-
-    fn output_slice(&self) -> &[usize] {
-        &self.output_wire[..]
-    }
-
-    fn is_linear(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Debug)]
-pub struct AndGate {
-    input_wires: [usize; 2],
-    output_wire: [usize; 1],
-}
-
-impl AndGate {
-    pub fn new(input_wires: [usize; 2], output_wire: usize) -> Self {
-        Self {
-            input_wires,
-            output_wire: [output_wire],
-        }
-    }
-    pub fn input_count() -> usize {
-        2
-    }
-    pub fn output_count() -> usize {
-        1
-    }
-}
-impl Gate for AndGate {
-    fn input_count(&self) -> usize {
-        Self::input_count()
-    }
-    fn input_slice(&self) -> &[usize] {
-        &self.input_wires[..]
-    }
-
-    fn output_count(&self) -> usize {
-        Self::output_count()
-    }
-
-    fn output_slice(&self) -> &[usize] {
-        &self.output_wire[..]
-    }
-    fn is_linear(&self) -> bool {
-        false
-    }
-}
-
-#[derive(Debug)]
-pub struct WideAnd {
-    input: [usize; 129],
-    output: [usize; 128],
-}
-
-impl WideAnd {
-    pub fn new(common_input: usize, wide_input: [usize; 128], wide_output: [usize; 128]) -> Self {
-        let input: [usize; 129] = core::array::from_fn(|i| {
-            if i == 0 {
-                common_input
-            } else {
-                wide_input[i - 1]
-            }
-        });
-
-        Self {
-            input,
-            output: wide_output,
-        }
-    }
-
-    pub fn input_count() -> usize {
-        129
-    }
-    pub fn output_count() -> usize {
-        128
-    }
-}
-
-impl Gate for WideAnd {
-    fn input_count(&self) -> usize {
-        Self::input_count()
-    }
-    fn output_count(&self) -> usize {
-        Self::output_count()
-    }
-    fn input_slice(&self) -> &[usize] {
-        &self.input[..]
-    }
-    fn output_slice(&self) -> &[usize] {
-        &self.output[..]
-    }
-    fn is_linear(&self) -> bool {
-        false
-    }
 }

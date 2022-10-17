@@ -102,10 +102,10 @@ impl<T: Write + Read> Communicator<T> {
             .ok()
             .and_then(|_| from_reader(&mut self.io).ok())
     }
-    pub fn send<S: Serialize + DeserializeOwned>(&mut self, obj: S) -> Option<()> {
+    pub fn send<S: Serialize>(&mut self, obj: S) -> Option<()> {
         into_writer(&obj, &mut self.io).ok()
     }
-    pub fn receive<S: Serialize + DeserializeOwned>(&mut self) -> Option<S> {
+    pub fn receive<S: DeserializeOwned>(&mut self) -> Option<S> {
         from_reader(&mut self.io).ok()
     }
 }

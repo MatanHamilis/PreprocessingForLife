@@ -18,6 +18,7 @@ pub trait FieldElement:
     + Sized
     + Eq
     + Copy
+    + Default
 {
     fn one() -> Self;
     fn is_one(&self) -> bool;

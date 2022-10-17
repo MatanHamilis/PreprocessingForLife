@@ -1,23 +1,86 @@
 //! # Bristol Fashion Circuits Parser
 //! Based on [Bristol Fashion documentation](https://homes.esat.kuleuven.be/~nsmart/MPC/).
 
-use super::gates::{AndGate, Gate, NotGate, WideAnd, XorGate};
+use super::gates::{and, not, wide_and, xor};
+use super::gates::{AndGate, Gate, NotGate, WideAndGate, XorGate};
 use log::error;
 
-use crate::circuit_eval::GateTwoInputOp;
-
-use super::Circuit;
 use std::{
     collections::{HashMap, HashSet},
     mem::MaybeUninit,
 };
 
+pub enum ParsedGate {
+    AndGate {
+        input: [usize; 2],
+        output: usize,
+    },
+    XorGate {
+        input: [usize; 2],
+        output: usize,
+    },
+    NotGate {
+        input: usize,
+        output: usize,
+    },
+    WideAndGate {
+        input: [usize; 129],
+        output: [usize; 128],
+    },
+}
+
+impl ParsedGate {
+    fn input_wires(&self) -> &[usize] {
+        match self {
+            ParsedGate::AndGate { input, output: _ } => &input[..],
+            ParsedGate::XorGate { input, output: _ } => &input[..],
+            ParsedGate::NotGate { input, output: _ } => std::slice::from_ref(input),
+            ParsedGate::WideAndGate { input, output: _ } => &input[..],
+        }
+    }
+
+    fn output_wires(&self) -> &[usize] {
+        match self {
+            ParsedGate::AndGate { input: _, output } => std::slice::from_ref(output),
+            ParsedGate::XorGate { input: _, output } => std::slice::from_ref(output),
+            ParsedGate::NotGate { input: _, output } => std::slice::from_ref(output),
+            ParsedGate::WideAndGate { input: _, output } => &output[..],
+        }
+    }
+    fn is_linear(&self) -> bool {
+        match self {
+            ParsedGate::AndGate {
+                input: _,
+                output: _,
+            } => and::IS_LINEAR,
+            ParsedGate::XorGate {
+                input: _,
+                output: _,
+            } => xor::IS_LINEAR,
+            ParsedGate::NotGate {
+                input: _,
+                output: _,
+            } => not::IS_LINEAR,
+            ParsedGate::WideAndGate {
+                input: _,
+                output: _,
+            } => wide_and::IS_LINEAR,
+        }
+    }
+}
 #[derive(PartialEq, Eq)]
 enum GateOp {
     And,
     Xor,
     Inv,
     WideAnd,
+}
+
+pub struct ParsedCircuit {
+    pub input_wire_count: usize,
+    pub output_wire_count: usize,
+    pub internal_wire_count: usize,
+    pub gates: Vec<Vec<ParsedGate>>,
 }
 
 impl TryFrom<&str> for GateOp {
@@ -78,7 +141,7 @@ fn parse_io_lines(line: &str) -> Option<(usize, Vec<usize>)> {
     Some((io_count, line_parts))
 }
 
-fn parse_regular_gate_line(line: &str) -> Option<Box<dyn Gate>> {
+fn parse_regular_gate_line(line: &str) -> Option<ParsedGate> {
     let mut line_iter = ParserIterator::new(line.split(' '));
     let total_input = line_iter.next_usize()?;
     let total_output = line_iter.next_usize()?;
@@ -86,46 +149,53 @@ fn parse_regular_gate_line(line: &str) -> Option<Box<dyn Gate>> {
 
     Some(match op {
         GateOp::And => {
-            assert_eq!(AndGate::input_count(), total_input);
-            assert_eq!(AndGate::output_count(), total_output);
-            let input_wires = [line_iter.next_usize()?, line_iter.next_usize()?];
-            Box::new(AndGate::new(input_wires, line_iter.next_usize()?))
+            assert_eq!(and::INPUT_COUNT, total_input);
+            assert_eq!(and::OUTPUT_COUNT, total_output);
+            let input = [line_iter.next_usize()?, line_iter.next_usize()?];
+            ParsedGate::AndGate {
+                input,
+                output: line_iter.next_usize()?,
+            }
         }
         GateOp::Xor => {
-            assert_eq!(XorGate::input_count(), total_input);
-            assert_eq!(XorGate::output_count(), total_output);
-            let input_wires = [line_iter.next_usize()?, line_iter.next_usize()?];
-            Box::new(XorGate::new(input_wires, line_iter.next_usize()?))
+            assert_eq!(xor::INPUT_COUNT, total_input);
+            assert_eq!(xor::OUTPUT_COUNT, total_output);
+            let input = [line_iter.next_usize()?, line_iter.next_usize()?];
+            ParsedGate::XorGate {
+                input,
+                output: line_iter.next_usize()?,
+            }
         }
         GateOp::Inv => {
-            assert_eq!(NotGate::input_count(), total_input);
-            assert_eq!(NotGate::output_count(), total_output);
-            Box::new(NotGate::new(
-                line_iter.next_usize()?,
-                line_iter.next_usize()?,
-            ))
+            assert_eq!(not::INPUT_COUNT, total_input);
+            assert_eq!(not::OUTPUT_COUNT, total_output);
+            ParsedGate::NotGate {
+                input: line_iter.next_usize()?,
+                output: line_iter.next_usize()?,
+            }
         }
         GateOp::WideAnd => {
-            assert_eq!(WideAnd::input_count(), total_input);
-            assert_eq!(WideAnd::output_count(), total_output);
+            assert_eq!(wide_and::INPUT_COUNT, total_input);
+            assert_eq!(wide_and::OUTPUT_COUNT, total_output);
             let common_input = line_iter.next_usize()?;
-            let mut wide_input: [MaybeUninit<usize>; 128] = MaybeUninit::uninit_array();
+            let mut wide_input: [MaybeUninit<usize>; 129] = MaybeUninit::uninit_array();
             let mut wide_output: [MaybeUninit<usize>; 128] = MaybeUninit::uninit_array();
             for i in 0..128 {
                 wide_input[i].write(line_iter.next_usize()?);
             }
+            wide_input[128].write(common_input);
             for i in 0..128 {
                 wide_output[i].write(line_iter.next_usize()?);
             }
-            let wide_input = unsafe { std::mem::transmute(wide_input) };
-            let wide_output = unsafe { std::mem::transmute(wide_output) };
+            let input = unsafe { std::mem::transmute(wide_input) };
+            let output = unsafe { std::mem::transmute(wide_output) };
 
-            Box::new(WideAnd::new(common_input, wide_input, wide_output))
+            ParsedGate::WideAndGate { input, output }
         }
     })
 }
 
-pub fn parse_bristol<T: Iterator<Item = String>>(mut lines: T) -> Option<Circuit> {
+pub fn parse_bristol<T: Iterator<Item = String>>(mut lines: T) -> Option<ParsedCircuit> {
     let (gates_num, total_wire_count) = parse_first_line(lines.next()?.as_str())?;
     let (_, inputs_lengths) = parse_io_lines(lines.next()?.as_str())?;
     let input_wire_count: usize = inputs_lengths.iter().sum();
@@ -136,12 +206,12 @@ pub fn parse_bristol<T: Iterator<Item = String>>(mut lines: T) -> Option<Circuit
     }
     lines.next();
 
-    let mut gates: Vec<Vec<Box<dyn Gate>>> = Vec::<Vec<Box<dyn Gate>>>::new();
+    let mut gates: Vec<Vec<ParsedGate>> = Vec::<Vec<ParsedGate>>::new();
     let mut wire_toplogical_idx = HashMap::<usize, usize>::new();
     let mut used_wires = HashSet::<usize>::new();
     for gate_line in lines.take(gates_num) {
         let gate = parse_regular_gate_line(gate_line.as_str())?;
-        let input_wires = gate.input_slice();
+        let input_wires = gate.input_wires();
         let mut max_topological_index = usize::MIN;
         for &input in input_wires {
             let topological_idx = if input < input_wire_count {
@@ -166,7 +236,7 @@ pub fn parse_bristol<T: Iterator<Item = String>>(mut lines: T) -> Option<Circuit
         if !gate.is_linear() {
             max_topological_index += 1;
         }
-        for &output_wire in gate.output_slice() {
+        for &output_wire in gate.output_wires() {
             if used_wires.contains(&output_wire) {
                 return None;
             }
@@ -183,11 +253,11 @@ pub fn parse_bristol<T: Iterator<Item = String>>(mut lines: T) -> Option<Circuit
     if total_gates_parsed != gates_num {
         return None;
     }
-    let circuit = Circuit {
-        gates,
+    let circuit = ParsedCircuit {
         input_wire_count,
         output_wire_count,
-        total_wire_count,
+        internal_wire_count: total_wire_count - input_wire_count - output_wire_count,
+        gates,
     };
     Some(circuit)
 }

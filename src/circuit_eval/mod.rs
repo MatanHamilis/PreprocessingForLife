@@ -1,7 +1,9 @@
 pub mod bristol_fashion;
 mod gates;
-use gates::{AndGate, Gate, NotGate, WideAnd, XorGate};
+use gates::{AndGate, Gate, NotGate, WideAndGate, XorGate};
+use std::cell::Cell;
 
+use std::fmt::Debug;
 use std::io::{Read, Write};
 
 use serde::{de::DeserializeOwned, Serialize};
@@ -11,6 +13,8 @@ use crate::{
     fields::{FieldElement, GF2},
     pcg::bit_beaver_triples::BeaverTripletShare,
 };
+
+use self::bristol_fashion::{ParsedCircuit, ParsedGate};
 
 mod and_gate {
     use crate::fields::FieldElement;
@@ -117,40 +121,147 @@ impl GateWideOp {
     }
 }
 
-#[derive(Debug)]
-pub struct Circuit {
-    input_wire_count: usize,
-    output_wire_count: usize,
-    total_wire_count: usize,
-    gates: Vec<Vec<Box<dyn Gate>>>,
+pub struct Circuit<S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> {
+    gates: Vec<Vec<Box<dyn Gate<S, T>>>>,
+    input_wires: Vec<Cell<S>>,
+    internal_wires: Vec<Cell<S>>,
+    output_wires: Vec<Cell<S>>,
 }
 
-impl Circuit {
-    pub fn eval_circuit(&self, input_wires: &[GF2]) -> Option<Vec<GF2>> {
-        assert_eq!(input_wires.len(), self.input_wire_count);
-        let mut wires = vec![GF2::zero(); self.total_wire_count];
-        wires[0..self.input_wire_count].copy_from_slice(input_wires);
-        for gate in self.gates.iter().flatten() {
-            let output = match gate {
-                GateType::OneInput { input, op } => op.eval(wires[input[0]]),
-                GateType::TwoInput { input, op } => op.eval(wires[input[0]], wires[input[1]]),
-                GateType::WideGate { input, op } => {
-                    op.eval(wires[input.0], core::array::from_fn(|i| wires[input.1[i]]))
-                }
-            };
-            // wires[gate.output_wire] = match gate {
+impl<S: FieldElement + Debug, T: Iterator<Item = BeaverTripletShare<S>>> Circuit<S, T> {
+    fn parsed_wire_number_to_cell<'a>(
+        input_wires: &'a Vec<Cell<S>>,
+        output_wires: &'a Vec<Cell<S>>,
+        internal_wires: &'a Vec<Cell<S>>,
+        mut wire_number: usize,
+    ) -> &'a Cell<S> {
+        if wire_number < input_wires.len() {
+            input_wires.get(wire_number).unwrap()
+        } else {
+            wire_number -= input_wires.len();
+            if wire_number < internal_wires.len() {
+                internal_wires.get(wire_number).unwrap()
+            } else {
+                wire_number -= internal_wires.len();
+                output_wires
+                    .get(wire_number)
+                    .expect("Malformed wire number is parsed!")
+            }
         }
-        wires.drain(0..(self.total_wire_count - self.output_wire_count));
-        Some(wires)
     }
+    fn new(parsed_circuit: &ParsedCircuit) -> Self {
+        let input_wires = vec![Cell::<S>::default(); parsed_circuit.input_wire_count];
+        let output_wires = vec![Cell::<S>::default(); parsed_circuit.output_wire_count];
+        let internal_wires = vec![Cell::<S>::default(); parsed_circuit.internal_wire_count];
+        let gates = parsed_circuit
+            .gates
+            .iter()
+            .map(|parsed_layer| {
+                parsed_layer
+                    .iter()
+                    .map(|parsed_gate| match parsed_gate {
+                        &ParsedGate::NotGate { input, output } => {
+                            let input_wire = Self::parsed_wire_number_to_cell(
+                                &input_wires,
+                                &output_wires,
+                                &internal_wires,
+                                input,
+                            );
+                            let output_wire = Self::parsed_wire_number_to_cell(
+                                &input_wires,
+                                &output_wires,
+                                &internal_wires,
+                                output,
+                            );
+                            Box::new(NotGate::new(input_wire, output_wire)) as Box<dyn Gate<S, T>>
+                        }
+                        &ParsedGate::AndGate { input, output } => {
+                            let input_wire = std::array::from_fn(|i| {
+                                Self::parsed_wire_number_to_cell(
+                                    &input_wires,
+                                    &output_wires,
+                                    &internal_wires,
+                                    input[i],
+                                )
+                            });
+                            let output_wire = Self::parsed_wire_number_to_cell(
+                                &input_wires,
+                                &output_wires,
+                                &internal_wires,
+                                output,
+                            );
+                            Box::new(AndGate::new(input_wire, output_wire)) as Box<dyn Gate<S, T>>
+                        }
+                        &ParsedGate::XorGate { input, output } => {
+                            let input_wire = std::array::from_fn(|i| {
+                                Self::parsed_wire_number_to_cell(
+                                    &input_wires,
+                                    &output_wires,
+                                    &internal_wires,
+                                    input[i],
+                                )
+                            });
+                            let output_wire = Self::parsed_wire_number_to_cell(
+                                &input_wires,
+                                &output_wires,
+                                &internal_wires,
+                                output,
+                            );
+                            Box::new(XorGate::new(input_wire, output_wire)) as Box<dyn Gate<S, T>>
+                        }
+                        &ParsedGate::WideAndGate { input, output } => {
+                            let input_wire = std::array::from_fn(|i| {
+                                Self::parsed_wire_number_to_cell(
+                                    &input_wires,
+                                    &output_wires,
+                                    &internal_wires,
+                                    input[i],
+                                )
+                            });
+                            let output_wire = Self::parsed_wire_number_to_cell(
+                                &input_wires,
+                                &output_wires,
+                                &internal_wires,
+                                output,
+                            );
+                            Box::new(WideAndGate::new(input_wire, output_wire))
+                                as Box<dyn Gate<S, T>>
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        Self {
+            input_wires,
+            output_wires,
+            internal_wires,
+            gates,
+        }
+    }
+}
+
+impl<S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> Circuit<S, T> {
+    pub fn eval_circuit(&mut self, input_wires: &[S]) -> Option<Vec<S>> {
+        assert_eq!(input_wires.len(), self.input_wires.len());
+        input_wires
+            .iter()
+            .zip(self.input_wires.iter())
+            .for_each(|(input, wire)| wire.set(*input));
+        for gate in self.gates.iter().flatten() {
+            gate.eval();
+        }
+        Some(self.output_wires.iter().map(|w| w.get()).collect())
+    }
+
     pub fn input_wire_count(&self) -> usize {
-        self.input_wire_count
+        self.input_wires.len()
     }
     pub fn get_layer_count(&self) -> usize {
         self.gates.len()
     }
     pub fn output_wire_count(&self) -> usize {
-        self.output_wire_count
+        self.output_wires.len()
     }
 }
 
@@ -163,12 +274,10 @@ pub enum CircuitEvalSessionState<'a, S: FieldElement, T: Iterator<Item = BeaverT
 }
 #[derive(Debug)]
 struct CircuitEvalSession<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> {
-    circuit: &'a Circuit,
-    wires: Vec<S>,
+    circuit: &'a Circuit<S, T>,
     layer_to_process: usize,
     beaver_triple_gen: T,
-    beaver_triples_current_layer: Option<Vec<BeaverTripletShare<S>>>,
-    beaver_triples_next_layer: Option<Vec<BeaverTripletShare<S>>>,
+    gates_in_layer_waiting_for_response: Option<Vec<&'a Box<dyn Gate<S, T>>>>,
     party_id: bool,
 }
 
@@ -200,25 +309,11 @@ pub struct CircuitEvalSessionWaitingToReceive<
 }
 
 impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> CircuitEvalSession<'a, S, T> {
-    fn generate_beaver_triples_for_layer(
-        &mut self,
-        layer: usize,
-    ) -> Result<Vec<BeaverTripletShare<S>>, ()> {
+    fn generate_beaver_triples_for_layer(&mut self, layer: usize) -> Result<(), ()> {
         let layer = self.circuit.gates.get(layer).ok_or(())?;
-        Ok(layer
-            .iter()
-            .filter_map(|gate| match gate.gate_type {
-                GateType::OneInput { input: _, op: _ } => None,
-                GateType::TwoInput { input: _, op } => match op {
-                    GateTwoInputOp::Xor => None,
-                    GateTwoInputOp::And => Some(
-                        self.beaver_triple_gen
-                            .next()
-                            .expect("Correlation generator error! Shouldn't happen"),
-                    ),
-                },
-            })
-            .collect())
+        layer
+            .iter_mut()
+            .try_for_each(|g| g.generate_correlation(&mut self.beaver_triple_gen))
     }
 }
 
@@ -226,36 +321,27 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
     CircuitEvalSessionState<'a, S, T>
 {
     pub fn new(
-        circuit: &'a Circuit,
+        circuit: &'a Circuit<S, T>,
         input_shares: &[S],
         beaver_triple_gen: T,
         party_id: bool,
     ) -> Self {
-        assert_eq!(circuit.input_wire_count, input_shares.len());
-        let wires: Vec<S> = input_shares
+        assert_eq!(circuit.input_wire_count(), input_shares.len());
+        circuit
+            .input_wires
             .iter()
-            .chain(
-                [S::zero()]
-                    .iter()
-                    .cycle()
-                    .take(circuit.total_wire_count - circuit.input_wire_count),
-            )
-            .copied()
-            .collect();
+            .zip(input_shares.iter())
+            .for_each(|(input_wire, input_share)| input_wire.set(*input_share));
         let mut session = CircuitEvalSession {
             circuit,
-            wires,
             beaver_triple_gen,
-            beaver_triples_current_layer: None,
-            beaver_triples_next_layer: None,
             layer_to_process: 0,
+            gates_in_layer_waiting_for_response: None,
             party_id,
         };
-        session.beaver_triples_next_layer = Some(
-            session
-                .generate_beaver_triples_for_layer(0)
-                .expect("Error generating beaver triples for first layer"),
-        );
+        session
+            .generate_beaver_triples_for_layer(0)
+            .expect("Error generating beaver triples for first layer");
         CircuitEvalSessionState::WaitingToSend(CircuitEvalSessionWaitingToSend { session })
     }
 }
@@ -263,7 +349,7 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
 impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
     CircuitEvalSessionWaitingToSend<'a, S, T>
 {
-    pub fn fetch_layer_messages(self) -> (CircuitEvalSessionState<'a, S, T>, Vec<(S, S)>) {
+    pub fn fetch_layer_messages(self) -> (CircuitEvalSessionState<'a, S, T>, Vec<&'a Vec<S>>) {
         // Prepare beaver triples for this layer.
         let mut session = self.session;
         let layer_id = session.layer_to_process;
@@ -272,48 +358,15 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
             .gates
             .get(layer_id)
             .expect("Missing layer, corrupt state!");
-        session.beaver_triples_current_layer = session.beaver_triples_next_layer.take();
 
-        let mut triples = session
-            .beaver_triples_current_layer
-            .as_ref()
-            .expect("No beaver triples ready for next layer!")
-            .iter();
         // Generate the messages.
-        let msgs = current_layer
+        let (msgs, ids) = current_layer
             .iter()
-            .filter_map(|g| {
-                session.wires[g.output_wire] = match g.gate_type {
-                    GateType::TwoInput {
-                        input: input_wires,
-                        op,
-                    } => {
-                        let x_share = session.wires[input_wires[0]];
-                        let y_share = session.wires[input_wires[1]];
-                        match op {
-                            GateTwoInputOp::Xor => xor_gate::eval_mpc(x_share, y_share),
-                            GateTwoInputOp::And => {
-                                let triple = triples
-                                    .next()
-                                    .expect("Beaver triples generator is exhausted.");
-                                let msg = Some(and_gate::mpc_make_msgs(
-                                    session.wires[input_wires[0]],
-                                    session.wires[input_wires[1]],
-                                    triple,
-                                ));
-                                return msg;
-                            }
-                        }
-                    }
-                    GateType::OneInput { input, op } => match op {
-                        GateOneInputOp::Not => {
-                            not_gate::eval_mpc(session.wires[input[0]], session.party_id)
-                        }
-                    },
-                };
-                None
-            })
-            .collect();
+            .enumerate()
+            .filter_map(|(id, gate)| gate.generate_msg().map(|v| (v, gate)))
+            .unzip();
+        session.gates_in_layer_waiting_for_response = Some(ids);
+
         let new_state = CircuitEvalSessionState::WaitingToGenCorrelation(
             CircuitEvalSessionWaitingToGenCorrelation { session },
         );
@@ -325,14 +378,10 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
     CircuitEvalSessionWaitingToGenCorrelation<'a, S, T>
 {
     pub fn gen_correlation_for_next_layer(mut self) -> CircuitEvalSessionState<'a, S, T> {
-        if self.session.circuit.gates.len() == self.session.layer_to_process + 1 {
-            self.session.beaver_triples_next_layer = None;
-        } else {
-            self.session.beaver_triples_next_layer = Some(
-                self.session
-                    .generate_beaver_triples_for_layer(self.session.layer_to_process + 1)
-                    .expect("Failed to generate beaver triples for next layer!"),
-            );
+        if self.session.circuit.gates.len() < self.session.layer_to_process + 1 {
+            self.session
+                .generate_beaver_triples_for_layer(self.session.layer_to_process + 1)
+                .expect("Failed to generate beaver triples for next layer!");
         }
         CircuitEvalSessionState::WaitingToReceive(CircuitEvalSessionWaitingToReceive {
             session: self.session,
@@ -344,7 +393,7 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
 {
     pub fn handle_layer_responses(
         self,
-        responses: Vec<(S, S)>,
+        responses: Vec<Vec<S>>,
     ) -> CircuitEvalSessionState<'a, S, T> {
         let mut session = self.session;
         let layer_id = session.layer_to_process;
@@ -353,39 +402,21 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
             .gates
             .get(layer_id)
             .expect("Current layer id missing, corrupt struct");
-        let mut responses_iter = responses.into_iter();
-        let mut beaver_triples_iter = session
-            .beaver_triples_current_layer
-            .as_ref()
-            .expect("Failed to fetch triples for current layer!")
-            .iter();
-        for g in current_layer {
-            if let GateType::TwoInput {
-                input,
-                op: GateTwoInputOp::And,
-            } = g.gate_type
-            {
-                let x_share = session.wires[input[0]];
-                let y_share = session.wires[input[1]];
-                let (x_response, y_response) = responses_iter
-                    .next()
-                    .expect("Malformed response from peer! Insufficient data");
-                session.wires[g.output_wire] = and_gate::mpc_handle_msgs(
-                    x_share,
-                    y_share,
-                    x_response,
-                    y_response,
-                    beaver_triples_iter
-                        .next()
-                        .expect("Insufficient preprocessed triples, this shouldn't have happened!"),
-                )
-            }
-        }
-        if responses_iter.next().is_some() {
-            panic!("Malformed response from peer! Data too long");
+        let gates_expecting_response = session
+            .gates_in_layer_waiting_for_response
+            .take()
+            .expect("Expecting gates vector isn't initalized, this has to be a bug!");
+        assert_eq!(responses.len(), gates_expecting_response.len());
+        for (response, gate_id_in_layer) in responses.into_iter().zip(
+            session
+                .gates_in_layer_waiting_for_response
+                .take()
+                .expect("Expected Gates aren't initialized, this has to be a bug!")
+                .into_iter(),
+        ) {
+            gate_id_in_layer.handle_peer_msg(&response[..]);
         }
         session.layer_to_process = layer_id + 1;
-        session.beaver_triples_current_layer = None;
         if session
             .circuit
             .gates
@@ -394,9 +425,10 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
         {
             CircuitEvalSessionState::Finished(
                 session
-                    .wires
+                    .circuit
+                    .output_wires
                     .into_iter()
-                    .skip(session.circuit.total_wire_count - session.circuit.output_wire_count)
+                    .map(|v| v.get())
                     .collect(),
             )
         } else {
@@ -414,7 +446,7 @@ pub fn eval_circuit<
     S: FieldElement + Serialize + DeserializeOwned,
     T: Iterator<Item = BeaverTripletShare<S>>,
 >(
-    circuit: &Circuit,
+    circuit: &Circuit<S, T>,
     (mut my_input, peer_input): (Vec<S>, Vec<S>),
     correlations: T,
     communicator: &mut Communicator<C>,
