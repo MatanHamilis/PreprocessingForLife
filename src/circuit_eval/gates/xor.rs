@@ -27,10 +27,8 @@ impl<'a, S: FieldElement> XorGate<'a, S> {
     pub fn is_linear() -> bool {
         IS_LINEAR
     }
-}
-
-impl<'a, S: FieldElement> Gate<S> for XorGate<'a, S> {
-    fn is_linear(&self) -> bool {
-        XorGate::is_linear()
+    pub fn eval(&self) {
+        self.output_wire
+            .set(self.input_wires[0].get() + self.input_wires[1].get())
     }
 }

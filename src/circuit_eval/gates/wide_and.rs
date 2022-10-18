@@ -8,18 +8,21 @@ pub const OUTPUT_COUNT: usize = 128;
 
 #[derive(Debug)]
 pub struct WideAndGate<'a, S: FieldElement> {
-    input: [&'a Cell<S>; INPUT_COUNT],
-    output: [&'a Cell<S>; OUTPUT_COUNT],
+    common_input: &'a Cell<S>,
+    wide_input: [&'a Cell<S>; INPUT_COUNT - 1],
+    wide_output: [&'a Cell<S>; OUTPUT_COUNT],
 }
 
 impl<'a, S: FieldElement> WideAndGate<'a, S> {
     pub fn new(
-        wide_input: [&'a Cell<S>; INPUT_COUNT],
+        common_input: &'a Cell<S>,
+        wide_input: [&'a Cell<S>; INPUT_COUNT - 1],
         wide_output: [&'a Cell<S>; OUTPUT_COUNT],
     ) -> Self {
         Self {
-            input: wide_input,
-            output: wide_output,
+            common_input,
+            wide_input,
+            wide_output,
         }
     }
 
@@ -32,10 +35,12 @@ impl<'a, S: FieldElement> WideAndGate<'a, S> {
     pub fn is_linear() -> bool {
         IS_LINEAR
     }
-}
 
-impl<'a, S: FieldElement> Gate<S> for WideAndGate<'a, S> {
-    fn is_linear(&self) -> bool {
-        Self::is_linear()
+    pub fn eval(&self) {
+        let common_input = self.common_input.get();
+        self.wide_output
+            .iter()
+            .zip(self.wide_input.iter())
+            .for_each(|(ow, iw)| *ow.set(iw.get() * common_input));
     }
 }

@@ -19,15 +19,23 @@ pub mod xor;
 
 /// This represents the trait of a boolean gate.
 /// A boolean gate may possess multiple inputs and multiple outputs.
-pub trait Gate<S: FieldElement> {
-    fn set_input_wire(&self, index: usize, wire: &Cell<S>);
-    fn set_output_wire(&self, index: usize, wire: &Cell<S>);
+pub enum Gate<'a, S: FieldElement> {
+    Not(NotGate<'a, S>),
+    And(AndGate<'a, S>),
+    Xor(XorGate<'a, S>),
+    WideAnd(WideAndGate<'a, S>),
+}
 
-    fn get_input_wire(&self, index: usize) -> Option<&Cell<S>>;
-    fn get_output_wire(&self, index: usize) -> Option<&Cell<S>>;
-
+impl<'a, S: FieldElement> Gate<'a, S> {
     /// Local Computation
-    fn eval(&self);
+    fn eval(&self) {
+        match self {
+            Self::Not(g) => g.eval(),
+            Self::And(g) => g.eval(),
+            Self::Xor(g) => g.eval(),
+            Self::WideAnd(g) => g.eval(),
+        }
+    }
 
     // MPC Functions
 
@@ -35,7 +43,12 @@ pub trait Gate<S: FieldElement> {
     fn generate_correlation(
         &mut self,
         correlation_generator: &mut impl Iterator<Item = BeaverTripletShare<S>>,
-    ) -> Result<(), ()>;
+    ) -> Result<(), ()> {
+        match self {
+            Self::And(g) => g.generate_correlation(correlation_generator),
+            _ => Ok(()),
+        }
+    }
 
     /// If the gate requires communication the be evaluated in MPC, this function returns the message to be sent to the other party.
     fn generate_msg(&self) -> Option<Vec<S>>;

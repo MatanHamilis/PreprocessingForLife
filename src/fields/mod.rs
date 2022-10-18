@@ -5,6 +5,7 @@ pub use gf128::GF128;
 pub use gf2::GF2;
 pub use packed_gf2::PackedGF2Array;
 pub use packed_gf2::PackedGF2U64;
+use std::ops::Neg;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 pub trait FieldElement:
     Add<Output = Self>
@@ -19,6 +20,7 @@ pub trait FieldElement:
     + Eq
     + Copy
     + Default
+    + Neg
 {
     fn one() -> Self;
     fn is_one(&self) -> bool;
