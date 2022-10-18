@@ -1,6 +1,5 @@
 use super::Gate;
 use crate::fields::FieldElement;
-use crate::pcg::bit_beaver_triples::BeaverTripletShare;
 use std::cell::Cell;
 
 pub const IS_LINEAR: bool = false;
@@ -35,8 +34,8 @@ impl<'a, S: FieldElement> WideAndGate<'a, S> {
     }
 }
 
-impl<S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> Gate<S, T> for WideAndGate {
+impl<'a, S: FieldElement> Gate<S> for WideAndGate<'a, S> {
     fn is_linear(&self) -> bool {
-        WideAndGate::is_linear()
+        Self::is_linear()
     }
 }

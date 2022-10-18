@@ -1,6 +1,5 @@
 use super::Gate;
 use crate::fields::FieldElement;
-use crate::pcg::bit_beaver_triples::BeaverTripletShare;
 use std::cell::Cell;
 use std::fmt::Debug;
 
@@ -32,9 +31,7 @@ impl<'a, S: FieldElement> NotGate<'a, S> {
     }
 }
 
-impl<'a, S: FieldElement + Debug, T: Iterator<Item = BeaverTripletShare<S>>> Gate<S, T>
-    for NotGate<'a, S>
-{
+impl<'a, S: FieldElement> Gate<S> for NotGate<'a, S> {
     fn is_linear(&self) -> bool {
         NotGate::<'a, S>::is_linear()
     }

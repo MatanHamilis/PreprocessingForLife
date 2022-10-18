@@ -1,6 +1,5 @@
 use super::Gate;
 use crate::fields::FieldElement;
-use crate::pcg::bit_beaver_triples::BeaverTripletShare;
 use std::cell::Cell;
 
 pub const IS_LINEAR: bool = true;
@@ -30,7 +29,7 @@ impl<'a, S: FieldElement> XorGate<'a, S> {
     }
 }
 
-impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> Gate<S, T> for XorGate<'a, S> {
+impl<'a, S: FieldElement> Gate<S> for XorGate<'a, S> {
     fn is_linear(&self) -> bool {
         XorGate::is_linear()
     }

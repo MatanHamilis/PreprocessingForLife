@@ -2,7 +2,6 @@
 //! Based on [Bristol Fashion documentation](https://homes.esat.kuleuven.be/~nsmart/MPC/).
 
 use super::gates::{and, not, wide_and, xor};
-use super::gates::{AndGate, Gate, NotGate, WideAndGate, XorGate};
 use log::error;
 
 use std::{

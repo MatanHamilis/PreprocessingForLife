@@ -122,7 +122,7 @@ impl GateWideOp {
 }
 
 pub struct Circuit<S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> {
-    gates: Vec<Vec<Box<dyn Gate<S, T>>>>,
+    gates: Vec<Vec<Box<dyn Gate<S>>>>,
     input_wires: Vec<Cell<S>>,
     internal_wires: Vec<Cell<S>>,
     output_wires: Vec<Cell<S>>,
@@ -218,12 +218,14 @@ impl<S: FieldElement + Debug, T: Iterator<Item = BeaverTripletShare<S>>> Circuit
                                     input[i],
                                 )
                             });
-                            let output_wire = Self::parsed_wire_number_to_cell(
-                                &input_wires,
-                                &output_wires,
-                                &internal_wires,
-                                output,
-                            );
+                            let output_wire = std::array::from_fn(|i| {
+                                Self::parsed_wire_number_to_cell(
+                                    &input_wires,
+                                    &output_wires,
+                                    &internal_wires,
+                                    output[i],
+                                )
+                            });
                             Box::new(WideAndGate::new(input_wire, output_wire))
                                 as Box<dyn Gate<S, T>>
                         }
@@ -265,25 +267,22 @@ impl<S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> Circuit<S, T> {
     }
 }
 
-#[derive(Debug)]
 pub enum CircuitEvalSessionState<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> {
     WaitingToSend(CircuitEvalSessionWaitingToSend<'a, S, T>),
     WaitingToGenCorrelation(CircuitEvalSessionWaitingToGenCorrelation<'a, S, T>),
     WaitingToReceive(CircuitEvalSessionWaitingToReceive<'a, S, T>),
     Finished(Vec<S>),
 }
-#[derive(Debug)]
 struct CircuitEvalSession<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>> {
     circuit: &'a Circuit<S, T>,
     layer_to_process: usize,
     beaver_triple_gen: T,
-    gates_in_layer_waiting_for_response: Option<Vec<&'a Box<dyn Gate<S, T>>>>,
+    gates_in_layer_waiting_for_response: Option<Vec<&'a Box<dyn Gate<S>>>>,
     party_id: bool,
 }
 
 // We use three different structs to enforce certain actions to be done only in certain states by the typing system.
 
-#[derive(Debug)]
 pub struct CircuitEvalSessionWaitingToSend<
     'a,
     S: FieldElement,
@@ -291,7 +290,6 @@ pub struct CircuitEvalSessionWaitingToSend<
 > {
     session: CircuitEvalSession<'a, S, T>,
 }
-#[derive(Debug)]
 pub struct CircuitEvalSessionWaitingToGenCorrelation<
     'a,
     S: FieldElement,
@@ -299,7 +297,6 @@ pub struct CircuitEvalSessionWaitingToGenCorrelation<
 > {
     session: CircuitEvalSession<'a, S, T>,
 }
-#[derive(Debug)]
 pub struct CircuitEvalSessionWaitingToReceive<
     'a,
     S: FieldElement,
@@ -349,7 +346,7 @@ impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
 impl<'a, S: FieldElement, T: Iterator<Item = BeaverTripletShare<S>>>
     CircuitEvalSessionWaitingToSend<'a, S, T>
 {
-    pub fn fetch_layer_messages(self) -> (CircuitEvalSessionState<'a, S, T>, Vec<&'a Vec<S>>) {
+    pub fn fetch_layer_messages(self) -> (CircuitEvalSessionState<'a, S, T>, Vec<Vec<S>>) {
         // Prepare beaver triples for this layer.
         let mut session = self.session;
         let layer_id = session.layer_to_process;
@@ -496,7 +493,7 @@ pub fn eval_circuit<
 
 #[cfg(test)]
 mod tests {
-    use super::bristol_fashion::parse_bristol;
+    use super::bristol_fashion::{parse_bristol, ParsedCircuit};
     use super::Circuit;
     use crate::circuit_eval::CircuitEvalSessionState;
     use crate::fields::{FieldElement, GF128, GF2};
@@ -532,16 +529,26 @@ mod tests {
         S: Iterator<Item = SenderRandomBitOtPcgItem>,
         T: Iterator<Item = ReceiverRandomBitOtPcgItem>,
     >(
-        circuit: &Circuit,
+        circuit: &ParsedCircuit,
         input_a: &[GF2],
         input_b: &[GF2],
         beaver_triple_scalar_key: &mut BeaverTripletScalarPartyOnlinePCGKey<GF2, S>,
         beaver_triple_vector_key: &mut BeaverTripletBitPartyOnlinePCGKey<GF2, T>,
     ) -> (Vec<GF2>, Vec<GF2>) {
-        let mut first_party_session =
-            CircuitEvalSessionState::new(circuit, input_a, beaver_triple_scalar_key, false);
-        let mut second_party_session =
-            CircuitEvalSessionState::new(circuit, input_b, beaver_triple_vector_key, true);
+        let first_party_circuit = Circuit::new(circuit);
+        let first_party_session = CircuitEvalSessionState::new(
+            &first_party_circuit,
+            input_a,
+            beaver_triple_scalar_key,
+            false,
+        );
+        let second_party_circuit = Circuit::new(circuit);
+        let mut second_party_session = CircuitEvalSessionState::new(
+            &second_party_circuit,
+            input_b,
+            beaver_triple_vector_key,
+            true,
+        );
         let (first_party_output, second_party_output) = loop {
             let (first_party_session_temp, first_party_queries) = match first_party_session {
                 CircuitEvalSessionState::WaitingToSend(session) => session.fetch_layer_messages(),
@@ -606,13 +613,14 @@ mod tests {
         )
     }
 
-    fn test_circuit(circuit: &Circuit, input: &[GF2], random_share: &[GF2]) -> Vec<GF2> {
+    fn test_circuit(circuit: &ParsedCircuit, input: &[GF2], random_share: &[GF2]) -> Vec<GF2> {
         const WEIGHT: u8 = 128;
         const CODE_WEIGHT: usize = 8;
         const INPUT_BITLEN: usize = 12;
         assert_eq!(input.len(), random_share.len());
-        assert_eq!(input.len(), circuit.input_wire_count());
-        let local_computation_output = circuit.eval_circuit(input).unwrap();
+        assert_eq!(input.len(), circuit.input_wire_count);
+        let circuit_local = Circuit::new(circuit);
+        let local_computation_output = circuit_local.eval_circuit(input).unwrap();
 
         let (scalar_online_key, vector_online_key) =
             gen_sparse_vole_online_keys::<WEIGHT, INPUT_BITLEN, CODE_WEIGHT>();
