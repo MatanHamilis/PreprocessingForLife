@@ -1,17 +1,16 @@
 use crate::fields::FieldElement;
-use std::cell::Cell;
 
 pub const IS_LINEAR: bool = true;
 pub const INPUT_COUNT: usize = 1;
 pub const OUTPUT_COUNT: usize = 1;
 
-pub struct NotGate<'a, S: FieldElement> {
-    input_wire: &'a Cell<S>,
-    output_wire: &'a Cell<S>,
+pub struct NotGate {
+    input_wire: usize,
+    output_wire: usize,
 }
 
-impl<'a, S: FieldElement> NotGate<'a, S> {
-    pub fn new(input_wire: &Cell<S>, output_wire: &Cell<S>) -> Self {
+impl NotGate {
+    pub fn new(input_wire: usize, output_wire: usize) -> Self {
         NotGate {
             input_wire,
             output_wire,
@@ -27,7 +26,7 @@ impl<'a, S: FieldElement> NotGate<'a, S> {
         IS_LINEAR
     }
 
-    fn eval(&self) {
-        self.output_wire.set(self.input_wire.get().neg())
+    pub fn eval<S: FieldElement>(&self, wires: &mut [S]) {
+        wires[self.output_wire] = wires[self.input_wire].neg();
     }
 }

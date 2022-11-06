@@ -29,44 +29,35 @@ pub enum ParsedGate {
 }
 
 impl ParsedGate {
-    fn input_wires(&self) -> &[usize] {
+    pub fn input_wires(&self) -> &[usize] {
         match self {
-            ParsedGate::AndGate { input, output: _ } => &input[..],
-            ParsedGate::XorGate { input, output: _ } => &input[..],
-            ParsedGate::NotGate { input, output: _ } => std::slice::from_ref(input),
-            ParsedGate::WideAndGate { input, output: _ } => &input[..],
+            ParsedGate::AndGate { input, output } => input,
+            ParsedGate::NotGate { input, output } => std::slice::from_ref(input),
+            ParsedGate::XorGate { input, output } => input,
+            ParsedGate::WideAndGate { input, output } => input,
         }
     }
-
-    fn output_wires(&self) -> &[usize] {
+    pub fn output_wires(&self) -> &[usize] {
         match self {
-            ParsedGate::AndGate { input: _, output } => std::slice::from_ref(output),
-            ParsedGate::XorGate { input: _, output } => std::slice::from_ref(output),
-            ParsedGate::NotGate { input: _, output } => std::slice::from_ref(output),
-            ParsedGate::WideAndGate { input: _, output } => &output[..],
+            ParsedGate::AndGate { input, output } => std::slice::from_ref(output),
+            ParsedGate::NotGate { input, output } => std::slice::from_ref(output),
+            ParsedGate::XorGate { input, output } => std::slice::from_ref(output),
+            ParsedGate::WideAndGate { input, output } => output,
         }
     }
-    fn is_linear(&self) -> bool {
+    pub fn is_linear(&self) -> bool {
         match self {
             ParsedGate::AndGate {
                 input: _,
                 output: _,
             } => and::IS_LINEAR,
-            ParsedGate::XorGate {
-                input: _,
-                output: _,
-            } => xor::IS_LINEAR,
-            ParsedGate::NotGate {
-                input: _,
-                output: _,
-            } => not::IS_LINEAR,
-            ParsedGate::WideAndGate {
-                input: _,
-                output: _,
-            } => wide_and::IS_LINEAR,
+            ParsedGate::NotGate { input, output } => not::IS_LINEAR,
+            ParsedGate::XorGate { input, output } => xor::IS_LINEAR,
+            ParsedGate::WideAndGate { input, output } => wide_and::IS_LINEAR,
         }
     }
 }
+
 #[derive(PartialEq, Eq)]
 enum GateOp {
     And,

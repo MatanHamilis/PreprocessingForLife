@@ -1,4 +1,4 @@
-use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
+use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
@@ -26,20 +26,32 @@ impl FieldElement for PackedGF2U64 {
     fn zero() -> Self {
         Self(0u64)
     }
-    fn from_bits(bits: &[bool]) -> Option<Self> {
-        if bits.len() != Self::BITS {
-            return None;
-        }
-        let mut output = 0u64;
-        for (idx, bit) in bits.iter().enumerate() {
-            if *bit {
-                output ^= 1 << idx;
-            }
-        }
-        Some(PackedGF2U64(output))
+
+    fn set_bit(&mut self, bit: bool, idx: usize) {
+        let mask = u64::MAX ^ (1 << idx);
+        let masked_val = self.0 & mask;
+        self.0 = u64::from(bit) << idx | masked_val;
     }
+    // fn from_bits(bits: &[bool]) -> Option<Self> {
+    //     if bits.len() != Self::BITS {
+    //         return None;
+    //     }
+    //     let mut output = 0u64;
+    //     for (idx, bit) in bits.iter().enumerate() {
+    //         if *bit {
+    //             output ^= 1 << idx;
+    //         }
+    //     }
+    //     Some(PackedGF2U64(output))
+    // }
 }
 
+impl Neg for PackedGF2U64 {
+    type Output = Self;
+    fn neg(self) -> Self::Output {
+        self + Self::one()
+    }
+}
 impl Add for PackedGF2U64 {
     type Output = Self;
     #[allow(clippy::suspicious_arithmetic_impl)]
@@ -182,21 +194,23 @@ impl<const SIZE: usize> FieldElement for PackedGF2Array<SIZE> {
     fn zero() -> Self {
         Self([PackedGF2U64::zero(); SIZE])
     }
-    fn from_bits(bits: &[bool]) -> Option<Self> {
-        if bits.len() != Self::BITS {
-            return None;
-        }
-        let mut output = Self::zero();
-        for i in 0..SIZE {
-            let chunk = &bits[PackedGF2U64::BITS * i..PackedGF2U64::BITS * (i + 1)];
-            output.0[i] = PackedGF2U64::from_bits(chunk)?;
-        }
-        Some(output)
+
+    fn set_bit(&mut self, bit: bool, idx: usize) {
+        let entry = idx / PackedGF2U64::BITS;
+        let offset = idx & (PackedGF2U64::BITS - 1);
+        self.0[entry].set_bit(bit, offset)
     }
 }
 
 impl<const SIZE: usize> Default for PackedGF2Array<SIZE> {
     fn default() -> Self {
         Self::zero()
+    }
+}
+
+impl<const SIZE: usize> Neg for PackedGF2Array<SIZE> {
+    type Output = Self;
+    fn neg(self) -> Self::Output {
+        self + Self::one()
     }
 }

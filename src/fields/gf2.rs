@@ -85,12 +85,9 @@ impl FieldElement for GF2 {
         self.v == 0
     }
 
-    fn from_bits(bits: &[bool]) -> Option<Self> {
-        if bits.len() != Self::BITS {
-            None
-        } else {
-            Some(GF2::from(bits[0]))
-        }
+    fn set_bit(&mut self, bit: bool, idx: usize) {
+        assert_eq!(idx, 0);
+        self.v = bit.into();
     }
 }
 

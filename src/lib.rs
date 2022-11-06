@@ -1,6 +1,7 @@
 #![feature(option_get_or_insert_default)]
 #![feature(portable_simd, stdsimd)]
 #![feature(maybe_uninit_uninit_array)]
+#![feature(split_array)]
 
 pub mod circuit_eval;
 pub mod communicator;

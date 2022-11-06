@@ -2,6 +2,9 @@ use aes::Block;
 use core::arch::x86_64::{__m128i, _mm_clmulepi64_si128, _mm_lzcnt_epi64, _mm_xor_si128};
 use core::simd::u64x2;
 use rand_core::{CryptoRng, RngCore};
+use serde::de::Visitor;
+use serde::ser::SerializeTuple;
+use serde::{Deserialize, Serialize};
 use std::iter::Sum;
 use std::mem::transmute;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, ShlAssign, Sub, SubAssign};
@@ -17,6 +20,42 @@ const IRREDUCIBLE_POLYNOMIAL: u64x2 = u64x2::from_array([IRREDUCIBLE_POLYNOMIAL_
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct GF128(u64x2);
 
+impl Serialize for GF128 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_tuple(2)?;
+        seq.serialize_element(&self.0[0])?;
+        seq.serialize_element(&self.0[1])?;
+        seq.end()
+    }
+}
+
+struct GF128Visitor;
+impl<'de> Visitor<'de> for GF128Visitor {
+    type Value = GF128;
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("A [u64;2] value")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let a = seq.next_element()?.unwrap_or(u64::default());
+        let b = seq.next_element()?.unwrap_or(u64::default());
+        Ok(GF128(u64x2::from_array([a, b])))
+    }
+}
+impl<'de> Deserialize<'de> for GF128 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(deserializer.deserialize_tuple(2, GF128Visitor)?)
+    }
+}
 impl From<GF2> for GF128 {
     fn from(v: GF2) -> Self {
         if v.is_one() {
@@ -170,18 +209,27 @@ impl FieldElement for GF128 {
     fn is_zero(&self) -> bool {
         self.0 == GF128::U64X2_ZERO
     }
-    fn from_bits(bits: &[bool]) -> Option<Self> {
-        if bits.len() != Self::BITS {
-            return None;
+    fn set_bit(&mut self, bit: bool, idx: usize) {
+        assert!(idx < Self::BITS);
+        if GF128::get_bit(&self, idx) != bit {
+            GF128::toggle_bit(
+                &mut self.0,
+                u32::try_from(idx).expect("This should not happen"),
+            );
         }
-        let mut output = u64x2::default();
-        for (idx, bit) in bits.iter().enumerate() {
-            if *bit {
-                GF128::toggle_bit(&mut output, idx as u32);
-            }
-        }
-        Some(GF128(output))
     }
+    // fn from_bits(bits: &[bool]) -> Option<Self> {
+    //     if bits.len() != Self::BITS {
+    //         return None;
+    //     }
+    //     let mut output = u64x2::default();
+    //     for (idx, bit) in bits.iter().enumerate() {
+    //         if *bit {
+    //             GF128::toggle_bit(&mut output, idx as u32);
+    //         }
+    //     }
+    //     Some(GF128(output))
+    // }
 }
 
 impl GF128 {
