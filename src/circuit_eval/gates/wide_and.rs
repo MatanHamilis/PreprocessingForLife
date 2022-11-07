@@ -6,6 +6,7 @@ pub const IS_LINEAR: bool = false;
 pub const INPUT_COUNT: usize = 129;
 pub const OUTPUT_COUNT: usize = 128;
 
+#[derive(Debug)]
 pub struct WideAndGate<S: FieldElement> {
     common_input: usize,
     wide_input: [usize; INPUT_COUNT - 1],
@@ -57,7 +58,25 @@ impl<S: FieldElement + Serialize + DeserializeOwned> WideAndGate<S> {
         })
     }
 
-    pub fn handle_msg(&self, wires: &[S], msg: &WideAndMsg<S>) {}
+    pub fn handle_msg(&mut self, wires: &mut [S], msg: &WideAndMsg<S>) {
+        let x_share = wires[self.common_input];
+        let wide_beaver_triple = self
+            .correlation
+            .take()
+            .expect("Corrupt circuit! This gate doesn't hold any correlation");
+        let u = msg.x_open + x_share + wide_beaver_triple.a_share;
+        self.wide_input
+            .iter()
+            .zip(self.wide_output.iter())
+            .zip(msg.ys_open.iter())
+            .zip(wide_beaver_triple.b_shares.iter())
+            .zip(wide_beaver_triple.ab_shares.iter())
+            .for_each(|((((input, output), v_open), b_share), ab_share)| {
+                let y_share = wires[*input];
+                let v = *v_open + y_share + *b_share;
+                wires[*output] = x_share * v - *b_share * u + *ab_share;
+            })
+    }
 }
 
 #[derive(Serialize, Deserialize)]

@@ -7,6 +7,7 @@ pub use packed_gf2::PackedGF2Array;
 pub use packed_gf2::PackedGF2U64;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::fmt::Debug;
 use std::ops::Neg;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 pub trait FieldElement:
@@ -25,6 +26,7 @@ pub trait FieldElement:
     + Neg<Output = Self>
     + DeserializeOwned
     + Serialize
+    + Debug
 {
     fn one() -> Self;
     fn is_one(&self) -> bool;

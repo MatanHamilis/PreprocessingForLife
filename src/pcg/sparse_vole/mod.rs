@@ -288,7 +288,7 @@ pub(crate) mod tests {
         for ((scalar_gf, scalar_pcg), (vector_bit, vector_gf)) in
             scalar_online_key.zip(vector_online_key).take(3000)
         {
-            i = dbg!(i) + 1;
+            i += 1;
             assert_eq!(scalar_pcg, scalar);
             if vector_bit.is_one() {
                 assert_eq!((scalar_gf + vector_gf), scalar);

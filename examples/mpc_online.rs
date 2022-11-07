@@ -10,23 +10,18 @@ use std::{
 use clap::{Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
 use log::{error, info, trace};
-use silent_party::pcg::sparse_vole::vector_party::distributed_generation as vector_distributed_generation;
+use silent_party::{circuit_eval::bristol_fashion::ParsedCircuit, fields::GF2};
 use silent_party::{
     circuit_eval::{bristol_fashion::parse_bristol, eval_circuit, Circuit},
     communicator::Communicator,
     fields::{FieldElement, PackedGF2Array, GF128},
-    pcg::{
-        bit_beaver_triples::{
-            BeaverTripletBitPartyOnlinePCGKey, BeaverTripletScalarPartyOnlinePCGKey,
-        },
-        codes::EACode,
-        sparse_vole::scalar_party::distributed_generation as scalar_distributed_generation,
-    },
     pprf::usize_to_bits,
     pseudorandom::{prf::PrfInput, KEY_SIZE},
 };
 
 const INPUT_WIDTH: usize = 2;
+const WEIGHT: usize = 128;
+const INPUT_BITLEN: usize = 13;
 /// Two Party PCG-based Semi-Honest MPC for boolean circuits.
 #[derive(Parser, Debug)]
 #[clap(name = "MPC Runner")]
@@ -52,7 +47,7 @@ pub fn main() {
         .init();
 
     info!("Circuit file path: {:?}", args.circuit_path);
-    let circuit = match circuit_from_file(&args.circuit_path) {
+    let parsed_circuit = match circuit_from_file(&args.circuit_path) {
         Some(c) => c,
         None => {
             error!("Failed to parse circuit!");
@@ -60,15 +55,15 @@ pub fn main() {
         }
     };
     trace!("Parsed circuit file successfully!");
-    info!("Circuit layer count: {}", circuit.get_layer_count());
+    info!("Circuit layer count: {}", parsed_circuit.gates.len());
 
     match args.command {
-        Commands::Server { local_port } => handle_server(&circuit, local_port),
-        Commands::Client { peer_address } => handle_client(&circuit, peer_address),
+        Commands::Server { local_port } => handle_server(&parsed_circuit, local_port),
+        Commands::Client { peer_address } => handle_client(&parsed_circuit, peer_address),
     };
 }
 
-fn circuit_from_file(path: &Path) -> Option<Circuit> {
+fn circuit_from_file(path: &Path) -> Option<ParsedCircuit> {
     let circuit_file = match File::open(path) {
         Ok(f) => f,
         Err(e) => {
@@ -94,9 +89,7 @@ fn circuit_from_file(path: &Path) -> Option<Circuit> {
     }
 }
 
-fn handle_server(circuit: &Circuit, local_port: u16) {
-    const WEIGHT: u8 = 128;
-    const INPUT_BITLEN: usize = 13;
+fn handle_server(parsed_circuit: &ParsedCircuit, local_port: u16) {
     info!("I am SERVER");
     info!("Listening to port: {}", local_port);
     let listener = match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), local_port))
@@ -119,29 +112,33 @@ fn handle_server(circuit: &Circuit, local_port: u16) {
     };
     stream.set_nodelay(true).expect("Failed to set nodelay");
     let mut communicator = Communicator::from(stream);
-    info!("Starting PCG Generation...");
-    let prf_keys = get_prf_keys(WEIGHT);
-    let puncturing_points: Vec<PrfInput<INPUT_BITLEN>> = get_puncturing_points(WEIGHT);
-    let pcg_offline_key =
-        vector_distributed_generation(puncturing_points, prf_keys, &mut communicator).unwrap();
-    let ea_code = EACode::<8>::new(pcg_offline_key.vector_length(), [0u8; 16]);
-    let pcg_online_key = pcg_offline_key.provide_online_key(ea_code);
+    let scalar = GF128::from([10, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0]);
+    let prf_keys = insecure_get_prf_keys::<WEIGHT>([2; KEY_SIZE]);
+    let puncturing_points = insecure_get_puncturing_points::<INPUT_BITLEN, WEIGHT>(2);
+    let code_seed_first = [100; KEY_SIZE];
+    let code_seed_second = [101; KEY_SIZE];
+
+    info!("Generating PCG Keys...");
+    let mut correlation_generator = silent_party::pcg_key_gen::<TcpStream, WEIGHT, INPUT_BITLEN, 8>(
+        prf_keys,
+        puncturing_points,
+        scalar,
+        code_seed_first,
+        code_seed_second,
+        silent_party::pcg::full_key::Role::Receiver,
+        &mut communicator,
+    );
     info!("PCG offline key generated successfully!");
+    let circuit = Circuit::from(parsed_circuit.clone());
     info!("Preparing input...");
-    let my_input = vec![PackedGF2Array::<INPUT_WIDTH>::zero(); circuit.input_wire_count() / 2];
-    let peer_input_share =
-        vec![PackedGF2Array::<INPUT_WIDTH>::zero(); circuit.input_wire_count() / 2];
-    info!("Generating online keys...");
-    let beaver_triplet_pcg_online_key: BeaverTripletBitPartyOnlinePCGKey<
-        PackedGF2Array<INPUT_WIDTH>,
-        _,
-    > = pcg_online_key.into();
-    let eval_start = Instant::now();
+    let my_input = vec![GF2::zero(); circuit.input_wire_count() / 2];
+    let peer_input_share = vec![GF2::zero(); circuit.input_wire_count() / 2];
     info!("Starting circuit evaluation NOW!");
+    let eval_start = Instant::now();
     let output = eval_circuit(
         circuit,
         (my_input, peer_input_share),
-        beaver_triplet_pcg_online_key,
+        &mut correlation_generator,
         &mut communicator,
         true,
     )
@@ -157,7 +154,7 @@ fn handle_server(circuit: &Circuit, local_port: u16) {
     }
 }
 
-fn handle_client(circuit: &Circuit, peer_address: SocketAddrV4) {
+fn handle_client(circuit: &ParsedCircuit, peer_address: SocketAddrV4) {
     info!("I am CLIENT");
     info!("Connecting to address: {}", peer_address);
     let stream = match TcpStream::connect(peer_address) {
@@ -171,27 +168,33 @@ fn handle_client(circuit: &Circuit, peer_address: SocketAddrV4) {
     trace!("Connected to peer succesfully");
     let mut communicator = Communicator::from(stream);
     let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
-    info!("Starting PCG Generation...");
-    let pcg_offline_key =
-        scalar_distributed_generation::<13, _>(&scalar, &mut communicator).unwrap();
-    let ea_code = EACode::<8>::new(pcg_offline_key.vector_length(), [0u8; 16]);
-    let pcg_online_key = pcg_offline_key.provide_online_key(ea_code);
-    info!("PCG offline key generated successfully!");
+    let prf_keys = insecure_get_prf_keys::<WEIGHT>([1; KEY_SIZE]);
+    let puncturing_points = insecure_get_puncturing_points::<INPUT_BITLEN, WEIGHT>(1);
+    let code_seed_first = [100; KEY_SIZE];
+    let code_seed_second = [101; KEY_SIZE];
+
+    info!("Generating PCG Keys...");
+    let mut correlation_generator = silent_party::pcg_key_gen::<TcpStream, WEIGHT, INPUT_BITLEN, 8>(
+        prf_keys,
+        puncturing_points,
+        scalar,
+        code_seed_first,
+        code_seed_second,
+        silent_party::pcg::full_key::Role::Sender,
+        &mut communicator,
+    );
+    info!("PCG key generated successfully!");
+    let circuit = Circuit::from(circuit.clone());
     info!("Preparing input...");
-    let my_input = vec![PackedGF2Array::<INPUT_WIDTH>::zero(); circuit.input_wire_count() / 2];
-    let peer_input_share =
-        vec![PackedGF2Array::<INPUT_WIDTH>::zero(); circuit.input_wire_count() / 2];
-    info!("Generating online keys...");
-    let beaver_triplet_pcg_online_key: BeaverTripletScalarPartyOnlinePCGKey<
-        PackedGF2Array<INPUT_WIDTH>,
-        _,
-    > = pcg_online_key.into();
+    let my_input = vec![GF2::zero(); circuit.input_wire_count() / 2];
+    let peer_input_share = vec![GF2::zero(); circuit.input_wire_count() / 2];
+
     info!("Starting circuit evaluation NOW!");
     let eval_start = Instant::now();
     let output = eval_circuit(
         circuit,
         (my_input, peer_input_share),
-        beaver_triplet_pcg_online_key,
+        &mut correlation_generator,
         &mut communicator,
         false,
     )
@@ -207,18 +210,17 @@ fn handle_client(circuit: &Circuit, peer_address: SocketAddrV4) {
     }
 }
 
-fn get_prf_keys(amount: u8) -> Vec<[u8; KEY_SIZE]> {
-    let mut base_prf_key = [0u8; KEY_SIZE];
-    (0..amount)
-        .map(|i| {
-            base_prf_key[KEY_SIZE - 1] = i;
-            base_prf_key
-        })
-        .collect()
+fn insecure_get_prf_keys<const WEIGHT: usize>(
+    mut base_prf_key: [u8; KEY_SIZE],
+) -> [[u8; KEY_SIZE]; WEIGHT] {
+    std::array::from_fn(|i| {
+        base_prf_key[KEY_SIZE - 1] = u8::try_from(i).unwrap();
+        base_prf_key
+    })
 }
 
-fn get_puncturing_points<const INPUT_BITLEN: usize>(amount: u8) -> Vec<PrfInput<INPUT_BITLEN>> {
-    (0..amount)
-        .map(|i| usize_to_bits(100 * usize::from(i)).into())
-        .collect()
+fn insecure_get_puncturing_points<const INPUT_BITLEN: usize, const WEIGHT: usize>(
+    base_val: usize,
+) -> [PrfInput<INPUT_BITLEN>; WEIGHT] {
+    std::array::from_fn(|i| usize_to_bits(base_val + 100 * usize::from(i)).into())
 }

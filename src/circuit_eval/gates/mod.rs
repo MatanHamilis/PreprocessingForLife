@@ -24,6 +24,7 @@ pub mod not;
 pub mod wide_and;
 pub mod xor;
 
+#[derive(Debug)]
 pub enum Gate<S: FieldElement> {
     And(and::AndGate<S>),
     Xor(xor::XorGate),
@@ -61,18 +62,26 @@ impl<S: FieldElement> Gate<S> {
     }
 
     /// If the gate requires communication the be evaluated in MPC, this function returns the message to be sent to the other party.
-    pub fn generate_msg(&self, wires: &[S]) -> Result<Option<Msg<S>>, ()> {
+    /// Otherwise, simply evaluates the gate.
+    pub fn eval_and_generate_msg(&self, wires: &mut [S], id: bool) -> Result<Option<Msg<S>>, ()> {
         Ok(match self {
             Gate::And(and_gate) => Some(Msg::And(and_gate.generate_msg(wires).ok_or(())?)),
             Gate::WideAnd(wand_gate) => {
                 Some(Msg::WideAnd(wand_gate.generate_msg(wires).ok_or(())?))
             }
-            _ => None,
+            Gate::Not(not_gate) => {
+                not_gate.eval_mpc(wires, id);
+                None
+            }
+            Gate::Xor(xor_gate) => {
+                xor_gate.eval(wires);
+                None
+            }
         })
     }
 
     /// If the gate sent some message, the function handles the peer's message and evaluates the gate accordingly.
-    pub fn handle_peer_msg(&mut self, wires: &[S], msg: &Msg<S>) {
+    pub fn handle_peer_msg(&mut self, wires: &mut [S], msg: &Msg<S>) {
         match (self, msg) {
             (Gate::And(and_gate), Msg::And(msg)) => and_gate.handle_msg(wires, msg),
             (Gate::WideAnd(wand_gate), Msg::WideAnd(msg)) => wand_gate.handle_msg(wires, msg),

@@ -4,6 +4,7 @@ pub const IS_LINEAR: bool = true;
 pub const INPUT_COUNT: usize = 1;
 pub const OUTPUT_COUNT: usize = 1;
 
+#[derive(Debug)]
 pub struct NotGate {
     input_wire: usize,
     output_wire: usize,
@@ -27,6 +28,14 @@ impl NotGate {
     }
 
     pub fn eval<S: FieldElement>(&self, wires: &mut [S]) {
-        wires[self.output_wire] = wires[self.input_wire].neg();
+        wires[self.output_wire] = S::one() - wires[self.input_wire];
+    }
+
+    pub fn eval_mpc<S: FieldElement>(&self, wires: &mut [S], id: bool) {
+        if id {
+            self.eval(wires);
+        } else {
+            wires[self.output_wire] = wires[self.input_wire];
+        }
     }
 }

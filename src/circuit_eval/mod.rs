@@ -4,122 +4,11 @@ mod gates;
 use std::fmt::Debug;
 use std::io::{Read, Write};
 
-use serde::{de::DeserializeOwned, Serialize};
-
 use crate::pcg::full_key::CorrelationGenerator;
-use crate::{
-    communicator::Communicator,
-    fields::{FieldElement, GF2},
-    pcg::bit_beaver_triples::BeaverTripletShare,
-};
+use crate::{communicator::Communicator, fields::FieldElement};
 
-use self::bristol_fashion::{ParsedCircuit, ParsedGate};
+use self::bristol_fashion::ParsedCircuit;
 use self::gates::{Gate, Msg};
-
-mod and_gate {
-    use crate::fields::FieldElement;
-    use crate::pcg::bit_beaver_triples::BeaverTripletShare;
-    pub fn eval<S: FieldElement>(x: S, y: S) -> S {
-        x * y
-    }
-    // u = Open(x + a);
-    // v = Open(y + b);
-    // [xy] = ((x+a)-a)((y+b)-b)=[u]v-[a]v-[b]u+[ab]=
-    //          [x]v-[b]u+[ab]
-    pub fn mpc_make_msgs<S: FieldElement>(
-        x_share: S,
-        y_share: S,
-        beaver_triplet_shares: &BeaverTripletShare<S>,
-    ) -> (S, S) {
-        let u_share = beaver_triplet_shares.a_share + x_share;
-        let v_share = beaver_triplet_shares.b_share + y_share;
-        (u_share, v_share)
-    }
-    pub fn mpc_handle_msgs<S: FieldElement>(
-        x_share: S,
-        y_share: S,
-        x_response: S,
-        y_response: S,
-        beaver_triplet_shares: &BeaverTripletShare<S>,
-    ) -> S {
-        let u = beaver_triplet_shares.a_share + x_share + x_response;
-        let v = beaver_triplet_shares.b_share + y_share + y_response;
-        x_share * v - beaver_triplet_shares.b_share * u + beaver_triplet_shares.ab_share
-    }
-}
-
-mod xor_gate {
-    use crate::fields::FieldElement;
-    pub fn eval<S: FieldElement>(x: S, y: S) -> S {
-        x + y
-    }
-    pub fn eval_mpc<S: FieldElement>(x_share: S, y_share: S) -> S {
-        x_share + y_share
-    }
-}
-
-mod not_gate {
-    use crate::fields::FieldElement;
-    pub fn eval<S: FieldElement>(x: S) -> S {
-        S::one() - x
-    }
-
-    pub fn eval_mpc<S: FieldElement>(mut x_share: S, should_flip: bool) -> S {
-        if should_flip {
-            x_share = S::one() - x_share
-        }
-        x_share
-    }
-}
-mod wide_and {
-    use crate::fields::FieldElement;
-
-    pub fn eval<S: FieldElement, const N: usize>(x: S, mut ys: [S; N]) -> [S; N] {
-        ys.iter_mut().for_each(|y| *y *= x);
-        ys
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum GateTwoInputOp {
-    And,
-    Xor,
-}
-
-impl GateTwoInputOp {
-    fn eval(&self, x: GF2, y: GF2) -> GF2 {
-        match self {
-            Self::Xor => xor_gate::eval(x, y),
-            Self::And => and_gate::eval(x, y),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum GateOneInputOp {
-    Not,
-}
-
-impl GateOneInputOp {
-    fn eval(&self, x: GF2) -> GF2 {
-        match self {
-            Self::Not => not_gate::eval(x),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum GateWideOp {
-    WideAnd,
-}
-
-impl GateWideOp {
-    fn eval(&self, x: GF2, ys: [GF2; 128]) -> [GF2; 128] {
-        match self {
-            Self::WideAnd => wide_and::eval(x, ys),
-        }
-    }
-}
 
 pub struct Circuit<S: FieldElement> {
     gates: Vec<Vec<Gate<S>>>,
@@ -128,8 +17,8 @@ pub struct Circuit<S: FieldElement> {
     output_wire_count: usize,
 }
 
-impl<S: FieldElement> From<&ParsedCircuit> for Circuit<S> {
-    fn from(parsed_circuit: &ParsedCircuit) -> Self {
+impl<S: FieldElement> From<ParsedCircuit> for Circuit<S> {
+    fn from(parsed_circuit: ParsedCircuit) -> Self {
         let gates = parsed_circuit
             .gates
             .into_iter()
@@ -186,46 +75,51 @@ impl<S: FieldElement> Circuit<S> {
     }
 }
 
-pub enum CircuitEvalSessionState<S: FieldElement, T: CorrelationGenerator> {
-    WaitingToSend(CircuitEvalSessionWaitingToSend<S, T>),
-    WaitingToGenCorrelation(CircuitEvalSessionWaitingToGenCorrelation<S, T>),
-    WaitingToReceive(CircuitEvalSessionWaitingToReceive<S, T>),
+pub enum CircuitEvalSessionState<'a, 'b, S: FieldElement, T: CorrelationGenerator> {
+    WaitingToSend(CircuitEvalSessionWaitingToSend<'a, 'b, S, T>),
+    WaitingToGenCorrelation(CircuitEvalSessionWaitingToGenCorrelation<'a, 'b, S, T>),
+    WaitingToReceive(CircuitEvalSessionWaitingToReceive<'a, 'b, S, T>),
     Finished(Vec<S>),
 }
-struct CircuitEvalSession<S: FieldElement, T: CorrelationGenerator> {
-    circuit: Circuit<S>,
+struct CircuitEvalSession<'a, 'b, S: FieldElement, T: CorrelationGenerator> {
+    circuit: &'b mut Circuit<S>,
     layer_to_process: usize,
-    beaver_triple_gen: T,
+    beaver_triple_gen: &'a mut T,
     gates_in_layer_waiting_for_response: Option<Vec<usize>>,
     party_id: bool,
 }
 
 // We use three different structs to enforce certain actions to be done only in certain states by the typing system.
 
-pub struct CircuitEvalSessionWaitingToSend<S: FieldElement, T: CorrelationGenerator> {
-    session: CircuitEvalSession<S, T>,
+pub struct CircuitEvalSessionWaitingToSend<'a, 'b, S: FieldElement, T: CorrelationGenerator> {
+    session: CircuitEvalSession<'a, 'b, S, T>,
 }
-pub struct CircuitEvalSessionWaitingToGenCorrelation<S: FieldElement, T: CorrelationGenerator> {
-    session: CircuitEvalSession<S, T>,
+pub struct CircuitEvalSessionWaitingToGenCorrelation<
+    'a,
+    'b,
+    S: FieldElement,
+    T: CorrelationGenerator,
+> {
+    session: CircuitEvalSession<'a, 'b, S, T>,
 }
-pub struct CircuitEvalSessionWaitingToReceive<S: FieldElement, T: CorrelationGenerator> {
-    session: CircuitEvalSession<S, T>,
+pub struct CircuitEvalSessionWaitingToReceive<'a, 'b, S: FieldElement, T: CorrelationGenerator> {
+    session: CircuitEvalSession<'a, 'b, S, T>,
 }
 
-impl<S: FieldElement, T: CorrelationGenerator> CircuitEvalSession<S, T> {
+impl<'a, 'b, S: FieldElement, T: CorrelationGenerator> CircuitEvalSession<'a, 'b, S, T> {
     fn generate_beaver_triples_for_layer(&mut self, layer: usize) -> Result<(), ()> {
-        let layer = self.circuit.gates.get(layer).ok_or(())?;
+        let layer = self.circuit.gates.get_mut(layer).ok_or(())?;
         layer
             .iter_mut()
-            .try_for_each(|g| g.generate_correlation(&mut self.beaver_triple_gen))
+            .try_for_each(|g| g.generate_correlation(self.beaver_triple_gen))
     }
 }
 
-impl<S: FieldElement, T: CorrelationGenerator> CircuitEvalSessionState<S, T> {
+impl<'a, 'b, S: FieldElement, T: CorrelationGenerator> CircuitEvalSessionState<'a, 'b, S, T> {
     pub fn new(
-        circuit: Circuit<S>,
+        circuit: &'b mut Circuit<S>,
         input_shares: &[S],
-        beaver_triple_gen: T,
+        beaver_triple_gen: &'a mut T,
         party_id: bool,
     ) -> Self {
         assert_eq!(circuit.input_wire_count(), input_shares.len());
@@ -248,8 +142,10 @@ impl<S: FieldElement, T: CorrelationGenerator> CircuitEvalSessionState<S, T> {
     }
 }
 
-impl<S: FieldElement, T: CorrelationGenerator> CircuitEvalSessionWaitingToSend<S, T> {
-    pub fn fetch_layer_messages(self) -> (CircuitEvalSessionState<S, T>, Vec<Msg<S>>) {
+impl<'a, 'b, S: FieldElement, T: CorrelationGenerator>
+    CircuitEvalSessionWaitingToSend<'a, 'b, S, T>
+{
+    pub fn fetch_layer_messages(self) -> (CircuitEvalSessionState<'a, 'b, S, T>, Vec<Msg<S>>) {
         // Prepare beaver triples for this layer.
         let mut session = self.session;
         let layer_id = session.layer_to_process;
@@ -264,7 +160,7 @@ impl<S: FieldElement, T: CorrelationGenerator> CircuitEvalSessionWaitingToSend<S
             .iter()
             .enumerate()
             .filter_map(|(id, gate)| {
-                gate.generate_msg(&session.circuit.wires)
+                gate.eval_and_generate_msg(&mut session.circuit.wires, session.party_id)
                     .expect("Failed to generate message for the gate")
                     .map(|v| (v, id))
             })
@@ -278,9 +174,11 @@ impl<S: FieldElement, T: CorrelationGenerator> CircuitEvalSessionWaitingToSend<S
     }
 }
 
-impl<S: FieldElement, T: CorrelationGenerator> CircuitEvalSessionWaitingToGenCorrelation<S, T> {
-    pub fn gen_correlation_for_next_layer(mut self) -> CircuitEvalSessionState<S, T> {
-        if self.session.circuit.gates.len() < self.session.layer_to_process + 1 {
+impl<'a, 'b, S: FieldElement, T: CorrelationGenerator>
+    CircuitEvalSessionWaitingToGenCorrelation<'a, 'b, S, T>
+{
+    pub fn gen_correlation_for_next_layer(mut self) -> CircuitEvalSessionState<'a, 'b, S, T> {
+        if self.session.circuit.gates.len() > self.session.layer_to_process + 1 {
             self.session
                 .generate_beaver_triples_for_layer(self.session.layer_to_process + 1)
                 .expect("Failed to generate beaver triples for next layer!");
@@ -290,14 +188,19 @@ impl<S: FieldElement, T: CorrelationGenerator> CircuitEvalSessionWaitingToGenCor
         })
     }
 }
-impl<'a, S: FieldElement, T: CorrelationGenerator> CircuitEvalSessionWaitingToReceive<S, T> {
-    pub fn handle_layer_responses(self, responses: Vec<Msg<S>>) -> CircuitEvalSessionState<S, T> {
+impl<'a, 'b, S: FieldElement, T: CorrelationGenerator>
+    CircuitEvalSessionWaitingToReceive<'a, 'b, S, T>
+{
+    pub fn handle_layer_responses(
+        self,
+        responses: Vec<Msg<S>>,
+    ) -> CircuitEvalSessionState<'a, 'b, S, T> {
         let mut session = self.session;
         let layer_id = session.layer_to_process;
         let current_layer = session
             .circuit
             .gates
-            .get(layer_id)
+            .get_mut(layer_id)
             .expect("Current layer id missing, corrupt struct");
         let gates_expecting_response = session
             .gates_in_layer_waiting_for_response
@@ -307,7 +210,7 @@ impl<'a, S: FieldElement, T: CorrelationGenerator> CircuitEvalSessionWaitingToRe
         for (response, gate_id_in_layer) in
             responses.iter().zip(gates_expecting_response.into_iter())
         {
-            current_layer[gate_id_in_layer].handle_peer_msg(&session.circuit.wires, response);
+            current_layer[gate_id_in_layer].handle_peer_msg(&mut session.circuit.wires, response);
         }
         session.layer_to_process = layer_id + 1;
         if session
@@ -335,9 +238,9 @@ pub enum CircuitEvalError {
     CommunicatorError,
 }
 pub fn eval_circuit<C: Read + Write, S: FieldElement, T: CorrelationGenerator>(
-    circuit: Circuit<S>,
+    mut circuit: Circuit<S>,
     (mut my_input, peer_input): (Vec<S>, Vec<S>),
-    correlations: T,
+    correlations: &mut T,
     communicator: &mut Communicator<C>,
     is_first: bool,
 ) -> Result<Vec<S>, CircuitEvalError> {
@@ -351,7 +254,8 @@ pub fn eval_circuit<C: Read + Write, S: FieldElement, T: CorrelationGenerator>(
         received_input.append(&mut my_input);
         my_input = received_input;
     }
-    let mut session = CircuitEvalSessionState::new(circuit, &my_input[..], correlations, is_first);
+    let mut session =
+        CircuitEvalSessionState::new(&mut circuit, &my_input[..], correlations, is_first);
     let party_output = loop {
         let (session_temp, queries_to_send) = match session {
             CircuitEvalSessionState::WaitingToSend(session) => session.fetch_layer_messages(),
@@ -416,23 +320,22 @@ mod tests {
             .collect()
     }
 
-    fn eval_mpc_circuit<S: Iterator<Item = (GF2, GF2)>, T: Iterator<Item = (GF2, GF2)>>(
-        circuit: &ParsedCircuit,
-        input_a: &[GF2],
-        input_b: &[GF2],
+    fn eval_mpc_circuit<S: FieldElement>(
+        first_party_circuit: &mut Circuit<S>,
+        second_party_circuit: &mut Circuit<S>,
+        input_a: &[S],
+        input_b: &[S],
         beaver_triple_scalar_key: &mut impl CorrelationGenerator,
         beaver_triple_vector_key: &mut impl CorrelationGenerator,
-    ) -> (Vec<GF2>, Vec<GF2>) {
-        let first_party_circuit = Circuit::new(circuit);
-        let first_party_session = CircuitEvalSessionState::new(
-            &first_party_circuit,
+    ) -> (Vec<S>, Vec<S>) {
+        let mut first_party_session = CircuitEvalSessionState::new(
+            first_party_circuit,
             input_a,
             beaver_triple_scalar_key,
             false,
         );
-        let second_party_circuit = Circuit::new(circuit);
         let mut second_party_session = CircuitEvalSessionState::new(
-            &second_party_circuit,
+            second_party_circuit,
             input_b,
             beaver_triple_vector_key,
             true,
@@ -502,13 +405,13 @@ mod tests {
         (PcgKeySender::from(keys.0), PcgKeyReceiver::from(keys.1))
     }
 
-    fn test_circuit(circuit: &ParsedCircuit, input: &[GF2], random_share: &[GF2]) -> Vec<GF2> {
+    fn test_circuit(circuit: ParsedCircuit, input: &[GF2], random_share: &[GF2]) -> Vec<GF2> {
         const WEIGHT: u8 = 128;
         const CODE_WEIGHT: usize = 8;
         const INPUT_BITLEN: usize = 12;
         assert_eq!(input.len(), random_share.len());
         assert_eq!(input.len(), circuit.input_wire_count);
-        let circuit_local = Circuit::from(circuit);
+        let mut circuit_local = Circuit::from(circuit.clone());
         let local_computation_output = circuit_local.eval_circuit(input).unwrap();
 
         let (scalar_online_key_primary, vector_online_key_primary) =
@@ -534,7 +437,8 @@ mod tests {
             .map(|(a, b)| *a + *b)
             .collect();
         let (output_a, output_b) = eval_mpc_circuit(
-            circuit,
+            &mut Circuit::from(circuit.clone()),
+            &mut Circuit::from(circuit.clone()),
             &input_a,
             &input_b,
             &mut beaver_triple_scalar_key,
@@ -560,8 +464,9 @@ mod tests {
             "2 1 2 3 4 AND",
             "1 1 4 5 INV",
         ];
-        let circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
+        let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
             .expect("Failed to parse");
+        let mut circuit = Circuit::from(parsed_circuit.clone());
 
         // Test classical eval.
         assert_eq!(
@@ -583,7 +488,7 @@ mod tests {
 
         let input = vec![GF2::one(), GF2::zero()];
         let rand = vec![GF2::zero(), GF2::zero()];
-        let output = test_circuit(&circuit, &input, &rand);
+        let output = test_circuit(parsed_circuit, &input, &rand);
 
         assert_eq!(output[0], GF2::one());
     }

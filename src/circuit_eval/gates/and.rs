@@ -45,7 +45,21 @@ impl<'a, S: FieldElement> AndGate<S> {
         ))
     }
 
-    pub fn handle_msg(&self, wires: &[S], msg: &AndMsg<S>) {}
+    // u = Open(x + a);
+    // v = Open(y + b);
+    // [xy] = ((x+a)-a)((y+b)-b)=[u]v-[a]v-[b]u+[ab]=
+    //          [x]v-[b]u+[ab]
+    pub fn handle_msg(&mut self, wires: &mut [S], msg: &AndMsg<S>) {
+        let x_share = wires[self.input_wires[0]];
+        let y_share = wires[self.input_wires[1]];
+        let beaver_triple = self
+            .correlation
+            .take()
+            .expect("Corrupt circuit! This gate doesn't hold any correlation");
+        let u = msg.0 + x_share + beaver_triple.a_share;
+        let v = msg.1 + y_share + beaver_triple.b_share;
+        wires[self.output_wire] = x_share * v - beaver_triple.b_share * u + beaver_triple.ab_share;
+    }
 }
 
 #[derive(Serialize, Deserialize)]

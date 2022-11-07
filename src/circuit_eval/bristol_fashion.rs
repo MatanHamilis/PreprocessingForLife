@@ -9,6 +9,7 @@ use std::{
     mem::MaybeUninit,
 };
 
+#[derive(Clone, Copy)]
 pub enum ParsedGate {
     AndGate {
         input: [usize; 2],
@@ -31,18 +32,18 @@ pub enum ParsedGate {
 impl ParsedGate {
     pub fn input_wires(&self) -> &[usize] {
         match self {
-            ParsedGate::AndGate { input, output } => input,
-            ParsedGate::NotGate { input, output } => std::slice::from_ref(input),
-            ParsedGate::XorGate { input, output } => input,
-            ParsedGate::WideAndGate { input, output } => input,
+            ParsedGate::AndGate { input, output: _ } => input,
+            ParsedGate::NotGate { input, output: _ } => std::slice::from_ref(input),
+            ParsedGate::XorGate { input, output: _ } => input,
+            ParsedGate::WideAndGate { input, output: _ } => input,
         }
     }
     pub fn output_wires(&self) -> &[usize] {
         match self {
-            ParsedGate::AndGate { input, output } => std::slice::from_ref(output),
-            ParsedGate::NotGate { input, output } => std::slice::from_ref(output),
-            ParsedGate::XorGate { input, output } => std::slice::from_ref(output),
-            ParsedGate::WideAndGate { input, output } => output,
+            ParsedGate::AndGate { input: _, output } => std::slice::from_ref(output),
+            ParsedGate::NotGate { input: _, output } => std::slice::from_ref(output),
+            ParsedGate::XorGate { input: _, output } => std::slice::from_ref(output),
+            ParsedGate::WideAndGate { input: _, output } => output,
         }
     }
     pub fn is_linear(&self) -> bool {
@@ -51,9 +52,18 @@ impl ParsedGate {
                 input: _,
                 output: _,
             } => and::IS_LINEAR,
-            ParsedGate::NotGate { input, output } => not::IS_LINEAR,
-            ParsedGate::XorGate { input, output } => xor::IS_LINEAR,
-            ParsedGate::WideAndGate { input, output } => wide_and::IS_LINEAR,
+            ParsedGate::NotGate {
+                input: _,
+                output: _,
+            } => not::IS_LINEAR,
+            ParsedGate::XorGate {
+                input: _,
+                output: _,
+            } => xor::IS_LINEAR,
+            ParsedGate::WideAndGate {
+                input: _,
+                output: _,
+            } => wide_and::IS_LINEAR,
         }
     }
 }
@@ -66,6 +76,7 @@ enum GateOp {
     WideAnd,
 }
 
+#[derive(Clone)]
 pub struct ParsedCircuit {
     pub input_wire_count: usize,
     pub output_wire_count: usize,
@@ -213,20 +224,23 @@ pub fn parse_bristol<T: Iterator<Item = String>>(mut lines: T) -> Option<ParsedC
                 error!("Output wire can not be used as an input wire");
                 return None;
             }
-            if used_wires.contains(&input) {
-                return None;
-            }
             used_wires.insert(input);
             max_topological_index = std::cmp::max(max_topological_index, topological_idx);
         }
-        match gates.get_mut(max_topological_index) {
-            None => gates.push(vec![gate]),
-            Some(v) => v.push(gate),
-        }
-        if !gate.is_linear() {
+        let gate_ref = match gates.get_mut(max_topological_index) {
+            None => {
+                gates.push(vec![gate]);
+                gates.last()?.last()?
+            }
+            Some(v) => {
+                v.push(gate);
+                v.last()?
+            }
+        };
+        if !gate_ref.is_linear() {
             max_topological_index += 1;
         }
-        for &output_wire in gate.output_wires() {
+        for &output_wire in gate_ref.output_wires() {
             if used_wires.contains(&output_wire) {
                 return None;
             }

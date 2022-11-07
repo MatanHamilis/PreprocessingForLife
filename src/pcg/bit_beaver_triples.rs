@@ -13,6 +13,7 @@ pub struct WideBitBeaverTripletShare {
     pub ab_shares: GF128,
 }
 
+#[derive(Debug)]
 pub struct WideBeaverTripletShare<T: FieldElement> {
     pub a_share: T,
     pub b_shares: [T; 128],
