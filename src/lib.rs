@@ -15,7 +15,7 @@ use pcg::{
     sparse_vole::{scalar_party, vector_party},
     KEY_SIZE,
 };
-use pseudorandom::prf::{self, PrfInput};
+use pseudorandom::prf::PrfInput;
 
 pub mod circuit_eval;
 pub mod communicator;
