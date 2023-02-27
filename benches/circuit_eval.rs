@@ -1,9 +1,8 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use silent_party::circuit_eval::bristol_fashion::{parse_bristol, ParsedCircuit};
+use silent_party::circuit_eval::bristol_fashion::parse_bristol;
 use silent_party::circuit_eval::{Circuit, CircuitEvalSessionState};
-use silent_party::fields::{FieldElement, PackedGF2U64, GF128, GF2};
+use silent_party::fields::{FieldElement, PackedGF2Array, PackedGF2U64, GF128, GF2};
 use silent_party::pcg::full_key::{CorrelationGenerator, FullPcgKey, Role};
-use silent_party::pcg::preprocessor::Preprocessor;
 use silent_party::pcg::receiver_key::PcgKeyReceiver;
 use silent_party::pcg::sender_key::PcgKeySender;
 use silent_party::pseudorandom::prf::PrfInput;
@@ -105,6 +104,76 @@ fn eval_mpc_circuit<S: FieldElement>(
     };
     (first_party_output, second_party_output)
 }
+pub fn wide_and_bench(c: &mut Criterion) {
+    let circuit_wide_and = parse_bristol(WIDE_AND_CIRCUIT.lines().map(|s| s.to_string())).unwrap();
+    let circuit_regular =
+        parse_bristol(REGULAR_AND_CIRCUIT.lines().map(|s| s.to_string())).unwrap();
+    // Test MPC eval.
+    const WEIGHT: u8 = 128;
+    const INPUT_BITLEN: usize = 18;
+    const CODE_WEIGHT: usize = 8;
+    let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+    let prf_keys = insecure_get_prf_keys([1; KEY_SIZE], WEIGHT);
+    let puncturing_points: Vec<PrfInput<INPUT_BITLEN>> = insecure_get_puncturing_points(1, WEIGHT);
+    let (scalar_online_key_primary, vector_online_key_primary) =
+        silent_party::pcg::sparse_vole::trusted_deal::<INPUT_BITLEN, CODE_WEIGHT>(
+            &scalar,
+            puncturing_points,
+            prf_keys,
+        );
+
+    let scalar = GF128::from([2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]);
+    let prf_keys = insecure_get_prf_keys([2; KEY_SIZE], WEIGHT);
+    let puncturing_points: Vec<PrfInput<INPUT_BITLEN>> = insecure_get_puncturing_points(2, WEIGHT);
+    let (scalar_online_key_secondary, vector_online_key_secondary) =
+        silent_party::pcg::sparse_vole::trusted_deal::<INPUT_BITLEN, CODE_WEIGHT>(
+            &scalar,
+            puncturing_points,
+            prf_keys,
+        );
+
+    let mut full_pcg_key_sender = FullPcgKey::new(
+        PcgKeySender::from(scalar_online_key_primary),
+        PcgKeyReceiver::from(vector_online_key_secondary),
+        Role::Sender,
+    );
+    let mut full_pcg_key_receiver = FullPcgKey::new(
+        PcgKeySender::from(scalar_online_key_secondary),
+        PcgKeyReceiver::from(vector_online_key_primary),
+        Role::Receiver,
+    );
+
+    let (input_a, input_b) = share_inputs(&vec![PackedGF2Array::<200>::zero(); 129]);
+    c.bench_function("(wide/regular) - wide AND eval", |b| {
+        let mut circuit_first = Circuit::from(circuit_wide_and.clone());
+        let mut circuit_second = Circuit::from(circuit_wide_and.clone());
+        b.iter(|| {
+            let (_, _) = eval_mpc_circuit(
+                &mut circuit_first,
+                &mut circuit_second,
+                &input_a,
+                &input_b,
+                &mut full_pcg_key_sender,
+                &mut full_pcg_key_receiver,
+            );
+        });
+    });
+
+    c.bench_function("(wide/regular) - regular AND eval", |b| {
+        let mut circuit_first = Circuit::from(circuit_regular.clone());
+        let mut circuit_second = Circuit::from(circuit_regular.clone());
+        b.iter(|| {
+            let (_, _) = eval_mpc_circuit(
+                &mut circuit_first,
+                &mut circuit_second,
+                &input_a,
+                &input_b,
+                &mut full_pcg_key_sender,
+                &mut full_pcg_key_receiver,
+            );
+        });
+    });
+}
 
 pub fn circuit_eval_bench(c: &mut Criterion) {
     let circuit = parse_bristol(AES_CIRCUIT.lines().map(|s| s.to_string())).unwrap();
@@ -115,7 +184,7 @@ pub fn circuit_eval_bench(c: &mut Criterion) {
     let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
     let prf_keys = insecure_get_prf_keys([1; KEY_SIZE], WEIGHT);
     let puncturing_points: Vec<PrfInput<INPUT_BITLEN>> = insecure_get_puncturing_points(1, WEIGHT);
-    let (mut scalar_online_key_primary, mut vector_online_key_primary) =
+    let (scalar_online_key_primary, vector_online_key_primary) =
         silent_party::pcg::sparse_vole::trusted_deal::<INPUT_BITLEN, CODE_WEIGHT>(
             &scalar,
             puncturing_points,
@@ -125,7 +194,7 @@ pub fn circuit_eval_bench(c: &mut Criterion) {
     let scalar = GF128::from([2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]);
     let prf_keys = insecure_get_prf_keys([2; KEY_SIZE], WEIGHT);
     let puncturing_points: Vec<PrfInput<INPUT_BITLEN>> = insecure_get_puncturing_points(2, WEIGHT);
-    let (mut scalar_online_key_secondary, mut vector_online_key_secondary) =
+    let (scalar_online_key_secondary, vector_online_key_secondary) =
         silent_party::pcg::sparse_vole::trusted_deal::<INPUT_BITLEN, CODE_WEIGHT>(
             &scalar,
             puncturing_points,
@@ -158,31 +227,6 @@ pub fn circuit_eval_bench(c: &mut Criterion) {
             );
         });
     });
-
-    // let preprocessed_scalar_key: Vec<_> =
-    //     Preprocessor::new(10_000, beaver_triple_scalar_key).collect();
-    // let preprocessed_vector_key: Vec<_> =
-    //     Preprocessor::new(10_000, beaver_triple_vector_key).collect();
-    // c.bench_function("eval_circuit with preprocessing", |b| {
-    //     b.iter_batched(
-    //         || {
-    //             (
-    //                 preprocessed_scalar_key.clone(),
-    //                 preprocessed_vector_key.clone(),
-    //             )
-    //         },
-    //         |(scalar_key, vector_key)| {
-    //             let (_, _) = eval_mpc_circuit(
-    //                 &circuit,
-    //                 &input_a,
-    //                 &input_b,
-    //                 &mut scalar_key.into_iter(),
-    //                 &mut vector_key.into_iter(),
-    //             );
-    //         },
-    //         criterion::BatchSize::SmallInput,
-    //     );
-    // });
 }
 
 pub fn circuit_eval_bench_packed(c: &mut Criterion) {
@@ -194,7 +238,7 @@ pub fn circuit_eval_bench_packed(c: &mut Criterion) {
     let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
     let prf_keys = insecure_get_prf_keys([1; KEY_SIZE], WEIGHT);
     let puncturing_points: Vec<PrfInput<INPUT_BITLEN>> = insecure_get_puncturing_points(1, WEIGHT);
-    let (mut scalar_online_key_primary, mut vector_online_key_primary) =
+    let (scalar_online_key_primary, vector_online_key_primary) =
         silent_party::pcg::sparse_vole::trusted_deal::<INPUT_BITLEN, CODE_WEIGHT>(
             &scalar,
             puncturing_points,
@@ -204,7 +248,7 @@ pub fn circuit_eval_bench_packed(c: &mut Criterion) {
     let scalar = GF128::from([2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]);
     let prf_keys = insecure_get_prf_keys([2; KEY_SIZE], WEIGHT);
     let puncturing_points: Vec<PrfInput<INPUT_BITLEN>> = insecure_get_puncturing_points(2, WEIGHT);
-    let (mut scalar_online_key_secondary, mut vector_online_key_secondary) =
+    let (scalar_online_key_secondary, vector_online_key_secondary) =
         silent_party::pcg::sparse_vole::trusted_deal::<INPUT_BITLEN, CODE_WEIGHT>(
             &scalar,
             puncturing_points,
@@ -237,34 +281,154 @@ pub fn circuit_eval_bench_packed(c: &mut Criterion) {
             );
         });
     });
-
-    // let preprocessed_scalar_key: Vec<_> =
-    //     Preprocessor::new(10_000, beaver_triple_scalar_key).collect();
-    // let preprocessed_vector_key: Vec<_> =
-    //     Preprocessor::new(10_000, beaver_triple_vector_key).collect();
-    // c.bench_function("eval_circuit_packed with preprocessing", |b| {
-    //     b.iter_batched(
-    //         || {
-    //             (
-    //                 preprocessed_scalar_key.clone(),
-    //                 preprocessed_vector_key.clone(),
-    //             )
-    //         },
-    //         |(scalar_key, vector_key)| {
-    //             let (_, _) = eval_mpc_circuit(
-    //                 &circuit,
-    //                 &input_a,
-    //                 &input_b,
-    //                 &mut scalar_key.into_iter(),
-    //                 &mut vector_key.into_iter(),
-    //             );
-    //         },
-    //         criterion::BatchSize::SmallInput,
-    //     );
-    // });
 }
-criterion_group!(benches, circuit_eval_bench, circuit_eval_bench_packed);
+criterion_group!(
+    benches,
+    circuit_eval_bench,
+    circuit_eval_bench_packed,
+    wide_and_bench
+);
 criterion_main!(benches);
+
+const WIDE_AND_CIRCUIT: &str = "1 257
+2 128 1
+1 128
+
+129 128 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115 116 117 118 119 120 121 122 123 124 125 126 127 128 129 130 131 132 133 134 135 136 137 138 139 140 141 142 143 144 145 146 147 148 149 150 151 152 153 154 155 156 157 158 159 160 161 162 163 164 165 166 167 168 169 170 171 172 173 174 175 176 177 178 179 180 181 182 183 184 185 186 187 188 189 190 191 192 193 194 195 196 197 198 199 200 201 202 203 204 205 206 207 208 209 210 211 212 213 214 215 216 217 218 219 220 221 222 223 224 225 226 227 228 229 230 231 232 233 234 235 236 237 238 239 240 241 242 243 244 245 246 247 248 249 250 251 252 253 254 255 256 wAND";
+
+const REGULAR_AND_CIRCUIT: &str = "128 257
+2 128 1
+1 128
+
+2 1 0 1 129 AND
+2 1 0 1 130 AND
+2 1 0 1 131 AND
+2 1 0 1 132 AND
+2 1 0 1 133 AND
+2 1 0 1 134 AND
+2 1 0 1 135 AND
+2 1 0 1 136 AND
+2 1 0 1 137 AND
+2 1 0 1 138 AND
+2 1 0 1 139 AND
+2 1 0 1 140 AND
+2 1 0 1 141 AND
+2 1 0 1 142 AND
+2 1 0 1 143 AND
+2 1 0 1 144 AND
+2 1 0 1 145 AND
+2 1 0 1 146 AND
+2 1 0 1 147 AND
+2 1 0 1 148 AND
+2 1 0 1 149 AND
+2 1 0 1 150 AND
+2 1 0 1 151 AND
+2 1 0 1 152 AND
+2 1 0 1 153 AND
+2 1 0 1 154 AND
+2 1 0 1 155 AND
+2 1 0 1 156 AND
+2 1 0 1 157 AND
+2 1 0 1 158 AND
+2 1 0 1 159 AND
+2 1 0 1 160 AND
+2 1 0 1 161 AND
+2 1 0 1 162 AND
+2 1 0 1 163 AND
+2 1 0 1 164 AND
+2 1 0 1 165 AND
+2 1 0 1 166 AND
+2 1 0 1 167 AND
+2 1 0 1 168 AND
+2 1 0 1 169 AND
+2 1 0 1 170 AND
+2 1 0 1 171 AND
+2 1 0 1 172 AND
+2 1 0 1 173 AND
+2 1 0 1 174 AND
+2 1 0 1 175 AND
+2 1 0 1 176 AND
+2 1 0 1 177 AND
+2 1 0 1 178 AND
+2 1 0 1 179 AND
+2 1 0 1 180 AND
+2 1 0 1 181 AND
+2 1 0 1 182 AND
+2 1 0 1 183 AND
+2 1 0 1 184 AND
+2 1 0 1 185 AND
+2 1 0 1 186 AND
+2 1 0 1 187 AND
+2 1 0 1 188 AND
+2 1 0 1 189 AND
+2 1 0 1 190 AND
+2 1 0 1 191 AND
+2 1 0 1 192 AND
+2 1 0 1 193 AND
+2 1 0 1 194 AND
+2 1 0 1 195 AND
+2 1 0 1 196 AND
+2 1 0 1 197 AND
+2 1 0 1 198 AND
+2 1 0 1 199 AND
+2 1 0 1 200 AND
+2 1 0 1 201 AND
+2 1 0 1 202 AND
+2 1 0 1 203 AND
+2 1 0 1 204 AND
+2 1 0 1 205 AND
+2 1 0 1 206 AND
+2 1 0 1 207 AND
+2 1 0 1 208 AND
+2 1 0 1 209 AND
+2 1 0 1 210 AND
+2 1 0 1 211 AND
+2 1 0 1 212 AND
+2 1 0 1 213 AND
+2 1 0 1 214 AND
+2 1 0 1 215 AND
+2 1 0 1 216 AND
+2 1 0 1 217 AND
+2 1 0 1 218 AND
+2 1 0 1 219 AND
+2 1 0 1 220 AND
+2 1 0 1 221 AND
+2 1 0 1 222 AND
+2 1 0 1 223 AND
+2 1 0 1 224 AND
+2 1 0 1 225 AND
+2 1 0 1 226 AND
+2 1 0 1 227 AND
+2 1 0 1 228 AND
+2 1 0 1 229 AND
+2 1 0 1 230 AND
+2 1 0 1 231 AND
+2 1 0 1 232 AND
+2 1 0 1 233 AND
+2 1 0 1 234 AND
+2 1 0 1 235 AND
+2 1 0 1 236 AND
+2 1 0 1 237 AND
+2 1 0 1 238 AND
+2 1 0 1 239 AND
+2 1 0 1 240 AND
+2 1 0 1 241 AND
+2 1 0 1 242 AND
+2 1 0 1 243 AND
+2 1 0 1 244 AND
+2 1 0 1 245 AND
+2 1 0 1 246 AND
+2 1 0 1 247 AND
+2 1 0 1 248 AND
+2 1 0 1 249 AND
+2 1 0 1 250 AND
+2 1 0 1 251 AND
+2 1 0 1 252 AND
+2 1 0 1 253 AND
+2 1 0 1 254 AND
+2 1 0 1 255 AND
+2 1 0 1 256 AND
+";
 
 const AES_CIRCUIT: &str = "36663 36919
 2 128 128 

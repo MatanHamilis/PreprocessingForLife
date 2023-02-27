@@ -284,11 +284,9 @@ pub(crate) mod tests {
         let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
         let (scalar_online_key, vector_online_key) = get_correlation(&scalar);
         // Expand the online keys
-        let mut i = 0;
         for ((scalar_gf, scalar_pcg), (vector_bit, vector_gf)) in
             scalar_online_key.zip(vector_online_key).take(3000)
         {
-            i += 1;
             assert_eq!(scalar_pcg, scalar);
             if vector_bit.is_one() {
                 assert_eq!((scalar_gf + vector_gf), scalar);
