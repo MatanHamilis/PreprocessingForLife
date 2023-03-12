@@ -24,8 +24,8 @@ pub mod fields;
 // pub mod non_committing_encryption;
 pub mod ot;
 // pub mod pcg;
-// pub mod pprf;
-// pub mod pseudorandom;
+pub mod pprf;
+pub mod pseudorandom;
 mod uc_tags;
 
 pub(crate) fn xor_arrays<const LENGTH: usize>(a: &mut [u8; LENGTH], b: &[u8; LENGTH]) {

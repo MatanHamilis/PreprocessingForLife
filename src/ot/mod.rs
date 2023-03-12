@@ -1,4 +1,5 @@
 use crate::engine::{MultiPartyEngine, PartyId};
+use crate::fields::GF128;
 use crate::uc_tags::UCTag;
 use blake3::Hasher;
 use chacha20::{
@@ -21,12 +22,12 @@ const TWIST_CURVE25519_GEN: MontgomeryPoint = MontgomeryPoint([
 
 pub const OT_MSG_LEN: usize = 32;
 pub type Msg = [u8; OT_MSG_LEN];
-pub struct OTSender(Msg, Msg);
-pub struct OTReceiver(Msg, bool);
+pub struct OTSender<T>(T, T);
+pub struct OTReceiver<T>(T, bool);
 pub async fn batch_endemic_ot_sender<T: MultiPartyEngine>(
-    mut engine: T,
+    engine: &mut T,
     batch_size: usize,
-) -> Option<Vec<OTSender>> {
+) -> Option<Vec<OTSender<Msg>>> {
     let (a, points) = moller_msg_sender(T::rng());
     engine.broadcast(&points);
     let (msgs, _): (Vec<[u8; 32]>, PartyId) = engine.recv().await?;
@@ -52,9 +53,9 @@ pub async fn batch_endemic_ot_sender<T: MultiPartyEngine>(
 }
 
 pub async fn batch_endemic_ot_receiver<T: MultiPartyEngine>(
-    mut engine: T,
+    engine: &mut T,
     choice_bits: Vec<bool>,
-) -> Option<Vec<OTReceiver>> {
+) -> Option<Vec<OTReceiver<Msg>>> {
     let batch_size = choice_bits.len();
     let (scalars, msgs): (Vec<(Scalar, bool)>, Vec<[u8; 32]>) = (0..batch_size)
         .map(|i| {
@@ -140,6 +141,63 @@ fn moller_key(tag: &UCTag, scalar: Scalar, point: MontgomeryPoint) -> [u8; OT_MS
         .as_bytes()
 }
 
+struct ChosenMessageOTSender<E: MultiPartyEngine> {
+    rots: Vec<OTSender<Msg>>,
+    engine: E,
+}
+impl<E: MultiPartyEngine> ChosenMessageOTSender<E> {
+    async fn init(mut engine: E, batch_size: usize) -> Option<Self> {
+        Some(Self {
+            rots: batch_endemic_ot_sender(&mut engine, batch_size).await?,
+            engine,
+        })
+    }
+    async fn choose(mut self, msgs: &[(GF128, GF128)]) {
+        assert_eq!(msgs.len(), self.rots.len());
+        let to_send: Vec<_> = msgs
+            .iter()
+            .zip(self.rots.into_iter())
+            .map(|(msgs, rots)| {
+                let key0: [u8; 16] = core::array::from_fn(|i| rots.0[i]);
+                let key1: [u8; 16] = core::array::from_fn(|i| rots.1[i]);
+                let msg0 = GF128::from(key0) + msgs.0;
+                let msg1 = GF128::from(key1) + msgs.1;
+                (msg0, msg1)
+            })
+            .collect();
+        self.engine.broadcast(&to_send);
+    }
+}
+struct ChosenMessageOTReceiver<E: MultiPartyEngine> {
+    rots: Vec<OTReceiver<Msg>>,
+    engine: E,
+}
+impl<E: MultiPartyEngine> ChosenMessageOTReceiver<E> {
+    async fn init(mut engine: E, batch_size: usize) -> Option<Self> {
+        let mut rng = E::rng();
+        let choice_bits: Vec<bool> = (0..batch_size).map(|_| rng.gen()).collect();
+        let rots = batch_endemic_ot_receiver(&mut engine, choice_bits).await?;
+        Some(Self { rots, engine })
+    }
+    async fn handle_choice(mut self) -> Option<Vec<OTReceiver<GF128>>> {
+        let (msgs, _): (Vec<(GF128, GF128)>, PartyId) = self.engine.recv().await?;
+        if msgs.len() != self.rots.len() {
+            return None;
+        }
+        Some(
+            msgs.into_iter()
+                .zip(self.rots.iter())
+                .map(|((msg0, msg1), rot)| {
+                    let msg = if rot.1 { msg0 } else { msg1 };
+                    let key0: [u8; 16] = core::array::from_fn(|i| rot.0[i]);
+                    let msg0 = GF128::from(key0) + msg;
+                    OTReceiver(msg0, rot.1)
+                })
+                .collect(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -161,9 +219,11 @@ mod tests {
         let choice_bits: [bool; BATCH_SIZE] = core::array::from_fn(|_| rng.gen());
 
         let ots_sender =
-            batch_endemic_ot_sender(engines.remove(&party_ids[0]).unwrap(), BATCH_SIZE);
-        let ots_receiver =
-            batch_endemic_ot_receiver(engines.remove(&party_ids[1]).unwrap(), choice_bits.to_vec());
+            batch_endemic_ot_sender(&mut engines.remove(&party_ids[0]).unwrap(), BATCH_SIZE);
+        let ots_receiver = batch_endemic_ot_receiver(
+            &mut engines.remove(&party_ids[1]).unwrap(),
+            choice_bits.to_vec(),
+        );
         let (sender_output, receiver_output) = join!(ots_sender, ots_receiver);
         let (sender_output, receiver_output) = (sender_output.unwrap(), receiver_output.unwrap());
         router_handle.await.unwrap().unwrap();
