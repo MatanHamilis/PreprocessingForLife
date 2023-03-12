@@ -23,3 +23,9 @@ impl<T: Serialize> From<T> for UCTag {
         }
     }
 }
+
+impl AsRef<[u8; 32]> for UCTag {
+    fn as_ref(&self) -> &[u8; 32] {
+        self.tag.as_bytes()
+    }
+}

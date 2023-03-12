@@ -4,7 +4,8 @@ use std::{
 };
 
 use async_trait::async_trait;
-use rand::{rngs::ThreadRng, thread_rng, CryptoRng, RngCore};
+use rand::{rngs::ThreadRng, thread_rng};
+use rand_core::{CryptoRng, RngCore};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::{
     select,
