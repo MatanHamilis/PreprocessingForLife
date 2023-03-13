@@ -23,7 +23,7 @@ const TWIST_CURVE25519_GEN: MontgomeryPoint = MontgomeryPoint([
 pub const OT_MSG_LEN: usize = 32;
 pub type Msg = [u8; OT_MSG_LEN];
 pub struct OTSender<T>(T, T);
-pub struct OTReceiver<T>(T, bool);
+pub struct OTReceiver<T>(pub T, pub bool);
 async fn batch_endemic_ot_sender<T: MultiPartyEngine>(
     engine: &mut T,
     batch_size: usize,
@@ -174,8 +174,7 @@ pub struct ChosenMessageOTReceiver<E: MultiPartyEngine> {
 }
 impl<E: MultiPartyEngine> ChosenMessageOTReceiver<E> {
     pub async fn init(mut engine: E, batch_size: usize) -> Option<Self> {
-        let mut rng = E::rng();
-        let choice_bits: Vec<bool> = (0..batch_size).map(|_| rng.gen()).collect();
+        let choice_bits: Vec<bool> = (0..batch_size).map(|_| E::rng().gen()).collect();
         let rots = batch_endemic_ot_receiver(&mut engine, choice_bits).await?;
         Some(Self { rots, engine })
     }
