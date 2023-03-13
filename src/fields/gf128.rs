@@ -105,6 +105,13 @@ impl AddAssign for GF128 {
     }
 }
 
+impl AddAssign<&GF128> for GF128 {
+    #[allow(clippy::suspicious_op_assign_impl)]
+    fn add_assign(&mut self, rhs: &GF128) {
+        self.0 ^= rhs.0
+    }
+}
+
 impl Sub for GF128 {
     type Output = Self;
     #[allow(clippy::suspicious_arithmetic_impl)]
