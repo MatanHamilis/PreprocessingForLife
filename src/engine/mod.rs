@@ -201,11 +201,17 @@ impl LocalRouter {
         (output, engines)
     }
     pub async fn launch(mut self) -> Result<(), ()> {
+        let mut pending = HashMap::<(PartyId, UCTag), Vec<IncomingMessage>>::new();
         loop {
             let DownstreamMessage { from, tag, msg } =
                 self.downstream_receiver.recv().await.ok_or(())?;
             match msg {
                 DownstreamMessageType::Register(upstream) => {
+                    if let Some(v) = pending.remove(&(from, tag)) {
+                        v.into_iter().for_each(|item| {
+                            upstream.send(item).expect("Channel closed unexpectedly!");
+                        });
+                    }
                     self.upstream_senders.insert((from, tag), upstream);
                 }
                 DownstreamMessageType::Deregister => {
@@ -214,12 +220,14 @@ impl LocalRouter {
                         return Ok(());
                     }
                 }
-                DownstreamMessageType::Data(dest, content) => self
-                    .upstream_senders
-                    .get(&(dest, tag))
-                    .unwrap()
-                    .send(IncomingMessage { from, content })
-                    .unwrap(),
+                DownstreamMessageType::Data(dest, content) => {
+                    let message = IncomingMessage { from, content };
+                    if let Some(v) = self.upstream_senders.get(&(dest, tag)) {
+                        v.send(message).unwrap();
+                    } else {
+                        pending.entry((dest, tag)).or_default().push(message);
+                    }
+                }
             }
         }
     }
