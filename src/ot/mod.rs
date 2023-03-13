@@ -24,7 +24,7 @@ pub const OT_MSG_LEN: usize = 32;
 pub type Msg = [u8; OT_MSG_LEN];
 pub struct OTSender<T>(T, T);
 pub struct OTReceiver<T>(T, bool);
-pub async fn batch_endemic_ot_sender<T: MultiPartyEngine>(
+async fn batch_endemic_ot_sender<T: MultiPartyEngine>(
     engine: &mut T,
     batch_size: usize,
 ) -> Option<Vec<OTSender<Msg>>> {
@@ -52,7 +52,7 @@ pub async fn batch_endemic_ot_sender<T: MultiPartyEngine>(
     Some(ots_sender)
 }
 
-pub async fn batch_endemic_ot_receiver<T: MultiPartyEngine>(
+async fn batch_endemic_ot_receiver<T: MultiPartyEngine>(
     engine: &mut T,
     choice_bits: Vec<bool>,
 ) -> Option<Vec<OTReceiver<Msg>>> {
@@ -141,18 +141,18 @@ fn moller_key(tag: &UCTag, scalar: Scalar, point: MontgomeryPoint) -> [u8; OT_MS
         .as_bytes()
 }
 
-struct ChosenMessageOTSender<E: MultiPartyEngine> {
+pub struct ChosenMessageOTSender<E: MultiPartyEngine> {
     rots: Vec<OTSender<Msg>>,
     engine: E,
 }
 impl<E: MultiPartyEngine> ChosenMessageOTSender<E> {
-    async fn init(mut engine: E, batch_size: usize) -> Option<Self> {
+    pub async fn init(mut engine: E, batch_size: usize) -> Option<Self> {
         Some(Self {
             rots: batch_endemic_ot_sender(&mut engine, batch_size).await?,
             engine,
         })
     }
-    async fn choose(mut self, msgs: &[(GF128, GF128)]) {
+    pub async fn choose(mut self, msgs: &[(GF128, GF128)]) {
         assert_eq!(msgs.len(), self.rots.len());
         let to_send: Vec<_> = msgs
             .iter()
@@ -168,18 +168,18 @@ impl<E: MultiPartyEngine> ChosenMessageOTSender<E> {
         self.engine.broadcast(&to_send);
     }
 }
-struct ChosenMessageOTReceiver<E: MultiPartyEngine> {
+pub struct ChosenMessageOTReceiver<E: MultiPartyEngine> {
     rots: Vec<OTReceiver<Msg>>,
     engine: E,
 }
 impl<E: MultiPartyEngine> ChosenMessageOTReceiver<E> {
-    async fn init(mut engine: E, batch_size: usize) -> Option<Self> {
+    pub async fn init(mut engine: E, batch_size: usize) -> Option<Self> {
         let mut rng = E::rng();
         let choice_bits: Vec<bool> = (0..batch_size).map(|_| rng.gen()).collect();
         let rots = batch_endemic_ot_receiver(&mut engine, choice_bits).await?;
         Some(Self { rots, engine })
     }
-    async fn handle_choice(mut self) -> Option<Vec<OTReceiver<GF128>>> {
+    pub async fn handle_choice(mut self) -> Option<Vec<OTReceiver<GF128>>> {
         let (msgs, _): (Vec<(GF128, GF128)>, PartyId) = self.engine.recv().await?;
         if msgs.len() != self.rots.len() {
             return None;
@@ -188,7 +188,7 @@ impl<E: MultiPartyEngine> ChosenMessageOTReceiver<E> {
             msgs.into_iter()
                 .zip(self.rots.iter())
                 .map(|((msg0, msg1), rot)| {
-                    let msg = if rot.1 { msg0 } else { msg1 };
+                    let msg = if rot.1 { msg1 } else { msg0 };
                     let key0: [u8; 16] = core::array::from_fn(|i| rot.0[i]);
                     let msg0 = GF128::from(key0) + msg;
                     OTReceiver(msg0, rot.1)
@@ -202,41 +202,45 @@ impl<E: MultiPartyEngine> ChosenMessageOTReceiver<E> {
 mod tests {
     use std::collections::HashSet;
 
-    use rand::{thread_rng, Rng};
+    use rand::thread_rng;
     use tokio::join;
 
-    use super::{batch_endemic_ot_receiver, batch_endemic_ot_sender};
-    use crate::engine::LocalRouter;
+    use super::{ChosenMessageOTReceiver, ChosenMessageOTSender};
+    use crate::{engine::LocalRouter, fields::GF128};
 
     #[tokio::test]
-    async fn test() {
+    async fn test_chosen_message() {
         const BATCH_SIZE: usize = 1;
         let party_ids = [1, 2];
         let party_ids_set = HashSet::from(party_ids);
         let (router, mut engines) = LocalRouter::new("root tag".into(), &party_ids_set);
         let router_handle = tokio::spawn(router.launch());
         let mut rng = thread_rng();
-        let choice_bits: [bool; BATCH_SIZE] = core::array::from_fn(|_| rng.gen());
 
         let ots_sender =
-            batch_endemic_ot_sender(&mut engines.remove(&party_ids[0]).unwrap(), BATCH_SIZE);
-        let ots_receiver = batch_endemic_ot_receiver(
-            &mut engines.remove(&party_ids[1]).unwrap(),
-            choice_bits.to_vec(),
-        );
+            ChosenMessageOTSender::init(engines.remove(&party_ids[0]).unwrap(), BATCH_SIZE);
+        let ots_receiver =
+            ChosenMessageOTReceiver::init(engines.remove(&party_ids[1]).unwrap(), BATCH_SIZE);
         let (sender_output, receiver_output) = join!(ots_sender, ots_receiver);
         let (sender_output, receiver_output) = (sender_output.unwrap(), receiver_output.unwrap());
+
+        let sender_msgs: Vec<_> = (0..BATCH_SIZE)
+            .map(|_| (GF128::random(&mut rng), GF128::random(&mut rng)))
+            .collect();
+        let chosen_ot_sender = sender_output.choose(&sender_msgs);
+        let chosen_ot_receiver = receiver_output.handle_choice();
+
+        let (_, receiver_output) = join!(chosen_ot_sender, chosen_ot_receiver);
+        let receiver_output = receiver_output.unwrap();
         router_handle.await.unwrap().unwrap();
 
-        assert_eq!(BATCH_SIZE, sender_output.len());
+        assert_eq!(BATCH_SIZE, sender_msgs.len());
         assert_eq!(BATCH_SIZE, receiver_output.len());
-        sender_output
+        sender_msgs
             .into_iter()
             .zip(receiver_output.into_iter())
-            .zip(choice_bits.into_iter())
-            .for_each(|((ot_sender, ot_receiver), choice_bit)| {
-                assert_eq!(choice_bit, ot_receiver.1);
-                if choice_bit {
+            .for_each(|(ot_sender, ot_receiver)| {
+                if ot_receiver.1 {
                     assert_eq!(ot_sender.1, ot_receiver.0);
                 } else {
                     assert_eq!(ot_sender.0, ot_receiver.0);
