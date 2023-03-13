@@ -1,202 +1,132 @@
-//! # Punctured PseudoRandom Functions (PPRF) Implementation
-//!
-pub mod distributed_generation;
+use tokio::join;
 
-use crate::pseudorandom::double_prg;
-use crate::pseudorandom::prf::{prf_eval, prf_eval_all_into_slice};
-use crate::pseudorandom::prg::PrgValue;
-use crate::xor_arrays;
-use std::convert::{From, Into};
-
-#[cfg(not(feature = "aesni"))]
-use rand::{RngCore, SeedableRng};
-#[cfg(not(feature = "aesni"))]
-use rand_chacha::ChaCha8Rng;
-use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
-pub enum Direction {
-    Left,
-    Right,
+use crate::{
+    engine::{MultiPartyEngine, PartyId},
+    fields::{FieldElement, GF128},
+    ot::{ChosenMessageOTReceiver, ChosenMessageOTSender, OTReceiver},
+    pseudorandom::prg::double_prg_many_inplace,
+};
+pub struct PprfSender {
+    seed: GF128,
+    evals: Vec<GF128>,
 }
-impl From<bool> for Direction {
-    fn from(a: bool) -> Self {
-        if a {
-            Self::Right
-        } else {
-            Self::Left
+pub async fn pprf_sender<T: MultiPartyEngine>(
+    mut engine: T,
+    depth: usize,
+    delta: GF128,
+) -> Option<PprfSender> {
+    let ot_sender_handle = ChosenMessageOTSender::init(engine.sub_protocol(&"PPRF TO OT"), depth);
+    let pprf_processing_handle = tokio::spawn(async move {
+        let mut ot_msgs = Vec::<(GF128, GF128)>::with_capacity(depth);
+        let mut output = vec![GF128::zero(); 1 << depth];
+        let seed = GF128::random(&mut T::rng());
+        output[0] = seed;
+        for i in 0..depth {
+            double_prg_many_inplace(&mut output[0..1 << (i + 1)]);
+            ot_msgs.push(
+                output[0..1 << (i + 1)]
+                    .chunks_exact(2)
+                    .fold((GF128::zero(), GF128::zero()), |a, b| {
+                        (a.0 + b[0], a.1 + b[1])
+                    }),
+            );
         }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct PuncturedKey<const INPUT_BITLEN: usize> {
-    #[serde(with = "BigArray")]
-    keys: [(PrgValue, Direction); INPUT_BITLEN],
-}
-
-impl<const INPUT_BITLEN: usize> PuncturedKey<INPUT_BITLEN> {
-    pub fn puncture(prf_key: &PrgValue, puncture_point: [bool; INPUT_BITLEN]) -> Self {
-        let mut current_key = *prf_key;
-        let punctured_key = puncture_point.map(|puncture_bit| {
-            let (left, right) = double_prg(&current_key);
-            match puncture_bit.into() {
-                Direction::Left => {
-                    current_key = left;
-                    (right, Direction::Right)
-                }
-                Direction::Right => {
-                    current_key = right;
-                    (left, Direction::Left)
-                }
-            }
-        });
-        PuncturedKey {
-            keys: punctured_key,
-        }
-    }
-    pub fn try_eval(&self, input: [bool; INPUT_BITLEN]) -> Option<PrgValue> {
-        for ((i, &b), (k, direction)) in input.iter().enumerate().zip(self.keys.iter()) {
-            if *direction == b.into() {
-                return Some(prf_eval(k, &input[i + 1..]));
-            }
-        }
-        None
-    }
-
-    pub fn full_eval_with_punctured_point_into_slice(
-        &self,
-        leaf_sum_plus_punctured_point_val: &PrgValue,
-        output: &mut [PrgValue],
-    ) {
-        assert_eq!(output.len(), 1 << INPUT_BITLEN);
-        let mut top = 1 << INPUT_BITLEN;
-        let mut bottom = 0;
-        let mut mid = 1 << (INPUT_BITLEN - 1);
-        for i in 0..INPUT_BITLEN {
-            let depth = INPUT_BITLEN - 1 - i;
-            let output_slice = match self.keys[i].1 {
-                Direction::Left => &mut output[bottom..mid],
-                _ => &mut output[mid..top],
-            };
-            prf_eval_all_into_slice(&self.keys[i].0, depth, output_slice);
-            if self.keys[i].1 == Direction::Left {
-                bottom = mid;
-            } else {
-                top = mid;
-            }
-            mid = (bottom + top) >> 1;
-        }
-        let mut punctured_point_val = *leaf_sum_plus_punctured_point_val;
-        for v in output.iter() {
-            xor_arrays(&mut punctured_point_val, v)
-        }
-
-        output[mid] = punctured_point_val;
-    }
-
-    pub fn full_eval_with_punctured_point(
-        &self,
-        leaf_sum_plus_punctured_point_val: &PrgValue,
-    ) -> Vec<PrgValue> {
-        let mut output = vec![PrgValue::default(); 1 << INPUT_BITLEN];
-        self.full_eval_with_punctured_point_into_slice(
-            leaf_sum_plus_punctured_point_val,
-            &mut output,
-        );
-        output
-    }
+        (
+            ot_msgs,
+            PprfSender {
+                seed,
+                evals: output,
+            },
+        )
+    });
+    let (pprf_gen_result, ot_init_result) = join!(pprf_processing_handle, ot_sender_handle);
+    let (ot_msgs, pprf_senders) = pprf_gen_result.ok()?;
+    let last_msg = ot_msgs.last()?;
+    let msg = last_msg.0 + last_msg.1 + delta;
+    engine.broadcast(&msg);
+    let ot_sender = ot_init_result?;
+    ot_sender.choose(&ot_msgs).await;
+    Some(pprf_senders)
 }
 
-pub fn bits_to_usize<const BITS: usize>(bits: &[bool; BITS]) -> usize {
-    bits.iter()
-        .rev()
-        .enumerate()
-        .fold(0, |acc, (id, cur)| if *cur { acc + (1 << id) } else { acc })
+pub struct PprfReceiver {
+    punctured_index: usize,
+    evals: Vec<GF128>,
 }
-
-pub fn usize_to_bits<const BITS: usize>(mut n: usize) -> [bool; BITS] {
-    let mut output = [false; BITS];
-    for i in (0..BITS).rev() {
-        if n & 1 == 1 {
-            output[i] = true;
+pub async fn pprf_receiver<T: MultiPartyEngine>(
+    mut engine: T,
+    depth: usize,
+) -> Option<PprfReceiver> {
+    let ot_receiver =
+        ChosenMessageOTReceiver::init(engine.sub_protocol(&"PPRF TO OT"), depth).await?;
+    let receiver_ots = ot_receiver.handle_choice().await?;
+    let mut evals = vec![GF128::zero(); 1 << depth];
+    let mut punctured_index = 0;
+    receiver_ots.into_iter().enumerate().for_each(|(idx, ot)| {
+        let round_slice = &mut evals[0..2 << idx];
+        double_prg_many_inplace(round_slice);
+        let mut node_val = ot.0;
+        let point_to_restore = 2 * punctured_index + (ot.1 as usize);
+        punctured_index = 2 * punctured_index + (!ot.1 as usize);
+        let start_idx = point_to_restore & 1;
+        for p in round_slice.iter().skip(start_idx).step_by(2) {
+            node_val += p;
         }
-        n >>= 1;
-    }
-    output
+        node_val -= evals[point_to_restore];
+        evals[point_to_restore] = node_val;
+    });
+    let xor_all = evals.iter().fold(GF128::zero(), |acc, cur| acc + *cur);
+    let (xor_all_with_delta, _): (GF128, PartyId) = engine.recv().await?;
+    evals[punctured_index] += xor_all - xor_all_with_delta;
+    Some(PprfReceiver {
+        punctured_index,
+        evals,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{bits_to_usize, usize_to_bits, PuncturedKey};
-    use crate::pseudorandom::prf::{prf_eval, prf_eval_all};
-    use crate::pseudorandom::prg::PrgValue;
-    use crate::pseudorandom::KEY_SIZE;
-    use crate::xor_arrays;
+    use super::{pprf_receiver, pprf_sender};
+    use crate::{engine::LocalRouter, fields::GF128};
+    use rand::thread_rng;
+    use std::collections::HashSet;
+    use tokio::join;
 
-    #[test]
-    fn one_bit_output() {
-        let prf_key = PrgValue::default();
-        let puncture_point = [true];
-        let punctured_key = PuncturedKey::puncture(&prf_key, puncture_point);
-        assert!(punctured_key.try_eval(puncture_point).is_none());
-        assert_eq!(
-            punctured_key.try_eval([false]).unwrap(),
-            prf_eval(&prf_key, &[false])
+    #[tokio::test]
+    async fn test_pprf() {
+        const PPRF_DEPTH: usize = 20;
+        let party_ids = [1, 2];
+        let party_ids_set = HashSet::from(party_ids);
+        let (router, mut engines) = LocalRouter::new("root tag".into(), &party_ids_set);
+        let router_handle = tokio::spawn(router.launch());
+        let pprf_sender_engine = engines.remove(&party_ids[0]).unwrap();
+        let pprf_receiver_engine = engines.remove(&party_ids[1]).unwrap();
+        let mut rng = thread_rng();
+        let delta = GF128::random(&mut rng);
+        let pprf_sender_handle = tokio::spawn(pprf_sender(pprf_sender_engine, PPRF_DEPTH, delta));
+        let pprf_receiver_handle = tokio::spawn(pprf_receiver(pprf_receiver_engine, PPRF_DEPTH));
+
+        let (pprf_sender_res, pprf_receiver_res) = join!(pprf_sender_handle, pprf_receiver_handle);
+        let (pprf_sender_res, pprf_receiver_res) = (
+            pprf_sender_res.unwrap().unwrap(),
+            pprf_receiver_res.unwrap().unwrap(),
         );
-    }
 
-    #[test]
-    fn check_large_domain() {
-        let prf_key = PrgValue::from([11u8; KEY_SIZE]);
-        let puncture_num = 0b0101010101;
-        let puncture_point = usize_to_bits::<10>(puncture_num);
-        let punctured_key = PuncturedKey::puncture(&prf_key, puncture_point);
-        for i in 0..1 << puncture_point.len() {
-            let prf_input = usize_to_bits::<10>(i);
-            if i != puncture_num {
-                assert_eq!(
-                    punctured_key.try_eval(prf_input).unwrap(),
-                    prf_eval(&prf_key, &prf_input)
-                );
-            } else {
-                assert!(punctured_key.try_eval(prf_input).is_none());
-            }
-        }
-    }
-
-    #[test]
-    fn test_full_eval_prf() {
-        let prf_key = PrgValue::from([11u8; KEY_SIZE]);
-        let point_num = 0b1;
-        let point_arr = usize_to_bits::<1>(point_num);
-        let full_eval = prf_eval_all(&prf_key, 1);
-        let prf_evaluated = prf_eval(&prf_key, &point_arr);
-        assert_eq!(prf_evaluated, full_eval[point_num]);
-    }
-
-    #[test]
-    fn test_full_eval_punctured() {
-        let prf_key = PrgValue::from([11u8; KEY_SIZE]);
-        let puncture_point = 0b111;
-        let puncture_point_arr = usize_to_bits::<3>(puncture_point);
-        let punctured_key = PuncturedKey::puncture(&prf_key, puncture_point_arr);
-        let full_eval_regular = prf_eval_all(&prf_key, 3);
-        let leaf_sum = full_eval_regular
-            .iter()
-            .fold(PrgValue::default(), |mut acc, cur| {
-                xor_arrays(&mut acc, cur);
-                acc
+        assert_eq!(pprf_receiver_res.evals.len(), pprf_sender_res.evals.len());
+        let rec_evals = pprf_receiver_res.evals;
+        let snd_evals = pprf_sender_res.evals;
+        let punctured_index = pprf_receiver_res.punctured_index;
+        rec_evals
+            .into_iter()
+            .zip(snd_evals.into_iter())
+            .enumerate()
+            .for_each(|(idx, (snd, rcv))| {
+                if idx != punctured_index {
+                    assert_eq!(snd, rcv);
+                } else {
+                    assert_eq!(snd + rcv, delta);
+                }
             });
-        let full_eval_punctured = punctured_key.full_eval_with_punctured_point(&leaf_sum);
-        assert_eq!(full_eval_regular, full_eval_punctured);
-    }
-
-    #[test]
-    fn punctured_point_conversion() {
-        let puncture_point: usize = 0b01010101;
-        let puncture_point_arr = usize_to_bits::<12>(puncture_point);
-        let point = bits_to_usize(&puncture_point_arr);
-        assert_eq!(puncture_point, point);
+        router_handle.await.unwrap().unwrap();
     }
 }
