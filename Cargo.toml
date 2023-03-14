@@ -21,6 +21,7 @@ tokio = { version = "1", features = ["full"]}
 bincode = "1"
 chacha20 = "0.9"
 futures = "0.3"
+aes-prng = "0.2"
 
 [dev-dependencies]
 criterion = "0.3"
