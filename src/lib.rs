@@ -23,7 +23,7 @@ mod engine;
 pub mod fields;
 // pub mod non_committing_encryption;
 pub mod ot;
-// pub mod pcg;
+pub mod pcg;
 pub mod pprf;
 pub mod pseudorandom;
 mod uc_tags;
