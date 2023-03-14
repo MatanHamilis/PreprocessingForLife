@@ -337,11 +337,11 @@ impl GF128 {
     }
 
     /// Returns a random field element
-    pub fn random<T: CryptoRng + RngCore>(rng: &mut T) -> Self {
+    pub fn random(mut rng: impl RngCore + CryptoRng) -> Self {
         GF128(u64x2::from_array([rng.next_u64(), rng.next_u64()]))
     }
 
-    pub fn random_not_cryptographic<T: RngCore>(rng: &mut T) -> Self {
+    pub fn random_not_cryptographic(mut rng: impl RngCore) -> Self {
         GF128(u64x2::from_array([rng.next_u64(), rng.next_u64()]))
     }
 
