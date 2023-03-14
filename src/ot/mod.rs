@@ -27,12 +27,12 @@ pub struct OTReceiver<T>(pub T, pub bool);
 async fn batch_endemic_ot_sender<T: MultiPartyEngine>(
     engine: &mut T,
     batch_size: usize,
-) -> Option<Vec<OTSender<Msg>>> {
+) -> Result<Vec<OTSender<Msg>>, ()> {
     let (a, points) = moller_msg_sender(T::rng());
     engine.broadcast(&points);
-    let (msgs, _): (Vec<[u8; 32]>, PartyId) = engine.recv().await?;
+    let (msgs, _): (Vec<[u8; 32]>, PartyId) = engine.recv().await.ok_or(())?;
     if msgs.len() != batch_size {
-        return None;
+        return Err(());
     }
     let ots_sender: Vec<_> = msgs
         .into_iter()
@@ -49,13 +49,13 @@ async fn batch_endemic_ot_sender<T: MultiPartyEngine>(
             )
         })
         .collect();
-    Some(ots_sender)
+    Ok(ots_sender)
 }
 
 async fn batch_endemic_ot_receiver<T: MultiPartyEngine>(
     engine: &mut T,
     choice_bits: Vec<bool>,
-) -> Option<Vec<OTReceiver<Msg>>> {
+) -> Result<Vec<OTReceiver<Msg>>, ()> {
     let batch_size = choice_bits.len();
     let (scalars, msgs): (Vec<(Scalar, bool)>, Vec<[u8; 32]>) = (0..batch_size)
         .map(|i| {
@@ -69,27 +69,26 @@ async fn batch_endemic_ot_receiver<T: MultiPartyEngine>(
         })
         .unzip();
     engine.broadcast(&msgs);
-    let (sender_msg, _): ((MontgomeryPoint, MontgomeryPoint), PartyId) = engine.recv().await?;
-    Some(
-        scalars
-            .into_iter()
-            .zip(choice_bits.iter().copied())
-            .enumerate()
-            .map(|(idx, ((scalar, is_on_curve), choice_bit))| {
-                let point = if is_on_curve {
-                    sender_msg.0
-                } else {
-                    sender_msg.1
-                };
-                let moller_tag = engine
-                    .uc_tag()
-                    .derive(&"MOLLER KEY")
-                    .derive(&(idx, choice_bit));
-                let key = moller_key(&moller_tag, scalar, point);
-                OTReceiver(key, choice_bit)
-            })
-            .collect(),
-    )
+    let (sender_msg, _): ((MontgomeryPoint, MontgomeryPoint), PartyId) =
+        engine.recv().await.ok_or(())?;
+    Ok(scalars
+        .into_iter()
+        .zip(choice_bits.iter().copied())
+        .enumerate()
+        .map(|(idx, ((scalar, is_on_curve), choice_bit))| {
+            let point = if is_on_curve {
+                sender_msg.0
+            } else {
+                sender_msg.1
+            };
+            let moller_tag = engine
+                .uc_tag()
+                .derive(&"MOLLER KEY")
+                .derive(&(idx, choice_bit));
+            let key = moller_key(&moller_tag, scalar, point);
+            OTReceiver(key, choice_bit)
+        })
+        .collect())
 }
 
 fn popf_get_key(tag: &UCTag, choice_bit: bool) -> ChaCha8 {
@@ -146,8 +145,8 @@ pub struct ChosenMessageOTSender<E: MultiPartyEngine> {
     engine: E,
 }
 impl<E: MultiPartyEngine> ChosenMessageOTSender<E> {
-    pub async fn init(mut engine: E, batch_size: usize) -> Option<Self> {
-        Some(Self {
+    pub async fn init(mut engine: E, batch_size: usize) -> Result<Self, ()> {
+        Ok(Self {
             rots: batch_endemic_ot_sender(&mut engine, batch_size).await?,
             engine,
         })
@@ -173,27 +172,26 @@ pub struct ChosenMessageOTReceiver<E: MultiPartyEngine> {
     engine: E,
 }
 impl<E: MultiPartyEngine> ChosenMessageOTReceiver<E> {
-    pub async fn init(mut engine: E, batch_size: usize) -> Option<Self> {
+    pub async fn init(mut engine: E, batch_size: usize) -> Result<Self, ()> {
         let choice_bits: Vec<bool> = (0..batch_size).map(|_| E::rng().gen()).collect();
         let rots = batch_endemic_ot_receiver(&mut engine, choice_bits).await?;
-        Some(Self { rots, engine })
+        Ok(Self { rots, engine })
     }
-    pub async fn handle_choice(mut self) -> Option<Vec<OTReceiver<GF128>>> {
-        let (msgs, _): (Vec<(GF128, GF128)>, PartyId) = self.engine.recv().await?;
+    pub async fn handle_choice(mut self) -> Result<Vec<OTReceiver<GF128>>, ()> {
+        let (msgs, _): (Vec<(GF128, GF128)>, PartyId) = self.engine.recv().await.ok_or(())?;
         if msgs.len() != self.rots.len() {
-            return None;
+            return Err(());
         }
-        Some(
-            msgs.into_iter()
-                .zip(self.rots.iter())
-                .map(|((msg0, msg1), rot)| {
-                    let msg = if rot.1 { msg1 } else { msg0 };
-                    let key0: [u8; 16] = core::array::from_fn(|i| rot.0[i]);
-                    let msg0 = GF128::from(key0) + msg;
-                    OTReceiver(msg0, rot.1)
-                })
-                .collect(),
-        )
+        Ok(msgs
+            .into_iter()
+            .zip(self.rots.iter())
+            .map(|((msg0, msg1), rot)| {
+                let msg = if rot.1 { msg1 } else { msg0 };
+                let key0: [u8; 16] = core::array::from_fn(|i| rot.0[i]);
+                let msg0 = GF128::from(key0) + msg;
+                OTReceiver(msg0, rot.1)
+            })
+            .collect())
     }
 }
 

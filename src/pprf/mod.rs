@@ -3,7 +3,7 @@ use tokio::join;
 use crate::{
     engine::{MultiPartyEngine, PartyId},
     fields::{FieldElement, GF128},
-    ot::{ChosenMessageOTReceiver, ChosenMessageOTSender, OTReceiver},
+    ot::{ChosenMessageOTReceiver, ChosenMessageOTSender},
     pseudorandom::prg::double_prg_many_inplace,
 };
 pub struct PprfSender {
@@ -14,7 +14,7 @@ pub async fn pprf_sender<T: MultiPartyEngine>(
     mut engine: T,
     depth: usize,
     delta: GF128,
-) -> Option<PprfSender> {
+) -> Result<PprfSender, ()> {
     let ot_sender_handle = ChosenMessageOTSender::init(engine.sub_protocol(&"PPRF TO OT"), depth);
     let pprf_processing_handle = tokio::spawn(async move {
         let mut ot_msgs = Vec::<(GF128, GF128)>::with_capacity(depth);
@@ -40,13 +40,13 @@ pub async fn pprf_sender<T: MultiPartyEngine>(
         )
     });
     let (pprf_gen_result, ot_init_result) = join!(pprf_processing_handle, ot_sender_handle);
-    let (ot_msgs, pprf_senders) = pprf_gen_result.ok()?;
-    let last_msg = ot_msgs.last()?;
+    let (ot_msgs, pprf_senders) = pprf_gen_result.or(Err(()))?;
+    let last_msg = ot_msgs.last().ok_or(())?;
     let msg = last_msg.0 + last_msg.1 + delta;
     engine.broadcast(&msg);
     let ot_sender = ot_init_result?;
     ot_sender.choose(&ot_msgs).await;
-    Some(pprf_senders)
+    Ok(pprf_senders)
 }
 
 pub struct PprfReceiver {
@@ -56,7 +56,7 @@ pub struct PprfReceiver {
 pub async fn pprf_receiver<T: MultiPartyEngine>(
     mut engine: T,
     depth: usize,
-) -> Option<PprfReceiver> {
+) -> Result<PprfReceiver, ()> {
     let ot_receiver =
         ChosenMessageOTReceiver::init(engine.sub_protocol(&"PPRF TO OT"), depth).await?;
     let receiver_ots = ot_receiver.handle_choice().await?;
@@ -76,9 +76,9 @@ pub async fn pprf_receiver<T: MultiPartyEngine>(
         evals[point_to_restore] = node_val;
     });
     let xor_all = evals.iter().fold(GF128::zero(), |acc, cur| acc + *cur);
-    let (xor_all_with_delta, _): (GF128, PartyId) = engine.recv().await?;
+    let (xor_all_with_delta, _): (GF128, PartyId) = engine.recv().await.ok_or(())?;
     evals[punctured_index] += xor_all - xor_all_with_delta;
-    Some(PprfReceiver {
+    Ok(PprfReceiver {
         punctured_index,
         evals,
     })
