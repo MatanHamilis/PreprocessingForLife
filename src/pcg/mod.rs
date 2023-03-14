@@ -6,7 +6,9 @@ use crate::{
 };
 use aes_prng::AesRng;
 use futures::future::try_join_all;
+use rand::SeedableRng;
 use rand_core::RngCore;
+use tokio::join;
 
 pub struct ReceiverPcgKey {
     evals: Vec<GF128>,
@@ -157,6 +159,58 @@ impl SenderPcgKey {
     }
 }
 
+pub struct FullPcgKey {
+    sender: SenderPcgKey,
+    receiver: ReceiverPcgKey,
+}
+
+impl FullPcgKey {
+    pub async fn new(
+        engine: impl MultiPartyEngine,
+        pprf_count: usize,
+        pprf_depth: usize,
+        code_seed: [u8; 16],
+        code_width: usize,
+    ) -> Result<Self, ()> {
+        let my_id = engine.my_party_id();
+        let peer_id = engine.party_ids()[0] + engine.party_ids()[1] - my_id;
+        let (mut first_engine, mut second_engine) = (
+            engine.sub_protocol("FULL PCG TO FIRST SUB PCG"),
+            engine.sub_protocol("FULL PCG TO SECOND SUB PCG"),
+        );
+        if my_id > peer_id {
+            (first_engine, second_engine) = (second_engine, first_engine)
+        }
+        let seed_sender = AesRng::from_seed(code_seed);
+        let sender = tokio::spawn(sender_pcg_key(
+            first_engine,
+            pprf_count,
+            pprf_depth,
+            seed_sender,
+            code_width,
+        ));
+        let seed_receiver = AesRng::from_seed(code_seed);
+        let receiver = tokio::spawn(receiver_pcg_key(
+            second_engine,
+            pprf_count,
+            pprf_depth,
+            seed_receiver,
+            code_width,
+        ));
+        let (snd_res, rcv_res) = join!(sender, receiver);
+        Ok(Self {
+            sender: snd_res.or(Err(()))??,
+            receiver: rcv_res.or(Err(()))??,
+        })
+    }
+    pub fn next_wide_beaver_triple(&mut self) -> (GF2, GF128, GF128) {
+        let (m_b, b) = self.sender.next_random_ot();
+        let (m_0, mut m_1) = self.receiver.next_random_ot();
+        m_1 -= m_0;
+        (b, m_1, m_1 * b + m_b + m_0)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::collections::HashSet;
@@ -164,14 +218,14 @@ mod test {
     use tokio::join;
 
     use super::{receiver_pcg_key, sender_pcg_key};
-    use crate::engine::LocalRouter;
+    use crate::{engine::LocalRouter, pcg::FullPcgKey};
     use aes_prng::AesRng;
     use rand_core::SeedableRng;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
-    async fn test_sparse_vole() {
-        const PPRF_COUNT: usize = 50;
-        const PPRF_DEPTH: usize = 20;
+    async fn test_bit_beaver_triples() {
+        const PPRF_COUNT: usize = 10;
+        const PPRF_DEPTH: usize = 10;
         const CODE_WIDTH: usize = 8;
         const CORRELATION_COUNT: usize = 500_000;
         let seed = [0; 16];
@@ -204,6 +258,41 @@ mod test {
             let rcv_corr = rcv_res.next_bit_beaver_triple();
             assert_eq!(
                 (sender_corr.0 + rcv_corr.0) * (sender_corr.1 + rcv_corr.1),
+                sender_corr.2 + rcv_corr.2
+            );
+        }
+        local_handle.await.unwrap().unwrap();
+    }
+    #[tokio::test]
+    async fn test_full_pcg_key() {
+        const PPRF_COUNT: usize = 10;
+        const PPRF_DEPTH: usize = 10;
+        const CODE_WIDTH: usize = 8;
+        const CORRELATION_COUNT: usize = 500_000;
+        let seed = [0; 16];
+        let party_ids = [1, 2];
+        let party_ids_set = HashSet::from_iter(party_ids.iter().copied());
+        let (router, mut engines) = LocalRouter::new("root tag".into(), &party_ids_set);
+        let sender_engine = engines.remove(&party_ids[0]).unwrap();
+        let receiver_engine = engines.remove(&party_ids[1]).unwrap();
+
+        let local_handle = tokio::spawn(router.launch());
+        let sender_h = tokio::spawn(FullPcgKey::new(
+            sender_engine,
+            PPRF_COUNT,
+            PPRF_DEPTH,
+            seed,
+            CODE_WIDTH,
+        ));
+        let receiver_h = FullPcgKey::new(receiver_engine, PPRF_COUNT, PPRF_DEPTH, seed, CODE_WIDTH);
+
+        let (snd_res, rcv_res) = join!(sender_h, receiver_h);
+        let (mut snd_res, mut rcv_res) = (snd_res.unwrap().unwrap(), rcv_res.unwrap());
+        for _ in 0..CORRELATION_COUNT {
+            let sender_corr = snd_res.next_wide_beaver_triple();
+            let rcv_corr = rcv_res.next_wide_beaver_triple();
+            assert_eq!(
+                (sender_corr.1 + rcv_corr.1) * (sender_corr.0 + rcv_corr.0),
                 sender_corr.2 + rcv_corr.2
             );
         }
