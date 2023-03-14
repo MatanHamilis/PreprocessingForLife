@@ -7,8 +7,8 @@ pub struct UCTag {
 }
 
 impl UCTag {
-    pub fn derive(&self, subtag: &impl Serialize) -> Self {
-        let subtag = bincode::serialize(subtag).expect("Failed to serialize, unexpected bug");
+    pub fn derive(&self, subtag: impl Serialize) -> Self {
+        let subtag = bincode::serialize(&subtag).expect("Failed to serialize, unexpected bug");
         Self {
             tag: blake3::keyed_hash(self.tag.as_bytes(), &subtag),
         }
