@@ -7,12 +7,7 @@ use async_trait::async_trait;
 use rand::{rngs::ThreadRng, thread_rng};
 use rand_core::{CryptoRng, RngCore};
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::{
-    select,
-    sync::mpsc::{
-        channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender,
-    },
-};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::uc_tags::UCTag;
 pub type PartyId = u64;
@@ -23,8 +18,8 @@ pub trait MultiPartyEngine {
     fn send(&mut self, msg: &impl Serialize, dest: PartyId);
     fn broadcast(&mut self, msg: &impl Serialize);
     async fn recv<T: DeserializeOwned>(&mut self) -> Option<(T, PartyId)>;
-    fn sub_protocol_with(&self, tag: &impl Serialize, parties: Arc<Box<[PartyId]>>) -> Self;
-    fn sub_protocol(&self, tag: &impl Serialize) -> Self;
+    fn sub_protocol_with(&self, tag: impl Serialize, parties: Arc<Box<[PartyId]>>) -> Self;
+    fn sub_protocol(&self, tag: impl Serialize) -> Self;
     fn my_party_id(&self) -> PartyId;
     fn party_ids(&self) -> &[PartyId];
     fn uc_tag(&self) -> &UCTag;
@@ -130,7 +125,7 @@ impl MultiPartyEngine for MultiPartyEngineImpl {
     fn party_ids(&self) -> &[PartyId] {
         &self.parties
     }
-    fn sub_protocol(&self, tag: &impl Serialize) -> Self {
+    fn sub_protocol(&self, tag: impl Serialize) -> Self {
         let engine = Self::new(
             self.id,
             self.tag.derive(tag),
@@ -144,7 +139,7 @@ impl MultiPartyEngine for MultiPartyEngineImpl {
         let val = bincode::deserialize(&received.content).ok()?;
         Some((val, received.from))
     }
-    fn sub_protocol_with(&self, tag: &impl Serialize, parties: Arc<Box<[PartyId]>>) -> Self {
+    fn sub_protocol_with(&self, tag: impl Serialize, parties: Arc<Box<[PartyId]>>) -> Self {
         for p in parties.iter() {
             assert!(self.parties.contains(p));
         }
