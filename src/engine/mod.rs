@@ -13,7 +13,7 @@ use crate::uc_tags::UCTag;
 pub type PartyId = u64;
 
 #[async_trait]
-pub trait MultiPartyEngine {
+pub trait MultiPartyEngine: Send + Sync + 'static {
     type Rng: CryptoRng + RngCore;
     fn send(&mut self, msg: &impl Serialize, dest: PartyId);
     fn broadcast(&mut self, msg: &impl Serialize);
