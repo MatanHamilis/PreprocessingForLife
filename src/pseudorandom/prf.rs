@@ -1,5 +1,5 @@
-use crate::pprf::bits_to_usize;
-use crate::pprf::usize_to_bits;
+// use crate::pprf::bits_to_usize;
+// use crate::pprf::usize_to_bits;
 
 use super::double_prg;
 use super::double_prg_many;
@@ -30,17 +30,17 @@ impl<const INPUT_BITLEN: usize> AsRef<[bool; INPUT_BITLEN]> for PrfInput<INPUT_B
     }
 }
 
-impl<const INPUT_BITLEN: usize> From<usize> for PrfInput<INPUT_BITLEN> {
-    fn from(v: usize) -> Self {
-        Self(usize_to_bits(v))
-    }
-}
+// impl<const INPUT_BITLEN: usize> From<usize> for PrfInput<INPUT_BITLEN> {
+//     fn from(v: usize) -> Self {
+//         Self(usize_to_bits(v))
+//     }
+// }
 
-impl<const INPUT_BITLEN: usize> From<&PrfInput<INPUT_BITLEN>> for usize {
-    fn from(v: &PrfInput<INPUT_BITLEN>) -> Self {
-        bits_to_usize(v.as_ref())
-    }
-}
+// impl<const INPUT_BITLEN: usize> From<&PrfInput<INPUT_BITLEN>> for usize {
+//     fn from(v: &PrfInput<INPUT_BITLEN>) -> Self {
+//         bits_to_usize(v.as_ref())
+//     }
+// }
 
 pub fn prf_eval(key: &PrgValue, input: &[bool]) -> PrgValue {
     input.iter().fold(*key, |prf_out, &input_bit| {

@@ -1,6 +1,6 @@
 use std::ops::{Deref, DerefMut};
 
-use crate::xor_arrays;
+use crate::{fields::GF128, xor_arrays};
 #[cfg(feature = "aesni")]
 use aes::{
     cipher::{BlockEncrypt, KeyInit},
@@ -112,7 +112,9 @@ pub fn double_prg_many(input: &[Block], output: &mut [Block]) {
         });
 }
 
-pub fn double_prg_many_inplace(in_out: &mut [Block]) {
+pub fn double_prg_many_inplace(in_out: &mut [GF128]) {
+    let in_out =
+        unsafe { std::slice::from_raw_parts_mut(in_out.as_mut_ptr() as *mut Block, in_out.len()) };
     const BLOCK_SIZE: usize = 1 << 3;
     if in_out.len() < 2 * BLOCK_SIZE {
         double_prg_many_inplace_parametrized::<1>(in_out);
