@@ -8,7 +8,8 @@ use crate::{
 };
 pub struct PprfSender {
     seed: GF128,
-    evals: Vec<GF128>,
+    pub evals: Vec<GF128>,
+    pub leaves_sum: GF128,
 }
 pub async fn pprf_sender<T: MultiPartyEngine>(
     mut engine: T,
@@ -31,11 +32,14 @@ pub async fn pprf_sender<T: MultiPartyEngine>(
                     }),
             );
         }
+        let last_msg = ot_msgs.last().unwrap();
+        let leaves_sum = last_msg.0 + last_msg.1;
         (
             ot_msgs,
             PprfSender {
                 seed,
                 evals: output,
+                leaves_sum,
             },
         )
     });
@@ -50,8 +54,8 @@ pub async fn pprf_sender<T: MultiPartyEngine>(
 }
 
 pub struct PprfReceiver {
-    punctured_index: usize,
-    evals: Vec<GF128>,
+    pub punctured_index: usize,
+    pub evals: Vec<GF128>,
 }
 pub async fn pprf_receiver<T: MultiPartyEngine>(
     mut engine: T,
