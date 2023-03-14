@@ -20,6 +20,7 @@ async-trait = "0.1"
 tokio = { version = "1", features = ["full"]}
 bincode = "1"
 chacha20 = "0.9"
+futures = "0.3"
 
 [dev-dependencies]
 criterion = "0.3"
