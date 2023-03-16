@@ -1,7 +1,7 @@
 //! # Bristol Fashion Circuits Parser
 //! Based on [Bristol Fashion documentation](https://homes.esat.kuleuven.be/~nsmart/MPC/).
 
-use super::gates::{and, not, wide_and, xor};
+// use super::gates::{and, not, wide_and, xor};
 use log::error;
 
 use std::{
@@ -24,7 +24,8 @@ pub enum ParsedGate {
         output: usize,
     },
     WideAndGate {
-        input: [usize; 129],
+        input: [usize; 128],
+        input_bit: usize,
         output: [usize; 128],
     },
 }
@@ -35,7 +36,11 @@ impl ParsedGate {
             ParsedGate::AndGate { input, output: _ } => input,
             ParsedGate::NotGate { input, output: _ } => std::slice::from_ref(input),
             ParsedGate::XorGate { input, output: _ } => input,
-            ParsedGate::WideAndGate { input, output: _ } => input,
+            ParsedGate::WideAndGate {
+                input,
+                input_bit: _,
+                output: _,
+            } => input,
         }
     }
     pub fn output_wires(&self) -> &[usize] {
@@ -43,7 +48,11 @@ impl ParsedGate {
             ParsedGate::AndGate { input: _, output } => std::slice::from_ref(output),
             ParsedGate::NotGate { input: _, output } => std::slice::from_ref(output),
             ParsedGate::XorGate { input: _, output } => std::slice::from_ref(output),
-            ParsedGate::WideAndGate { input: _, output } => output,
+            ParsedGate::WideAndGate {
+                input: _,
+                input_bit: _,
+                output,
+            } => output,
         }
     }
     pub fn is_linear(&self) -> bool {
@@ -51,19 +60,20 @@ impl ParsedGate {
             ParsedGate::AndGate {
                 input: _,
                 output: _,
-            } => and::IS_LINEAR,
+            } => false,
             ParsedGate::NotGate {
                 input: _,
                 output: _,
-            } => not::IS_LINEAR,
+            } => true,
             ParsedGate::XorGate {
                 input: _,
                 output: _,
-            } => xor::IS_LINEAR,
+            } => true,
             ParsedGate::WideAndGate {
                 input: _,
+                input_bit: _,
                 output: _,
-            } => wide_and::IS_LINEAR,
+            } => false,
         }
     }
 }
@@ -150,8 +160,8 @@ fn parse_regular_gate_line(line: &str) -> Option<ParsedGate> {
 
     Some(match op {
         GateOp::And => {
-            assert_eq!(and::INPUT_COUNT, total_input);
-            assert_eq!(and::OUTPUT_COUNT, total_output);
+            assert_eq!(2, total_input);
+            assert_eq!(1, total_output);
             let input = [line_iter.next_usize()?, line_iter.next_usize()?];
             ParsedGate::AndGate {
                 input,
@@ -159,8 +169,8 @@ fn parse_regular_gate_line(line: &str) -> Option<ParsedGate> {
             }
         }
         GateOp::Xor => {
-            assert_eq!(xor::INPUT_COUNT, total_input);
-            assert_eq!(xor::OUTPUT_COUNT, total_output);
+            assert_eq!(2, total_input);
+            assert_eq!(1, total_output);
             let input = [line_iter.next_usize()?, line_iter.next_usize()?];
             ParsedGate::XorGate {
                 input,
@@ -168,30 +178,33 @@ fn parse_regular_gate_line(line: &str) -> Option<ParsedGate> {
             }
         }
         GateOp::Inv => {
-            assert_eq!(not::INPUT_COUNT, total_input);
-            assert_eq!(not::OUTPUT_COUNT, total_output);
+            assert_eq!(1, total_input);
+            assert_eq!(1, total_output);
             ParsedGate::NotGate {
                 input: line_iter.next_usize()?,
                 output: line_iter.next_usize()?,
             }
         }
         GateOp::WideAnd => {
-            assert_eq!(wide_and::INPUT_COUNT, total_input);
-            assert_eq!(wide_and::OUTPUT_COUNT, total_output);
+            assert_eq!(129, total_input);
+            assert_eq!(128, total_output);
             let common_input = line_iter.next_usize()?;
-            let mut wide_input: [MaybeUninit<usize>; 129] = MaybeUninit::uninit_array();
+            let mut wide_input: [MaybeUninit<usize>; 128] = MaybeUninit::uninit_array();
             let mut wide_output: [MaybeUninit<usize>; 128] = MaybeUninit::uninit_array();
             for i in 0..128 {
                 wide_input[i].write(line_iter.next_usize()?);
             }
-            wide_input[128].write(common_input);
             for i in 0..128 {
                 wide_output[i].write(line_iter.next_usize()?);
             }
             let input = unsafe { std::mem::transmute(wide_input) };
             let output = unsafe { std::mem::transmute(wide_output) };
 
-            ParsedGate::WideAndGate { input, output }
+            ParsedGate::WideAndGate {
+                input,
+                input_bit: common_input,
+                output,
+            }
         }
     })
 }

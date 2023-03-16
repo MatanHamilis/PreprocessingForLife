@@ -162,6 +162,7 @@ impl SenderPcgKey {
 pub struct FullPcgKey {
     sender: SenderPcgKey,
     receiver: ReceiverPcgKey,
+    is_first: bool,
 }
 
 impl FullPcgKey {
@@ -201,6 +202,7 @@ impl FullPcgKey {
         Ok(Self {
             sender: snd_res.or(Err(()))??,
             receiver: rcv_res.or(Err(()))??,
+            is_first: my_id < peer_id,
         })
     }
     pub fn next_wide_beaver_triple(&mut self) -> (GF2, GF128, GF128) {
@@ -208,6 +210,13 @@ impl FullPcgKey {
         let (m_0, mut m_1) = self.receiver.next_random_ot();
         m_1 -= m_0;
         (b, m_1, m_1 * b + m_b + m_0)
+    }
+    pub fn next_bit_beaver_triple(&mut self) -> (GF2, GF2, GF2) {
+        if self.is_first {
+            self.sender.next_bit_beaver_triplet()
+        } else {
+            self.receiver.next_bit_beaver_triple()
+        }
     }
 }
 
@@ -222,11 +231,11 @@ mod test {
     use aes_prng::AesRng;
     use rand_core::SeedableRng;
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+    #[tokio::test]
     async fn test_bit_beaver_triples() {
-        const PPRF_COUNT: usize = 10;
-        const PPRF_DEPTH: usize = 10;
-        const CODE_WIDTH: usize = 8;
+        const PPRF_COUNT: usize = 50;
+        const PPRF_DEPTH: usize = 20;
+        const CODE_WIDTH: usize = 7;
         const CORRELATION_COUNT: usize = 500_000;
         let seed = [0; 16];
         let party_ids = [1, 2];
@@ -236,13 +245,13 @@ mod test {
         let receiver_engine = engines.remove(&party_ids[1]).unwrap();
 
         let local_handle = tokio::spawn(router.launch());
-        let sender_h = tokio::spawn(sender_pcg_key(
+        let sender_h = sender_pcg_key(
             sender_engine,
             PPRF_COUNT,
             PPRF_DEPTH,
             AesRng::from_seed(seed),
             CODE_WIDTH,
-        ));
+        );
         let receiver_h = receiver_pcg_key(
             receiver_engine,
             PPRF_COUNT,
@@ -252,7 +261,7 @@ mod test {
         );
 
         let (snd_res, rcv_res) = join!(sender_h, receiver_h);
-        let (mut snd_res, mut rcv_res) = (snd_res.unwrap().unwrap(), rcv_res.unwrap());
+        let (mut snd_res, mut rcv_res) = (snd_res.unwrap(), rcv_res.unwrap());
         for _ in 0..CORRELATION_COUNT {
             let sender_corr = snd_res.next_bit_beaver_triplet();
             let rcv_corr = rcv_res.next_bit_beaver_triple();

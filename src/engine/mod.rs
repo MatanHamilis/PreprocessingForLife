@@ -15,8 +15,8 @@ pub type PartyId = u64;
 #[async_trait]
 pub trait MultiPartyEngine: Send + Sync + 'static {
     type Rng: CryptoRng + RngCore;
-    fn send(&mut self, msg: &impl Serialize, dest: PartyId);
-    fn broadcast(&mut self, msg: &impl Serialize);
+    fn send(&mut self, msg: impl Serialize, dest: PartyId);
+    fn broadcast(&mut self, msg: impl Serialize);
     async fn recv<T: DeserializeOwned>(&mut self) -> Option<(T, PartyId)>;
     fn sub_protocol_with(&self, tag: impl Serialize, parties: Arc<Box<[PartyId]>>) -> Self;
     fn sub_protocol(&self, tag: impl Serialize) -> Self;
@@ -91,8 +91,8 @@ impl MultiPartyEngineImpl {
             .send(msg)
             .expect("Failed to send downstream, early router leaving?");
     }
-    fn serialize_msg(content: &impl Serialize) -> Box<[u8]> {
-        bincode::serialize(content)
+    fn serialize_msg(content: impl Serialize) -> Box<[u8]> {
+        bincode::serialize(&content)
             .expect("Serialization failed!")
             .into()
     }
@@ -110,11 +110,11 @@ impl MultiPartyEngine for MultiPartyEngineImpl {
     fn my_party_id(&self) -> PartyId {
         self.id
     }
-    fn send(&mut self, msg: &impl Serialize, dest: PartyId) {
+    fn send(&mut self, msg: impl Serialize, dest: PartyId) {
         let content = Arc::new(Self::serialize_msg(msg));
         self.send_serialized(content, dest);
     }
-    fn broadcast(&mut self, msg: &impl Serialize) {
+    fn broadcast(&mut self, msg: impl Serialize) {
         let content = Arc::new(Self::serialize_msg(msg));
         let my_id = self.my_party_id();
         let parties = self.parties.clone();

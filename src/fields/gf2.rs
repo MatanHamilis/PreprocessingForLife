@@ -151,6 +151,12 @@ impl AddAssign for GF2 {
         self.v ^= rhs.v;
     }
 }
+impl AddAssign<&GF2> for GF2 {
+    #[allow(clippy::suspicious_op_assign_impl)]
+    fn add_assign(&mut self, rhs: &GF2) {
+        self.v ^= rhs.v;
+    }
+}
 
 impl Div for GF2 {
     type Output = Self;

@@ -1,459 +1,268 @@
 pub mod bristol_fashion;
-mod gates;
+// mod gates;
 
+use std::collections::HashMap;
 use std::fmt::Debug;
-use std::io::{Read, Write};
+use std::ops::Mul;
 
-use crate::pcg::full_key::CorrelationGenerator;
-use crate::{communicator::Communicator, fields::FieldElement};
+use serde::{Deserialize, Serialize};
+
+use crate::circuit_eval::bristol_fashion::ParsedGate;
+use crate::engine::{MultiPartyEngine, PartyId};
+use crate::fields::{FieldElement, GF128, GF2};
+use crate::pcg::FullPcgKey;
 
 use self::bristol_fashion::ParsedCircuit;
-use self::gates::{Gate, Msg};
 
-pub struct Circuit<S: FieldElement> {
-    gates: Vec<Vec<Gate<S>>>,
-    wires: Vec<S>,
-    input_wire_count: usize,
-    output_wire_count: usize,
+#[derive(Serialize, Deserialize)]
+enum GateOpening {
+    And(GF2, GF2),
+    WideAnd(GF2, GF128),
 }
 
-impl<S: FieldElement> From<ParsedCircuit> for Circuit<S> {
-    fn from(parsed_circuit: ParsedCircuit) -> Self {
-        let gates = parsed_circuit
-            .gates
-            .into_iter()
-            .map(|layer| layer.into_iter().map(|g| Gate::from(g)).collect())
-            .collect();
-
-        let wires = vec![
-            S::default();
-            parsed_circuit.input_wire_count
-                + parsed_circuit.output_wire_count
-                + parsed_circuit.internal_wire_count
-        ];
-        Self {
-            gates,
-            wires,
-            input_wire_count: parsed_circuit.input_wire_count,
-            output_wire_count: parsed_circuit.output_wire_count,
-        }
-    }
+#[derive(Serialize, Deserialize)]
+struct EvalMessage {
+    opening: GateOpening,
+    gate_idx_in_layer: usize,
 }
 
-impl<S: FieldElement> Circuit<S> {
-    fn input_wires(&self) -> &[S] {
-        &self.wires[0..self.input_wire_count]
-    }
-
-    fn output_wires(&self) -> &[S] {
-        &self.wires[self.wires.len() - self.output_wire_count..]
-    }
-    fn input_wires_mut(&mut self) -> &mut [S] {
-        &mut self.wires[0..self.input_wire_count]
-    }
-
-    pub fn eval_circuit(&mut self, input_wires: &[S]) -> Option<Vec<S>> {
-        assert_eq!(input_wires.len(), self.input_wire_count());
-        input_wires
-            .iter()
-            .zip(self.input_wires_mut().iter_mut())
-            .for_each(|(input, wire)| *wire = *input);
-        for gate in self.gates.iter().flatten() {
-            gate.eval(&mut self.wires);
-        }
-        Some(self.output_wires().iter().cloned().collect())
-    }
-
-    pub fn input_wire_count(&self) -> usize {
-        self.input_wire_count
-    }
-    pub fn get_layer_count(&self) -> usize {
-        self.gates.len()
-    }
-    pub fn output_wire_count(&self) -> usize {
-        self.output_wire_count
-    }
-}
-
-pub enum CircuitEvalSessionState<'a, 'b, S: FieldElement, T: CorrelationGenerator> {
-    WaitingToSend(CircuitEvalSessionWaitingToSend<'a, 'b, S, T>),
-    WaitingToGenCorrelation(CircuitEvalSessionWaitingToGenCorrelation<'a, 'b, S, T>),
-    WaitingToReceive(CircuitEvalSessionWaitingToReceive<'a, 'b, S, T>),
-    Finished(Vec<S>),
-}
-struct CircuitEvalSession<'a, 'b, S: FieldElement, T: CorrelationGenerator> {
-    circuit: &'b mut Circuit<S>,
-    layer_to_process: usize,
-    beaver_triple_gen: &'a mut T,
-    gates_in_layer_waiting_for_response: Option<Vec<usize>>,
-    party_id: bool,
-}
-
-// We use three different structs to enforce certain actions to be done only in certain states by the typing system.
-
-pub struct CircuitEvalSessionWaitingToSend<'a, 'b, S: FieldElement, T: CorrelationGenerator> {
-    session: CircuitEvalSession<'a, 'b, S, T>,
-}
-pub struct CircuitEvalSessionWaitingToGenCorrelation<
-    'a,
-    'b,
-    S: FieldElement,
-    T: CorrelationGenerator,
-> {
-    session: CircuitEvalSession<'a, 'b, S, T>,
-}
-pub struct CircuitEvalSessionWaitingToReceive<'a, 'b, S: FieldElement, T: CorrelationGenerator> {
-    session: CircuitEvalSession<'a, 'b, S, T>,
-}
-
-impl<'a, 'b, S: FieldElement, T: CorrelationGenerator> CircuitEvalSession<'a, 'b, S, T> {
-    fn generate_beaver_triples_for_layer(&mut self, layer: usize) -> Result<(), ()> {
-        let layer = self.circuit.gates.get_mut(layer).ok_or(())?;
-        layer
-            .iter_mut()
-            .try_for_each(|g| g.generate_correlation(self.beaver_triple_gen))
-    }
-}
-
-impl<'a, 'b, S: FieldElement, T: CorrelationGenerator> CircuitEvalSessionState<'a, 'b, S, T> {
-    pub fn new(
-        circuit: &'b mut Circuit<S>,
-        input_shares: &[S],
-        beaver_triple_gen: &'a mut T,
-        party_id: bool,
-    ) -> Self {
-        assert_eq!(circuit.input_wire_count(), input_shares.len());
-        circuit
-            .input_wires_mut()
-            .iter_mut()
-            .zip(input_shares.iter())
-            .for_each(|(input_wire, input_share)| *input_wire = *input_share);
-        let mut session = CircuitEvalSession {
-            circuit,
-            beaver_triple_gen,
-            layer_to_process: 0,
-            gates_in_layer_waiting_for_response: None,
-            party_id,
-        };
-        session
-            .generate_beaver_triples_for_layer(0)
-            .expect("Error generating beaver triples for first layer");
-        CircuitEvalSessionState::WaitingToSend(CircuitEvalSessionWaitingToSend { session })
-    }
-}
-
-impl<'a, 'b, S: FieldElement, T: CorrelationGenerator>
-    CircuitEvalSessionWaitingToSend<'a, 'b, S, T>
-{
-    pub fn fetch_layer_messages(self) -> (CircuitEvalSessionState<'a, 'b, S, T>, Vec<Msg<S>>) {
-        // Prepare beaver triples for this layer.
-        let mut session = self.session;
-        let layer_id = session.layer_to_process;
-        let current_layer = session
-            .circuit
-            .gates
-            .get(layer_id)
-            .expect("Missing layer, corrupt state!");
-
-        // Generate the messages.
-        let (msgs, ids) = current_layer
-            .iter()
-            .enumerate()
-            .filter_map(|(id, gate)| {
-                gate.eval_and_generate_msg(&mut session.circuit.wires, session.party_id)
-                    .expect("Failed to generate message for the gate")
-                    .map(|v| (v, id))
-            })
-            .unzip();
-        session.gates_in_layer_waiting_for_response = Some(ids);
-
-        let new_state = CircuitEvalSessionState::WaitingToGenCorrelation(
-            CircuitEvalSessionWaitingToGenCorrelation { session },
-        );
-        (new_state, msgs)
-    }
-}
-
-impl<'a, 'b, S: FieldElement, T: CorrelationGenerator>
-    CircuitEvalSessionWaitingToGenCorrelation<'a, 'b, S, T>
-{
-    pub fn gen_correlation_for_next_layer(mut self) -> CircuitEvalSessionState<'a, 'b, S, T> {
-        if self.session.circuit.gates.len() > self.session.layer_to_process + 1 {
-            self.session
-                .generate_beaver_triples_for_layer(self.session.layer_to_process + 1)
-                .expect("Failed to generate beaver triples for next layer!");
-        }
-        CircuitEvalSessionState::WaitingToReceive(CircuitEvalSessionWaitingToReceive {
-            session: self.session,
-        })
-    }
-}
-impl<'a, 'b, S: FieldElement, T: CorrelationGenerator>
-    CircuitEvalSessionWaitingToReceive<'a, 'b, S, T>
-{
-    pub fn handle_layer_responses(
-        self,
-        responses: Vec<Msg<S>>,
-    ) -> CircuitEvalSessionState<'a, 'b, S, T> {
-        let mut session = self.session;
-        let layer_id = session.layer_to_process;
-        let current_layer = session
-            .circuit
-            .gates
-            .get_mut(layer_id)
-            .expect("Current layer id missing, corrupt struct");
-        let gates_expecting_response = session
-            .gates_in_layer_waiting_for_response
-            .take()
-            .expect("Expecting gates vector isn't initalized, this has to be a bug!");
-        assert_eq!(responses.len(), gates_expecting_response.len());
-        for (response, gate_id_in_layer) in
-            responses.iter().zip(gates_expecting_response.into_iter())
-        {
-            current_layer[gate_id_in_layer].handle_peer_msg(&mut session.circuit.wires, response);
-        }
-        session.layer_to_process = layer_id + 1;
-        if session
-            .circuit
-            .gates
-            .get(session.layer_to_process)
-            .is_none()
-        {
-            CircuitEvalSessionState::Finished(
-                session
-                    .circuit
-                    .output_wires()
-                    .into_iter()
-                    .cloned()
-                    .collect(),
-            )
-        } else {
-            CircuitEvalSessionState::WaitingToSend(CircuitEvalSessionWaitingToSend { session })
-        }
-    }
+enum GateEvalState {
+    And(GF2, GF2, GF2),
+    WideAnd(GF2, GF128, GF128, GF128),
 }
 
 #[derive(Debug)]
 pub enum CircuitEvalError {
     CommunicatorError,
 }
-pub fn eval_circuit<C: Read + Write, S: FieldElement, T: CorrelationGenerator>(
-    mut circuit: Circuit<S>,
-    (mut my_input, peer_input): (Vec<S>, Vec<S>),
-    correlations: &mut T,
-    communicator: &mut Communicator<C>,
-    is_first: bool,
-) -> Result<Vec<S>, CircuitEvalError> {
-    assert_eq!(my_input.len(), peer_input.len());
-    let mut received_input = communicator
-        .exchange(peer_input)
-        .ok_or(CircuitEvalError::CommunicatorError)?;
+pub async fn two_party_eval_circuit<E: MultiPartyEngine>(
+    mut engine: E,
+    circuit: ParsedCircuit,
+    mut input: Vec<GF2>,
+    correlations: &mut FullPcgKey,
+) -> Result<Vec<GF2>, CircuitEvalError> {
+    let mut rng = E::rng();
+    let random_share: Vec<_> = input
+        .iter_mut()
+        .map(|t| {
+            let r = GF2::random(&mut rng);
+            *t += r;
+            r
+        })
+        .collect();
+    engine.broadcast(random_share);
+    let (mut received_input, _): (Vec<GF2>, PartyId) = engine.recv().await.unwrap();
+
+    let my_id = engine.my_party_id();
+    let peer_id = engine.party_ids()[0] + engine.party_ids()[1] - my_id;
+    let is_first = my_id < peer_id;
     if is_first {
-        my_input.append(&mut received_input);
+        input.append(&mut received_input);
     } else {
-        received_input.append(&mut my_input);
-        my_input = received_input;
+        received_input.append(&mut input);
+        input = received_input;
     }
-    let mut session =
-        CircuitEvalSessionState::new(&mut circuit, &my_input[..], correlations, is_first);
-    let party_output = loop {
-        let (session_temp, queries_to_send) = match session {
-            CircuitEvalSessionState::WaitingToSend(session) => session.fetch_layer_messages(),
-            _ => panic!(),
-        };
-        session = session_temp;
-        communicator
-            .send(queries_to_send)
-            .ok_or(CircuitEvalError::CommunicatorError)?;
-        session = match session {
-            CircuitEvalSessionState::WaitingToGenCorrelation(session) => {
-                session.gen_correlation_for_next_layer()
+
+    let wires_num =
+        circuit.input_wire_count + circuit.internal_wire_count + circuit.output_wire_count;
+    let mut wires = vec![GF2::zero(); wires_num];
+    wires[0..circuit.input_wire_count].copy_from_slice(&input);
+    for layer in circuit.gates {
+        let mut gate_eval_states = HashMap::new();
+        for (idx, gate) in layer.iter().enumerate() {
+            match &gate {
+                ParsedGate::NotGate { input, output } => {
+                    wires[*output] = wires[*input];
+                    if is_first {
+                        wires[*output].flip();
+                    }
+                }
+                ParsedGate::XorGate { input, output } => {
+                    wires[*output] = wires[input[0]] + wires[input[1]];
+                }
+                ParsedGate::AndGate { input, output: _ } => {
+                    let (a, b, c) = correlations.next_bit_beaver_triple();
+                    let msg = EvalMessage {
+                        opening: GateOpening::And(wires[input[0]] + a, wires[input[1]] + b),
+                        gate_idx_in_layer: idx,
+                    };
+                    engine.broadcast(msg);
+                    gate_eval_states.insert(idx, GateEvalState::And(a, b, c));
+                }
+                ParsedGate::WideAndGate {
+                    input,
+                    input_bit,
+                    output: _,
+                } => {
+                    let mut wide_input_field = GF128::zero();
+                    for i in 0..input.len() {
+                        wide_input_field.set_bit(wires[input[i]].into(), i);
+                    }
+                    let (a, wb, wc) = correlations.next_wide_beaver_triple();
+                    let msg = EvalMessage {
+                        opening: GateOpening::WideAnd(a + wires[*input_bit], wb + wide_input_field),
+                        gate_idx_in_layer: idx,
+                    };
+                    engine.broadcast(msg);
+                    gate_eval_states
+                        .insert(idx, GateEvalState::WideAnd(a, wb, wc, wide_input_field));
+                }
             }
-            _ => panic!(),
-        };
-        let queries_received: Vec<_> = communicator
-            .receive()
-            .ok_or(CircuitEvalError::CommunicatorError)?;
-        session = match session {
-            CircuitEvalSessionState::WaitingToReceive(session) => {
-                session.handle_layer_responses(queries_received)
-            }
-            _ => panic!(),
-        };
-        if let CircuitEvalSessionState::Finished(party_output) = session {
-            break party_output;
         }
-    };
-    Ok(party_output)
+        while gate_eval_states.len() != 0 {
+            let (msg, _): (EvalMessage, PartyId) = engine.recv().await.unwrap();
+            let gate_idx = msg.gate_idx_in_layer;
+            match msg.opening {
+                GateOpening::And(ax, by) => {
+                    let (input_wires, output_wire) = match layer[gate_idx] {
+                        ParsedGate::AndGate { input, output } => (input, output),
+                        _ => {
+                            return Err(CircuitEvalError::CommunicatorError);
+                        }
+                    };
+                    let (a, b, c) = match gate_eval_states.remove(&gate_idx).unwrap() {
+                        GateEvalState::And(a, b, c) => (a, b, c),
+                        _ => return Err(CircuitEvalError::CommunicatorError),
+                    };
+                    let x_share = wires[input_wires[0]];
+                    let y_share = wires[input_wires[1]];
+                    let a_plus_x = ax + x_share + a;
+                    let b_plus_y = by + y_share + b;
+                    wires[output_wire] = b_plus_y * x_share - b * a_plus_x + c;
+                }
+                GateOpening::WideAnd(ax, wby) => {
+                    let (_, input_bit_wire, output_wire) = match layer[gate_idx] {
+                        ParsedGate::WideAndGate {
+                            input,
+                            input_bit,
+                            output,
+                        } => (input, input_bit, output),
+                        _ => {
+                            return Err(CircuitEvalError::CommunicatorError);
+                        }
+                    };
+                    let (a, wb, wc, preprocessed_input) =
+                        match gate_eval_states.remove(&gate_idx).unwrap() {
+                            GateEvalState::WideAnd(a, wb, wc, preprocessed_input) => {
+                                (a, wb, wc, preprocessed_input)
+                            }
+                            _ => return Err(CircuitEvalError::CommunicatorError),
+                        };
+                    let a_plus_x = ax + wires[input_bit_wire] + a;
+                    let b_plus_y = wby + preprocessed_input + wb;
+                    let output_share = b_plus_y * wires[input_bit_wire] - wb * a_plus_x + wc;
+                    for i in 0..output_wire.len() {
+                        wires[output_wire[i]] = output_share.get_bit(i).into();
+                    }
+                }
+            }
+        }
+    }
+    Ok(wires[wires.len() - circuit.output_wire_count..].to_vec())
 }
 
+fn local_eval_circuit(circuit: &ParsedCircuit, input: &[GF2]) -> Vec<GF2> {
+    debug_assert_eq!(input.len(), circuit.input_wire_count);
+    let mut wires =
+        vec![
+            GF2::zero();
+            circuit.input_wire_count + circuit.output_wire_count + circuit.internal_wire_count
+        ];
+    wires[0..circuit.input_wire_count].copy_from_slice(input);
+    for layer in circuit.gates.iter() {
+        for gate in layer {
+            match gate {
+                &ParsedGate::AndGate { input, output } => {
+                    wires[output] = wires[input[0]] * wires[input[1]];
+                }
+                &ParsedGate::NotGate { input, output } => {
+                    wires[output] = wires[input];
+                    wires[output].flip();
+                }
+                &ParsedGate::XorGate { input, output } => {
+                    wires[output] = wires[input[0]] + wires[input[1]];
+                }
+                &ParsedGate::WideAndGate {
+                    input,
+                    input_bit,
+                    output,
+                } => {
+                    for i in 0..input.len() {
+                        let input_bit_val = wires[input_bit];
+                        wires[output[i]] = input_bit_val * wires[input[i]];
+                    }
+                }
+            }
+        }
+    }
+    wires.drain(0..wires.len() - circuit.output_wire_count);
+    wires
+}
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use tokio::join;
+
     use super::bristol_fashion::{parse_bristol, ParsedCircuit};
-    use super::Circuit;
-    use crate::circuit_eval::CircuitEvalSessionState;
-    use crate::fields::{FieldElement, GF128, GF2};
-    use crate::pcg::codes::EACode;
-    use crate::pcg::full_key::{CorrelationGenerator, FullPcgKey};
-    use crate::pcg::receiver_key::PcgKeyReceiver;
-    use crate::pcg::sender_key::PcgKeySender;
-    use crate::pcg::sparse_vole::scalar_party::OnlineSparseVoleKey as ScalarOnlineSparseVoleKey;
-    use crate::pcg::sparse_vole::vector_party::OnlineSparseVoleKey as VectorOnlineSparseVoleKey;
-    use crate::pprf::usize_to_bits;
-    use crate::pseudorandom::prf::PrfInput;
-    use crate::pseudorandom::prg::PrgValue;
-    use crate::pseudorandom::KEY_SIZE;
+    use crate::{
+        circuit_eval::{local_eval_circuit, two_party_eval_circuit},
+        engine::{LocalRouter, MultiPartyEngine},
+        fields::{FieldElement, GF2},
+        pcg::FullPcgKey,
+    };
 
-    fn get_prf_keys(amount: u8) -> Vec<PrgValue> {
-        let mut base_prf_key = [0u8; KEY_SIZE];
-        (0..amount)
-            .map(|i| {
-                base_prf_key[KEY_SIZE - 1] = i;
-                base_prf_key.into()
-            })
-            .collect()
-    }
-
-    fn get_puncturing_points<const INPUT_BITLEN: usize>(amount: u8) -> Vec<PrfInput<INPUT_BITLEN>> {
-        (0..amount)
-            .map(|i| usize_to_bits(100 * usize::from(i) + 1).into())
-            .collect()
-    }
-
-    fn eval_mpc_circuit<S: FieldElement>(
-        first_party_circuit: &mut Circuit<S>,
-        second_party_circuit: &mut Circuit<S>,
-        input_a: &[S],
-        input_b: &[S],
-        beaver_triple_scalar_key: &mut impl CorrelationGenerator,
-        beaver_triple_vector_key: &mut impl CorrelationGenerator,
-    ) -> (Vec<S>, Vec<S>) {
-        let mut first_party_session = CircuitEvalSessionState::new(
-            first_party_circuit,
-            input_a,
-            beaver_triple_scalar_key,
-            false,
-        );
-        let mut second_party_session = CircuitEvalSessionState::new(
-            second_party_circuit,
-            input_b,
-            beaver_triple_vector_key,
-            true,
-        );
-        let (first_party_output, second_party_output) = loop {
-            let (first_party_session_temp, first_party_queries) = match first_party_session {
-                CircuitEvalSessionState::WaitingToSend(session) => session.fetch_layer_messages(),
-                _ => panic!(),
-            };
-            first_party_session = first_party_session_temp;
-            let (second_party_session_temp, second_party_queries) = match second_party_session {
-                CircuitEvalSessionState::WaitingToSend(session) => session.fetch_layer_messages(),
-                _ => panic!(),
-            };
-            second_party_session = second_party_session_temp;
-            first_party_session = match first_party_session {
-                CircuitEvalSessionState::WaitingToGenCorrelation(session) => {
-                    session.gen_correlation_for_next_layer()
-                }
-                _ => panic!(),
-            };
-            first_party_session = match first_party_session {
-                CircuitEvalSessionState::WaitingToReceive(session) => {
-                    session.handle_layer_responses(second_party_queries)
-                }
-                _ => panic!(),
-            };
-            second_party_session = match second_party_session {
-                CircuitEvalSessionState::WaitingToGenCorrelation(session) => {
-                    session.gen_correlation_for_next_layer()
-                }
-                _ => panic!(),
-            };
-            second_party_session = match second_party_session {
-                CircuitEvalSessionState::WaitingToReceive(session) => {
-                    session.handle_layer_responses(first_party_queries)
-                }
-                _ => panic!(),
-            };
-            if let CircuitEvalSessionState::Finished(first_party_output) = first_party_session {
-                if let CircuitEvalSessionState::Finished(second_party_output) = second_party_session
-                {
-                    break (first_party_output, second_party_output);
-                }
-                panic!();
-            }
-        };
-        (first_party_output, second_party_output)
-    }
-
-    fn gen_sparse_vole_online_keys<
-        const WEIGHT: u8,
-        const INPUT_BITLEN: usize,
-        const CODE_WEIGHT: usize,
-    >() -> (
-        PcgKeySender<ScalarOnlineSparseVoleKey<CODE_WEIGHT, EACode<CODE_WEIGHT>>>,
-        PcgKeyReceiver<VectorOnlineSparseVoleKey<CODE_WEIGHT, EACode<CODE_WEIGHT>>>,
-    ) {
-        let scalar = GF128::from([1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
-        let prf_keys = get_prf_keys(WEIGHT);
-        let puncturing_points: Vec<PrfInput<INPUT_BITLEN>> = get_puncturing_points(WEIGHT);
-        let keys = crate::pcg::sparse_vole::trusted_deal::<INPUT_BITLEN, CODE_WEIGHT>(
-            &scalar,
-            puncturing_points,
-            prf_keys,
-        );
-        (PcgKeySender::from(keys.0), PcgKeyReceiver::from(keys.1))
-    }
-
-    fn test_circuit(circuit: ParsedCircuit, input: &[GF2], random_share: &[GF2]) -> Vec<GF2> {
-        const WEIGHT: u8 = 128;
+    async fn test_circuit(circuit: ParsedCircuit, input: &[GF2]) -> Vec<GF2> {
+        const PPRF_COUNT: usize = 50;
         const CODE_WEIGHT: usize = 8;
-        const INPUT_BITLEN: usize = 12;
-        assert_eq!(input.len(), random_share.len());
+        const PPRF_DEPTH: usize = 20;
+        const CODE_SEED: [u8; 16] = [1u8; 16];
         assert_eq!(input.len(), circuit.input_wire_count);
-        let mut circuit_local = Circuit::from(circuit.clone());
-        let local_computation_output = circuit_local.eval_circuit(input).unwrap();
+        let party_ids = [1, 2];
+        let party_ids_set = HashSet::from_iter(party_ids.iter().copied());
+        let (local_router, mut execs) = LocalRouter::new("root_tag".into(), &party_ids_set);
+        let router_handle = tokio::spawn(local_router.launch());
 
-        let (scalar_online_key_primary, vector_online_key_primary) =
-            gen_sparse_vole_online_keys::<WEIGHT, INPUT_BITLEN, CODE_WEIGHT>();
-        let (scalar_online_key_seconary, vector_online_key_secondary) =
-            gen_sparse_vole_online_keys::<WEIGHT, INPUT_BITLEN, CODE_WEIGHT>();
+        let a_exec = execs.remove(&party_ids[0]).unwrap();
+        let b_exec = execs.remove(&party_ids[1]).unwrap();
 
-        let mut beaver_triple_scalar_key = FullPcgKey::new(
-            scalar_online_key_primary,
-            vector_online_key_secondary,
-            crate::pcg::full_key::Role::Sender,
-        );
-        let mut beaver_triple_vector_key = FullPcgKey::new(
-            scalar_online_key_seconary,
-            vector_online_key_primary,
-            crate::pcg::full_key::Role::Receiver,
+        let input_a = input[0..input.len() / 2].to_vec();
+        let input_b: Vec<_> = input[input.len() / 2..].to_vec();
+        let full_key_a = tokio::spawn(FullPcgKey::new(
+            a_exec.sub_protocol(&"PCG"),
+            PPRF_COUNT,
+            PPRF_DEPTH,
+            CODE_SEED,
+            CODE_WEIGHT,
+        ));
+
+        let full_key_b = FullPcgKey::new(
+            b_exec.sub_protocol(&"PCG"),
+            PPRF_COUNT,
+            PPRF_DEPTH,
+            CODE_SEED,
+            CODE_WEIGHT,
         );
 
-        let input_a = random_share.to_vec();
-        let input_b: Vec<_> = input
-            .iter()
-            .zip(random_share.iter())
-            .map(|(a, b)| *a + *b)
-            .collect();
-        let (output_a, output_b) = eval_mpc_circuit(
-            &mut Circuit::from(circuit.clone()),
-            &mut Circuit::from(circuit.clone()),
-            &input_a,
-            &input_b,
-            &mut beaver_triple_scalar_key,
-            &mut beaver_triple_vector_key,
-        );
+        let (full_key_a, full_key_b) = join!(full_key_a, full_key_b);
+        let (mut full_key_a, mut full_key_b) = (full_key_a.unwrap().unwrap(), full_key_b.unwrap());
+
+        let output_a = two_party_eval_circuit(a_exec, circuit.clone(), input_a, &mut full_key_a);
+        let output_b = two_party_eval_circuit(b_exec, circuit.clone(), input_b, &mut full_key_b);
+        let (output_a, output_b) = join!(output_a, output_b);
+        let (output_a, output_b) = (output_a.unwrap(), output_b.unwrap());
         assert_eq!(output_a.len(), output_b.len());
         assert_eq!(output_a.len(), circuit.output_wire_count);
+        let local_computation_output = local_eval_circuit(&circuit, input);
         for i in 0..circuit.output_wire_count {
             assert_eq!(output_a[i] + output_b[i], local_computation_output[i]);
         }
+        router_handle.await.unwrap().unwrap();
         local_computation_output
     }
 
-    #[test]
-    fn test_small_circuit() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+    async fn test_small_circuit() {
         let logical_or_circuit = [
             "4 6",
             "2 1 1",
@@ -466,35 +275,33 @@ mod tests {
         ];
         let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
             .expect("Failed to parse");
-        let mut circuit = Circuit::from(parsed_circuit.clone());
 
         // Test classical eval.
         assert_eq!(
-            circuit.eval_circuit(&[GF2::one(), GF2::one()]),
-            Some(vec![GF2::one()])
+            local_eval_circuit(&parsed_circuit, &[GF2::one(), GF2::one()]),
+            vec![GF2::one()]
         );
         assert_eq!(
-            circuit.eval_circuit(&[GF2::zero(), GF2::one()]),
-            Some(vec![GF2::one()])
+            local_eval_circuit(&parsed_circuit, &[GF2::zero(), GF2::one()]),
+            vec![GF2::one()]
         );
         assert_eq!(
-            circuit.eval_circuit(&[GF2::one(), GF2::zero()]),
-            Some(vec![GF2::one()])
+            local_eval_circuit(&parsed_circuit, &[GF2::one(), GF2::zero()]),
+            vec![GF2::one()]
         );
         assert_eq!(
-            circuit.eval_circuit(&[GF2::zero(), GF2::zero()]),
-            Some(vec![GF2::zero()])
+            local_eval_circuit(&parsed_circuit, &[GF2::zero(), GF2::zero()]),
+            vec![GF2::zero()]
         );
 
         let input = vec![GF2::one(), GF2::zero()];
-        let rand = vec![GF2::zero(), GF2::zero()];
-        let output = test_circuit(parsed_circuit, &input, &rand);
+        let output = test_circuit(parsed_circuit, &input).await;
 
         assert_eq!(output[0], GF2::one());
     }
 
-    #[test]
-    fn test_wide_and() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+    async fn test_wide_and() {
         let logical_or_circuit = [
             "1 257",
             "2 128 1",
@@ -504,25 +311,23 @@ mod tests {
         ];
         let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
             .expect("Failed to parse");
-        let mut circuit = Circuit::from(parsed_circuit.clone());
 
         let mut input = [GF2::one(); 129];
         // Test classical eval.
         assert_eq!(
-            circuit.eval_circuit(&input[..]),
-            Some(Vec::from_iter(input[1..].iter().cloned()))
+            local_eval_circuit(&parsed_circuit, &input[..]),
+            Vec::from_iter(input[1..].iter().cloned())
         );
 
         input[0] = GF2::zero();
 
         assert_eq!(
-            circuit.eval_circuit(&input[..]),
-            Some(vec![GF2::zero(); 128])
+            local_eval_circuit(&parsed_circuit, &input[..]),
+            vec![GF2::zero(); 128]
         );
 
         let input = vec![GF2::one(); 129];
-        let rand = vec![GF2::zero(); 129];
-        let output = test_circuit(parsed_circuit, &input, &rand);
+        let output = test_circuit(parsed_circuit, &input).await;
 
         assert_eq!(output, vec![GF2::one(); 128]);
     }
