@@ -203,14 +203,14 @@ mod tests {
     use tokio::join;
 
     use super::{ChosenMessageOTReceiver, ChosenMessageOTSender};
-    use crate::{engine::LocalRouter, fields::GF128};
+    use crate::{engine::LocalRouter, fields::GF128, uc_tags::UCTag};
 
     #[tokio::test]
     async fn test_chosen_message() {
         const BATCH_SIZE: usize = 1;
         let party_ids = [1, 2];
         let party_ids_set = HashSet::from(party_ids);
-        let (router, mut engines) = LocalRouter::new("root tag".into(), &party_ids_set);
+        let (router, mut engines) = LocalRouter::new(UCTag::new(&"root tag"), &party_ids_set);
         let router_handle = tokio::spawn(router.launch());
         let mut rng = thread_rng();
 

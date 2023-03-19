@@ -22,6 +22,8 @@ bincode = "1"
 chacha20 = "0.9"
 futures = "0.3"
 aes-prng = "0.2"
+tokio-tungstenite = "0.18"
+url = { version = "2" }
 
 [dev-dependencies]
 criterion = "0.3"

@@ -227,7 +227,7 @@ mod test {
     use tokio::join;
 
     use super::{receiver_pcg_key, sender_pcg_key};
-    use crate::{engine::LocalRouter, pcg::FullPcgKey};
+    use crate::{engine::LocalRouter, pcg::FullPcgKey, uc_tags::UCTag};
     use aes_prng::AesRng;
     use rand_core::SeedableRng;
 
@@ -240,7 +240,7 @@ mod test {
         let seed = [0; 16];
         let party_ids = [1, 2];
         let party_ids_set = HashSet::from_iter(party_ids.iter().copied());
-        let (router, mut engines) = LocalRouter::new("root tag".into(), &party_ids_set);
+        let (router, mut engines) = LocalRouter::new(UCTag::new(&"root tag"), &party_ids_set);
         let sender_engine = engines.remove(&party_ids[0]).unwrap();
         let receiver_engine = engines.remove(&party_ids[1]).unwrap();
 
@@ -281,7 +281,8 @@ mod test {
         let seed = [0; 16];
         let party_ids = [1, 2];
         let party_ids_set = HashSet::from_iter(party_ids.iter().copied());
-        let (router, mut engines) = LocalRouter::new("root tag".into(), &party_ids_set);
+        let (router, mut engines) =
+            LocalRouter::new(UCTag::new(&"root tag").into(), &party_ids_set);
         let sender_engine = engines.remove(&party_ids[0]).unwrap();
         let receiver_engine = engines.remove(&party_ids[1]).unwrap();
 

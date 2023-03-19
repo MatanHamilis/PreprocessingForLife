@@ -91,7 +91,7 @@ pub async fn pprf_receiver<T: MultiPartyEngine>(
 #[cfg(test)]
 mod tests {
     use super::{pprf_receiver, pprf_sender};
-    use crate::{engine::LocalRouter, fields::GF128};
+    use crate::{engine::LocalRouter, fields::GF128, uc_tags::UCTag};
     use rand::thread_rng;
     use std::collections::HashSet;
     use tokio::join;
@@ -101,7 +101,7 @@ mod tests {
         const PPRF_DEPTH: usize = 20;
         let party_ids = [1, 2];
         let party_ids_set = HashSet::from(party_ids);
-        let (router, mut engines) = LocalRouter::new("root tag".into(), &party_ids_set);
+        let (router, mut engines) = LocalRouter::new(UCTag::new(&"root tag"), &party_ids_set);
         let router_handle = tokio::spawn(router.launch());
         let pprf_sender_engine = engines.remove(&party_ids[0]).unwrap();
         let pprf_receiver_engine = engines.remove(&party_ids[1]).unwrap();

@@ -210,6 +210,7 @@ mod tests {
         engine::{LocalRouter, MultiPartyEngine},
         fields::{FieldElement, GF2},
         pcg::FullPcgKey,
+        uc_tags::UCTag,
     };
 
     async fn test_circuit(circuit: ParsedCircuit, input: &[GF2]) -> Vec<GF2> {
@@ -220,7 +221,7 @@ mod tests {
         assert_eq!(input.len(), circuit.input_wire_count);
         let party_ids = [1, 2];
         let party_ids_set = HashSet::from_iter(party_ids.iter().copied());
-        let (local_router, mut execs) = LocalRouter::new("root_tag".into(), &party_ids_set);
+        let (local_router, mut execs) = LocalRouter::new(UCTag::new(&"root_tag"), &party_ids_set);
         let router_handle = tokio::spawn(local_router.launch());
 
         let a_exec = execs.remove(&party_ids[0]).unwrap();

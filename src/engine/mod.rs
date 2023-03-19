@@ -1,3 +1,5 @@
+mod network_router;
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -28,7 +30,7 @@ pub trait MultiPartyEngine: Send + Sync + 'static {
 
 #[derive(Debug)]
 pub enum DownstreamMessageType {
-    Register(UnboundedSender<IncomingMessage>),
+    Register(UnboundedSender<UpstreamMessage>),
     Deregister,
     Data(PartyId, Arc<Box<[u8]>>),
 }
@@ -41,7 +43,7 @@ pub struct DownstreamMessage {
 }
 
 #[derive(Debug)]
-pub struct IncomingMessage {
+pub struct UpstreamMessage {
     from: PartyId,
     content: Arc<Box<[u8]>>,
 }
@@ -51,7 +53,7 @@ pub struct MultiPartyEngineImpl {
     tag: UCTag,
     id: PartyId,
     downstream_sender: UnboundedSender<DownstreamMessage>,
-    upstream_receiver: UnboundedReceiver<IncomingMessage>,
+    upstream_receiver: UnboundedReceiver<UpstreamMessage>,
     parties: Arc<Box<[PartyId]>>,
 }
 
@@ -165,7 +167,7 @@ impl Drop for MultiPartyEngineImpl {
 
 pub struct LocalRouter {
     downstream_receiver: UnboundedReceiver<DownstreamMessage>,
-    upstream_senders: HashMap<(PartyId, UCTag), UnboundedSender<IncomingMessage>>,
+    upstream_senders: HashMap<(PartyId, UCTag), UnboundedSender<UpstreamMessage>>,
     root_tag: UCTag,
 }
 
@@ -196,7 +198,7 @@ impl LocalRouter {
         (output, engines)
     }
     pub async fn launch(mut self) -> Result<(), ()> {
-        let mut pending = HashMap::<(PartyId, UCTag), Vec<IncomingMessage>>::new();
+        let mut pending = HashMap::<(PartyId, UCTag), Vec<UpstreamMessage>>::new();
         loop {
             let DownstreamMessage { from, tag, msg } =
                 self.downstream_receiver.recv().await.ok_or(())?;
@@ -216,7 +218,7 @@ impl LocalRouter {
                     }
                 }
                 DownstreamMessageType::Data(dest, content) => {
-                    let message = IncomingMessage { from, content };
+                    let message = UpstreamMessage { from, content };
                     if let Some(v) = self.upstream_senders.get(&(dest, tag)) {
                         v.send(message).unwrap();
                     } else {
@@ -230,6 +232,8 @@ impl LocalRouter {
 
 #[cfg(test)]
 mod tests {
+    use crate::uc_tags::UCTag;
+
     use super::LocalRouter;
     use super::MultiPartyEngine;
     use super::PartyId;
@@ -238,7 +242,7 @@ mod tests {
     async fn test_simple() {
         let party_ids = [1u64, 2u64, 3u64];
         let parties_set = HashSet::from_iter(party_ids.iter().copied());
-        let (router, mut engines) = LocalRouter::new("root_tag".into(), &parties_set);
+        let (router, mut engines) = LocalRouter::new(UCTag::new(&"root_tag"), &parties_set);
         let router_handle = tokio::spawn(router.launch());
         for p in party_ids.iter() {
             let p_eng = engines.get_mut(p).unwrap();
