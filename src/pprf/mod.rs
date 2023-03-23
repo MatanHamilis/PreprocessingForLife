@@ -91,7 +91,11 @@ pub async fn pprf_receiver<T: MultiPartyEngine>(
 #[cfg(test)]
 mod tests {
     use super::{pprf_receiver, pprf_sender};
-    use crate::{engine::LocalRouter, fields::GF128, uc_tags::UCTag};
+    use crate::{
+        engine::LocalRouter,
+        fields::{FieldElement, GF128},
+        uc_tags::UCTag,
+    };
     use rand::thread_rng;
     use std::collections::HashSet;
     use tokio::join;

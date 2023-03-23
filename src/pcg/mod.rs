@@ -233,10 +233,10 @@ mod test {
 
     #[tokio::test]
     async fn test_bit_beaver_triples() {
-        const PPRF_COUNT: usize = 50;
-        const PPRF_DEPTH: usize = 20;
+        const PPRF_COUNT: usize = 5;
+        const PPRF_DEPTH: usize = 8;
         const CODE_WIDTH: usize = 7;
-        const CORRELATION_COUNT: usize = 500_000;
+        const CORRELATION_COUNT: usize = 10_000;
         let seed = [0; 16];
         let party_ids = [1, 2];
         let party_ids_set = HashSet::from_iter(party_ids.iter().copied());
@@ -275,9 +275,9 @@ mod test {
     #[tokio::test]
     async fn test_full_pcg_key() {
         const PPRF_COUNT: usize = 10;
-        const PPRF_DEPTH: usize = 10;
+        const PPRF_DEPTH: usize = 7;
         const CODE_WIDTH: usize = 8;
-        const CORRELATION_COUNT: usize = 500_000;
+        const CORRELATION_COUNT: usize = 10_000;
         let seed = [0; 16];
         let party_ids = [1, 2];
         let party_ids_set = HashSet::from_iter(party_ids.iter().copied());

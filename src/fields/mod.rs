@@ -5,6 +5,8 @@ pub use gf128::GF128;
 pub use gf2::GF2;
 pub use packed_gf2::PackedGF2Array;
 pub use packed_gf2::PackedGF2U64;
+use rand::CryptoRng;
+use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::Debug;
@@ -36,4 +38,5 @@ pub trait FieldElement:
 
     const BITS: usize;
     fn set_bit(&mut self, bit: bool, idx: usize);
+    fn random(rng: impl CryptoRng + RngCore) -> Self;
 }

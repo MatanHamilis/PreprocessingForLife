@@ -44,6 +44,9 @@ impl FieldElement for PackedGF2U64 {
     //     }
     //     Some(PackedGF2U64(output))
     // }
+    fn random(mut rng: impl rand::CryptoRng + rand::RngCore) -> Self {
+        Self(rng.next_u64())
+    }
 }
 
 impl Neg for PackedGF2U64 {
@@ -199,6 +202,9 @@ impl<const SIZE: usize> FieldElement for PackedGF2Array<SIZE> {
         let entry = idx / PackedGF2U64::BITS;
         let offset = idx & (PackedGF2U64::BITS - 1);
         self.0[entry].set_bit(bit, offset)
+    }
+    fn random(mut rng: impl rand::CryptoRng + rand::RngCore) -> Self {
+        Self(core::array::from_fn(|_| PackedGF2U64::random(&mut rng)))
     }
 }
 

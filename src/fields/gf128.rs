@@ -225,6 +225,11 @@ impl FieldElement for GF128 {
             );
         }
     }
+    /// Returns a random field element
+    fn random(mut rng: impl RngCore + CryptoRng) -> Self {
+        GF128(u64x2::from_array([rng.next_u64(), rng.next_u64()]))
+    }
+
     // fn from_bits(bits: &[bool]) -> Option<Self> {
     //     if bits.len() != Self::BITS {
     //         return None;
@@ -334,11 +339,6 @@ impl GF128 {
         }
         .into();
         output ^ reduced_half
-    }
-
-    /// Returns a random field element
-    pub fn random(mut rng: impl RngCore + CryptoRng) -> Self {
-        GF128(u64x2::from_array([rng.next_u64(), rng.next_u64()]))
     }
 
     pub fn random_not_cryptographic(mut rng: impl RngCore) -> Self {

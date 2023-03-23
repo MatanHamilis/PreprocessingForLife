@@ -1,11 +1,12 @@
 mod network_router;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
 use async_trait::async_trait;
+use blake3::Hash;
 use rand::{rngs::ThreadRng, thread_rng};
 use rand_core::{CryptoRng, RngCore};
 use serde::{de::DeserializeOwned, Serialize};
@@ -18,8 +19,10 @@ pub type PartyId = u64;
 pub trait MultiPartyEngine: Send + Sync + 'static {
     type Rng: CryptoRng + RngCore;
     fn send(&mut self, msg: impl Serialize, dest: PartyId);
+    fn send_multicast(&mut self, msg: impl Serialize, dest: &[PartyId]);
     fn broadcast(&mut self, msg: impl Serialize);
     async fn recv<T: DeserializeOwned>(&mut self) -> Option<(T, PartyId)>;
+    async fn recv_from<T: DeserializeOwned>(&mut self, from: PartyId) -> Option<T>;
     fn sub_protocol_with(&self, tag: impl Serialize, parties: Arc<Box<[PartyId]>>) -> Self;
     fn sub_protocol(&self, tag: impl Serialize) -> Self;
     fn my_party_id(&self) -> PartyId;
@@ -55,6 +58,7 @@ pub struct MultiPartyEngineImpl {
     downstream_sender: UnboundedSender<DownstreamMessage>,
     upstream_receiver: UnboundedReceiver<UpstreamMessage>,
     parties: Arc<Box<[PartyId]>>,
+    buffer: VecDeque<UpstreamMessage>,
 }
 
 impl MultiPartyEngineImpl {
@@ -77,6 +81,7 @@ impl MultiPartyEngineImpl {
             downstream_sender,
             upstream_receiver,
             parties,
+            buffer: VecDeque::new(),
         };
         output
     }
@@ -116,6 +121,12 @@ impl MultiPartyEngine for MultiPartyEngineImpl {
         let content = Arc::new(Self::serialize_msg(msg));
         self.send_serialized(content, dest);
     }
+    fn send_multicast(&mut self, msg: impl Serialize, dest: &[PartyId]) {
+        let content = Arc::new(Self::serialize_msg(msg));
+        for p in dest {
+            self.send_serialized(content.clone(), *p);
+        }
+    }
     fn broadcast(&mut self, msg: impl Serialize) {
         let content = Arc::new(Self::serialize_msg(msg));
         let my_id = self.my_party_id();
@@ -137,9 +148,35 @@ impl MultiPartyEngine for MultiPartyEngineImpl {
         engine
     }
     async fn recv<T: DeserializeOwned>(&mut self) -> Option<(T, PartyId)> {
-        let received = self.upstream_receiver.recv().await?;
+        let received = if let Some(v) = self.buffer.pop_front() {
+            v
+        } else {
+            self.upstream_receiver.recv().await?
+        };
         let val = bincode::deserialize(&received.content).ok()?;
         Some((val, received.from))
+    }
+    async fn recv_from<T: DeserializeOwned>(&mut self, from: PartyId) -> Option<T> {
+        let upstream_msg = if let Some((idx, _)) = self
+            .buffer
+            .iter()
+            .enumerate()
+            .find(|(idx, m)| m.from == from)
+        {
+            let v = self.buffer.remove(idx).unwrap();
+            v
+        } else {
+            loop {
+                let msg_got = self.upstream_receiver.recv().await?;
+                if msg_got.from == from {
+                    break msg_got;
+                } else {
+                    self.buffer.push_back(msg_got)
+                }
+            }
+        };
+        let val = bincode::deserialize(&upstream_msg.content).ok()?;
+        Some(val)
     }
     fn sub_protocol_with(&self, tag: impl Serialize, parties: Arc<Box<[PartyId]>>) -> Self {
         for p in parties.iter() {

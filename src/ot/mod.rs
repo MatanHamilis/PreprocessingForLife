@@ -203,7 +203,11 @@ mod tests {
     use tokio::join;
 
     use super::{ChosenMessageOTReceiver, ChosenMessageOTSender};
-    use crate::{engine::LocalRouter, fields::GF128, uc_tags::UCTag};
+    use crate::{
+        engine::LocalRouter,
+        fields::{FieldElement, GF128},
+        uc_tags::UCTag,
+    };
 
     #[tokio::test]
     async fn test_chosen_message() {

@@ -18,9 +18,6 @@ impl GF2 {
     pub fn flip(&mut self) {
         self.v ^= 1;
     }
-    pub fn random<T: CryptoRng + RngCore>(rng: &mut T) -> Self {
-        GF2::from(rng.next_u32() & 1 == 0)
-    }
 
     pub fn random_not_cryptographic<T: RngCore>(rng: &mut T) -> Self {
         GF2::from(rng.next_u32() & 1 == 0)
@@ -68,6 +65,9 @@ impl Sum for GF2 {
     }
 }
 impl FieldElement for GF2 {
+    fn random(mut rng: impl RngCore + CryptoRng) -> Self {
+        GF2::from(rng.next_u32() & 1 == 0)
+    }
     const BITS: usize = 1;
     fn one() -> Self {
         Self { v: 1u8 }

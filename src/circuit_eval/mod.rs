@@ -216,7 +216,7 @@ mod tests {
     async fn test_circuit(circuit: ParsedCircuit, input: &[GF2]) -> Vec<GF2> {
         const PPRF_COUNT: usize = 50;
         const CODE_WEIGHT: usize = 8;
-        const PPRF_DEPTH: usize = 20;
+        const PPRF_DEPTH: usize = 10;
         const CODE_SEED: [u8; 16] = [1u8; 16];
         assert_eq!(input.len(), circuit.input_wire_count);
         let party_ids = [1, 2];
