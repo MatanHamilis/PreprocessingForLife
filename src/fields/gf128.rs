@@ -5,6 +5,7 @@ use rand_core::{CryptoRng, RngCore};
 use serde::de::Visitor;
 use serde::ser::SerializeTuple;
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 use std::iter::Sum;
 use std::mem::transmute;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, ShlAssign, Sub, SubAssign};
@@ -382,12 +383,39 @@ impl GF128 {
     }
 }
 
+impl Display for GF128 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for i in 0..128 {
+            write!(f, "{}", self.get_bit(i) as u8)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::FieldElement;
     use std::simd::u64x2;
 
     use super::{GF128, IRREDUCIBLE_POLYNOMIAL, IRREDUCIBLE_POLYNOMIAL_U64};
+
+    #[test]
+    pub fn test_bit_manipulation() {
+        let mut a = GF128::zero();
+        for i in 0..128 {
+            assert!(!a.get_bit(i))
+        }
+        for i in (0..128).step_by(2) {
+            a.set_bit(true, i);
+        }
+        for i in 0..128 {
+            if i & 1 == 0 {
+                assert!(a.get_bit(i));
+            } else {
+                assert!(!a.get_bit(i));
+            }
+        }
+    }
     #[test]
     pub fn test_mul() {
         let a = GF128(u64x2::from_array([0, 1]));

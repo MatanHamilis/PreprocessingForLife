@@ -14,7 +14,7 @@ use crate::pcg::FullPcgKey;
 
 use self::bristol_fashion::ParsedCircuit;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 enum GateOpening {
     And(GF2, GF2),
     WideAnd(GF2, GF128),
@@ -22,8 +22,8 @@ enum GateOpening {
 
 #[derive(Serialize, Deserialize)]
 struct EvalMessage {
-    opening: GateOpening,
-    gate_idx_in_layer: usize,
+    pub opening: GateOpening,
+    pub gate_idx_in_layer: usize,
 }
 
 enum GateEvalState {
@@ -35,40 +35,31 @@ enum GateEvalState {
 pub enum CircuitEvalError {
     CommunicatorError,
 }
-pub async fn two_party_eval_circuit<E: MultiPartyEngine>(
+// We assume the input to the circuit is already additively shared between the parties.
+pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
     mut engine: E,
     circuit: ParsedCircuit,
-    mut input: Vec<GF2>,
-    correlations: &mut FullPcgKey,
+    input: Vec<GF2>,
+    correlations: &mut HashMap<PartyId, FullPcgKey>,
 ) -> Result<Vec<GF2>, CircuitEvalError> {
-    let mut rng = E::rng();
-    let random_share: Vec<_> = input
-        .iter_mut()
-        .map(|t| {
-            let r = GF2::random(&mut rng);
-            *t += r;
-            r
-        })
-        .collect();
-    engine.broadcast(random_share);
-    let (mut received_input, _): (Vec<GF2>, PartyId) = engine.recv().await.unwrap();
-
     let my_id = engine.my_party_id();
-    let peer_id = engine.party_ids()[0] + engine.party_ids()[1] - my_id;
-    let is_first = my_id < peer_id;
-    if is_first {
-        input.append(&mut received_input);
-    } else {
-        received_input.append(&mut input);
-        input = received_input;
-    }
+    let min_id = engine
+        .party_ids()
+        .iter()
+        .fold(PartyId::MAX, |a, b| PartyId::min(a, *b));
+    let is_first = my_id == min_id;
+    let number_of_peers = engine.party_ids().len() - 1;
 
     let wires_num =
         circuit.input_wire_count + circuit.internal_wire_count + circuit.output_wire_count;
     let mut wires = vec![GF2::zero(); wires_num];
     wires[0..circuit.input_wire_count].copy_from_slice(&input);
+    let max_layer_size = circuit.gates.iter().fold(0, |acc, cur| {
+        let non_linear_gates_in_layer = cur.iter().filter(|cur| !cur.is_linear()).count();
+        usize::max(acc, non_linear_gates_in_layer)
+    });
+    let mut gate_eval_states = HashMap::with_capacity(max_layer_size * number_of_peers);
     for layer in circuit.gates {
-        let mut gate_eval_states = HashMap::new();
         for (idx, gate) in layer.iter().enumerate() {
             match &gate {
                 ParsedGate::NotGate { input, output } => {
@@ -80,37 +71,53 @@ pub async fn two_party_eval_circuit<E: MultiPartyEngine>(
                 ParsedGate::XorGate { input, output } => {
                     wires[*output] = wires[input[0]] + wires[input[1]];
                 }
-                ParsedGate::AndGate { input, output: _ } => {
-                    let (a, b, c) = correlations.next_bit_beaver_triple();
-                    let msg = EvalMessage {
-                        opening: GateOpening::And(wires[input[0]] + a, wires[input[1]] + b),
-                        gate_idx_in_layer: idx,
-                    };
-                    engine.broadcast(msg);
-                    gate_eval_states.insert(idx, GateEvalState::And(a, b, c));
+                ParsedGate::AndGate { input, output } => {
+                    let (input_0, input_1) = (wires[input[0]], wires[input[1]]);
+                    wires[*output] = input_0 * input_1;
+                    correlations.iter_mut().for_each(|(pid, pcg)| {
+                        let (a, b, c) = pcg.next_bit_beaver_triple();
+                        let msg = EvalMessage {
+                            opening: GateOpening::And(input_0 + a, input_1 + b),
+                            gate_idx_in_layer: idx,
+                        };
+                        engine.send(msg, *pid); // Requires p2p-secret-channels?
+                        gate_eval_states.insert((idx, *pid), GateEvalState::And(a, b, c));
+                    });
                 }
                 ParsedGate::WideAndGate {
                     input,
                     input_bit,
-                    output: _,
+                    output,
                 } => {
-                    let mut wide_input_field = GF128::zero();
-                    for i in 0..input.len() {
-                        wide_input_field.set_bit(wires[input[i]].into(), i);
-                    }
-                    let (a, wb, wc) = correlations.next_wide_beaver_triple();
-                    let msg = EvalMessage {
-                        opening: GateOpening::WideAnd(a + wires[*input_bit], wb + wide_input_field),
-                        gate_idx_in_layer: idx,
-                    };
-                    engine.broadcast(msg);
-                    gate_eval_states
-                        .insert(idx, GateEvalState::WideAnd(a, wb, wc, wide_input_field));
+                    let common_input = wires[*input_bit];
+                    correlations.iter_mut().for_each(|(pid, pcg)| {
+                        let mut wide_input_field = GF128::zero();
+                        for i in 0..input.len() {
+                            let input_wire = wires[input[i]];
+                            wires[output[i]] = input_wire * common_input;
+                            wide_input_field.set_bit(input_wire.into(), i);
+                        }
+                        let (a, wb, wc) = pcg.next_wide_beaver_triple();
+                        let msg = EvalMessage {
+                            opening: GateOpening::WideAnd(
+                                a + wires[*input_bit],
+                                wb + wide_input_field,
+                            ),
+                            gate_idx_in_layer: idx,
+                        };
+                        engine.send(msg, *pid);
+                        assert!(gate_eval_states
+                            .insert(
+                                (idx, *pid),
+                                GateEvalState::WideAnd(a, wb, wc, wide_input_field),
+                            )
+                            .is_none());
+                    });
                 }
             }
         }
-        while gate_eval_states.len() != 0 {
-            let (msg, _): (EvalMessage, PartyId) = engine.recv().await.unwrap();
+        for _ in 0..gate_eval_states.len() {
+            let (msg, from): (EvalMessage, PartyId) = engine.recv().await.unwrap();
             let gate_idx = msg.gate_idx_in_layer;
             match msg.opening {
                 GateOpening::And(ax, by) => {
@@ -120,15 +127,15 @@ pub async fn two_party_eval_circuit<E: MultiPartyEngine>(
                             return Err(CircuitEvalError::CommunicatorError);
                         }
                     };
-                    let (a, b, c) = match gate_eval_states.remove(&gate_idx).unwrap() {
-                        GateEvalState::And(a, b, c) => (a, b, c),
+                    let (a, b, c) = match gate_eval_states.get(&(gate_idx, from)).unwrap() {
+                        &GateEvalState::And(a, b, c) => (a, b, c),
                         _ => return Err(CircuitEvalError::CommunicatorError),
                     };
                     let x_share = wires[input_wires[0]];
                     let y_share = wires[input_wires[1]];
                     let a_plus_x = ax + x_share + a;
                     let b_plus_y = by + y_share + b;
-                    wires[output_wire] = b_plus_y * x_share - b * a_plus_x + c;
+                    wires[output_wire] += b_plus_y * x_share - b * a_plus_x + c - x_share * y_share;
                 }
                 GateOpening::WideAnd(ax, wby) => {
                     let (_, input_bit_wire, output_wire) = match layer[gate_idx] {
@@ -142,21 +149,24 @@ pub async fn two_party_eval_circuit<E: MultiPartyEngine>(
                         }
                     };
                     let (a, wb, wc, preprocessed_input) =
-                        match gate_eval_states.remove(&gate_idx).unwrap() {
-                            GateEvalState::WideAnd(a, wb, wc, preprocessed_input) => {
+                        match gate_eval_states.get(&(gate_idx, from)).unwrap() {
+                            &GateEvalState::WideAnd(a, wb, wc, preprocessed_input) => {
                                 (a, wb, wc, preprocessed_input)
                             }
                             _ => return Err(CircuitEvalError::CommunicatorError),
                         };
-                    let a_plus_x = ax + wires[input_bit_wire] + a;
+                    let x_share = wires[input_bit_wire];
+                    let a_plus_x = ax + x_share + a;
                     let b_plus_y = wby + preprocessed_input + wb;
-                    let output_share = b_plus_y * wires[input_bit_wire] - wb * a_plus_x + wc;
+                    let output_share =
+                        b_plus_y * x_share - wb * a_plus_x + wc - preprocessed_input * x_share;
                     for i in 0..output_wire.len() {
-                        wires[output_wire[i]] = output_share.get_bit(i).into();
+                        wires[output_wire[i]] += GF2::from(output_share.get_bit(i));
                     }
                 }
             }
         }
+        gate_eval_states.clear()
     }
     Ok(wires[wires.len() - circuit.output_wire_count..].to_vec())
 }
@@ -200,66 +210,126 @@ fn local_eval_circuit(circuit: &ParsedCircuit, input: &[GF2]) -> Vec<GF2> {
 }
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{
+        collections::{HashMap, HashSet},
+        ops::SubAssign,
+        sync::Arc,
+    };
 
-    use tokio::join;
+    use futures::{future::try_join_all, FutureExt};
+    use rand::thread_rng;
 
     use super::bristol_fashion::{parse_bristol, ParsedCircuit};
     use crate::{
-        circuit_eval::{local_eval_circuit, two_party_eval_circuit},
-        engine::{LocalRouter, MultiPartyEngine},
+        circuit_eval::{local_eval_circuit, multi_party_semi_honest_eval_circuit},
+        engine::{LocalRouter, MultiPartyEngine, PartyId},
         fields::{FieldElement, GF2},
         pcg::FullPcgKey,
         uc_tags::UCTag,
     };
 
-    async fn test_circuit(circuit: ParsedCircuit, input: &[GF2]) -> Vec<GF2> {
+    async fn gen_pairwise_pcg_keys<E: MultiPartyEngine>(
+        engine: &E,
+        pprf_count: usize,
+        pprf_depth: usize,
+        code_weight: usize,
+        code_seed: [u8; 16],
+    ) -> HashMap<PartyId, FullPcgKey> {
+        let my_id = engine.my_party_id();
+        let futures: Vec<_> = engine
+            .party_ids()
+            .iter()
+            .copied()
+            .filter(|i| *i != my_id)
+            .map(|peer| {
+                let tag = if peer < my_id {
+                    UCTag::new(&"PCG").derive(peer).derive(my_id)
+                } else {
+                    UCTag::new(&"PCG").derive(my_id).derive(peer)
+                };
+                let b: Box<[PartyId]> = Box::new([peer, my_id]);
+                let peer_arc = Arc::from(b);
+                FullPcgKey::new(
+                    engine.sub_protocol_with(tag, peer_arc),
+                    pprf_count,
+                    pprf_depth,
+                    code_seed,
+                    code_weight,
+                )
+                .map(move |v| v.map(move |vv| (peer, vv)))
+            })
+            .collect();
+        try_join_all(futures).await.unwrap().into_iter().collect()
+    }
+    async fn test_circuit(circuit: ParsedCircuit, input: &[GF2], party_count: usize) -> Vec<GF2> {
         const PPRF_COUNT: usize = 50;
         const CODE_WEIGHT: usize = 8;
         const PPRF_DEPTH: usize = 10;
         const CODE_SEED: [u8; 16] = [1u8; 16];
         assert_eq!(input.len(), circuit.input_wire_count);
-        let party_ids = [1, 2];
+        let party_ids: Vec<_> = (1..=party_count).map(|i| i as u64).collect();
         let party_ids_set = HashSet::from_iter(party_ids.iter().copied());
         let (local_router, mut execs) = LocalRouter::new(UCTag::new(&"root_tag"), &party_ids_set);
         let router_handle = tokio::spawn(local_router.launch());
 
-        let a_exec = execs.remove(&party_ids[0]).unwrap();
-        let b_exec = execs.remove(&party_ids[1]).unwrap();
+        let pcg_keys_futures = execs.iter().map(|(pid, engine)| {
+            gen_pairwise_pcg_keys(engine, PPRF_COUNT, PPRF_DEPTH, CODE_WEIGHT, CODE_SEED)
+                .map(move |v| Result::<_, ()>::Ok((*pid, v)))
+        });
 
-        let input_a = input[0..input.len() / 2].to_vec();
-        let input_b: Vec<_> = input[input.len() / 2..].to_vec();
-        let full_key_a = tokio::spawn(FullPcgKey::new(
-            a_exec.sub_protocol(&"PCG"),
-            PPRF_COUNT,
-            PPRF_DEPTH,
-            CODE_SEED,
-            CODE_WEIGHT,
-        ));
+        let mut pcg_keys: HashMap<_, _> = try_join_all(pcg_keys_futures)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
 
-        let full_key_b = FullPcgKey::new(
-            b_exec.sub_protocol(&"PCG"),
-            PPRF_COUNT,
-            PPRF_DEPTH,
-            CODE_SEED,
-            CODE_WEIGHT,
-        );
+        let first_id = party_ids[0];
+        let mut first_id_input = input.to_vec();
+        let mut rng = thread_rng();
 
-        let (full_key_a, full_key_b) = join!(full_key_a, full_key_b);
-        let (mut full_key_a, mut full_key_b) = (full_key_a.unwrap().unwrap(), full_key_b.unwrap());
+        let mut inputs: HashMap<_, _> = party_ids[1..]
+            .iter()
+            .copied()
+            .map(|id| {
+                let id_input: Vec<GF2> = first_id_input
+                    .iter_mut()
+                    .map(|v| {
+                        let r = GF2::random(&mut rng);
+                        v.sub_assign(r);
+                        r
+                    })
+                    .collect();
+                (id, id_input)
+            })
+            .collect();
+        inputs.insert(first_id, first_id_input);
 
-        let output_a = two_party_eval_circuit(a_exec, circuit.clone(), input_a, &mut full_key_a);
-        let output_b = two_party_eval_circuit(b_exec, circuit.clone(), input_b, &mut full_key_b);
-        let (output_a, output_b) = join!(output_a, output_b);
-        let (output_a, output_b) = (output_a.unwrap(), output_b.unwrap());
-        assert_eq!(output_a.len(), output_b.len());
-        assert_eq!(output_a.len(), circuit.output_wire_count);
-        let local_computation_output = local_eval_circuit(&circuit, input);
-        for i in 0..circuit.output_wire_count {
-            assert_eq!(output_a[i] + output_b[i], local_computation_output[i]);
+        let exec_futures = pcg_keys.iter_mut().map(|(&id, pcg_key)| {
+            multi_party_semi_honest_eval_circuit(
+                execs.remove(&id).unwrap(),
+                circuit.clone(),
+                inputs.remove(&id).unwrap(),
+                pcg_key,
+            )
+        });
+
+        let exec_results = try_join_all(exec_futures).await.unwrap();
+        let mut local_computation_output = local_eval_circuit(&circuit, input);
+        let output = local_computation_output.clone();
+        for e in exec_results.iter() {
+            assert_eq!(e.len(), local_computation_output.len());
         }
+        assert_eq!(local_computation_output.len(), circuit.output_wire_count);
+        exec_results.iter().for_each(|e| {
+            e.iter()
+                .zip(local_computation_output.iter_mut())
+                .for_each(|(ei, li)| li.sub_assign(*ei));
+        });
         router_handle.await.unwrap().unwrap();
-        local_computation_output
+        for i in 0..circuit.output_wire_count {
+            assert_eq!(local_computation_output[i], GF2::zero());
+        }
+        output
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
@@ -296,7 +366,7 @@ mod tests {
         );
 
         let input = vec![GF2::one(), GF2::zero()];
-        let output = test_circuit(parsed_circuit, &input).await;
+        let output = test_circuit(parsed_circuit, &input, 10).await;
 
         assert_eq!(output[0], GF2::one());
     }
@@ -328,7 +398,7 @@ mod tests {
         );
 
         let input = vec![GF2::one(); 129];
-        let output = test_circuit(parsed_circuit, &input).await;
+        let output = test_circuit(parsed_circuit, &input, 10).await;
 
         assert_eq!(output, vec![GF2::one(); 128]);
     }

@@ -2,6 +2,7 @@ use super::FieldElement;
 use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{
+    fmt::Display,
     iter::Sum,
     ops::{
         Add, AddAssign, BitAnd, BitAndAssign, BitXor, BitXorAssign, Div, DivAssign, Mul, MulAssign,
@@ -188,5 +189,11 @@ impl TryFrom<u8> for GF2 {
 impl From<GF2> for u8 {
     fn from(v: GF2) -> Self {
         v.v
+    }
+}
+
+impl Display for GF2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.v)
     }
 }
