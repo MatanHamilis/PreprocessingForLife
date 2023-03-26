@@ -10,6 +10,7 @@ use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::Debug;
+use std::iter::Sum;
 use std::ops::Neg;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 pub trait FieldElement:
@@ -29,6 +30,10 @@ pub trait FieldElement:
     + DeserializeOwned
     + Serialize
     + Debug
+    + Send
+    + Sync
+    + Sum
+    + 'static
 {
     fn one() -> Self;
     fn is_one(&self) -> bool;

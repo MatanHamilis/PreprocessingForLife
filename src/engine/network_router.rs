@@ -56,7 +56,7 @@ async fn receive_connections(
         .await
         .unwrap();
     let mut futures = Vec::with_capacity(connection_count);
-    for i in 0..connection_count {
+    for _ in 0..connection_count {
         let (stream, _) = listener.accept().await.unwrap();
         futures.push(handle_single_conn(MaybeTlsStream::Plain(stream)));
     }
@@ -206,7 +206,7 @@ impl NetworkRouter {
             Some(v) => {
                 let (pid, msg) = match v {
                     Ok(x) => x,
-                    Err((pid, err)) => {
+                    Err((pid, _)) => {
                         println!("Got error, my id: {}, peer: {}", self.local_party_id, pid);
                         panic!()
                     }

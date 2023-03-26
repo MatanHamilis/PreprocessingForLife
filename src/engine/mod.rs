@@ -74,7 +74,7 @@ impl MultiPartyEngineImpl {
             tag,
             msg: DownstreamMessageType::Register(upstream_sender),
         };
-        downstream_sender.send(msg);
+        downstream_sender.send(msg).unwrap();
         let output = Self {
             tag,
             id,
@@ -157,24 +157,20 @@ impl MultiPartyEngine for MultiPartyEngineImpl {
         Some((val, received.from))
     }
     async fn recv_from<T: DeserializeOwned>(&mut self, from: PartyId) -> Option<T> {
-        let upstream_msg = if let Some((idx, _)) = self
-            .buffer
-            .iter()
-            .enumerate()
-            .find(|(idx, m)| m.from == from)
-        {
-            let v = self.buffer.remove(idx).unwrap();
-            v
-        } else {
-            loop {
-                let msg_got = self.upstream_receiver.recv().await?;
-                if msg_got.from == from {
-                    break msg_got;
-                } else {
-                    self.buffer.push_back(msg_got)
+        let upstream_msg =
+            if let Some((idx, _)) = self.buffer.iter().enumerate().find(|(_, m)| m.from == from) {
+                let v = self.buffer.remove(idx).unwrap();
+                v
+            } else {
+                loop {
+                    let msg_got = self.upstream_receiver.recv().await?;
+                    if msg_got.from == from {
+                        break msg_got;
+                    } else {
+                        self.buffer.push_back(msg_got)
+                    }
                 }
-            }
-        };
+            };
         let val = bincode::deserialize(&upstream_msg.content).ok()?;
         Some(val)
     }

@@ -81,7 +81,7 @@ impl From<Block> for GF128 {
 
 impl Sum for GF128 {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(GF128::zero(), |acc, v| acc + v)
+        iter.fold(Self::zero(), |acc, v| acc + v)
     }
 }
 impl Neg for GF128 {

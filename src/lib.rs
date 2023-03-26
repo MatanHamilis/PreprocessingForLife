@@ -15,14 +15,17 @@ use fields::GF128;
 // use pseudorandom::prf::PrfInput;
 
 pub mod circuit_eval;
-mod engine;
+pub mod engine;
 pub mod fields;
 pub mod ot;
 pub mod pcg;
 pub mod pprf;
 pub mod pseudorandom;
 mod uc_tags;
-mod zkfliop;
+pub mod zkfliop;
+
+pub use engine::PartyId;
+pub use uc_tags::UCTag;
 
 pub(crate) fn xor_arrays<const LENGTH: usize>(a: &mut [u8; LENGTH], b: &[u8; LENGTH]) {
     for i in 0..LENGTH {

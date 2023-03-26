@@ -24,7 +24,7 @@ pub async fn receiver_pcg_key<E: MultiPartyEngine>(
     code_width: usize,
 ) -> Result<ReceiverPcgKey, ()> {
     let t = pprf_count;
-    let N = pprf_count * (1 << pprf_depth);
+    let n = pprf_count * (1 << pprf_depth);
     let delta = GF128::random(E::rng());
     let pprf_futures: Vec<_> = (0..t)
         .map(|i| {
@@ -34,7 +34,7 @@ pub async fn receiver_pcg_key<E: MultiPartyEngine>(
         .collect();
     let pprfs = try_join_all(pprf_futures).await.or(Err(()))?;
     let mut acc = GF128::zero();
-    let mut evals = Vec::<GF128>::with_capacity(N);
+    let mut evals = Vec::<GF128>::with_capacity(n);
     for pprf in pprfs.into_iter() {
         let pprf = pprf?;
         for o in pprf.evals.into_iter() {
@@ -99,7 +99,7 @@ pub async fn sender_pcg_key<E: MultiPartyEngine>(
     code_width: usize,
 ) -> Result<SenderPcgKey, ()> {
     let t = pprf_count;
-    let N = pprf_count * (1 << pprf_depth);
+    let n = pprf_count * (1 << pprf_depth);
     let pprf_futures: Vec<_> = (0..t)
         .map(|i| {
             let sub_engine = engine.sub_protocol(format!("PCG TO PPRF {}", i));
@@ -109,7 +109,7 @@ pub async fn sender_pcg_key<E: MultiPartyEngine>(
     let pprfs = try_join_all(pprf_futures).await.or(Err(()))?;
     let mut acc = GF128::zero();
     let mut acc_bit = GF2::zero();
-    let mut evals = Vec::<(GF128, GF2)>::with_capacity(N);
+    let mut evals = Vec::<(GF128, GF2)>::with_capacity(n);
     for pprf in pprfs.into_iter() {
         let pprf = pprf?;
         for (idx, o) in pprf.evals.into_iter().enumerate() {

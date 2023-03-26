@@ -7,7 +7,6 @@ use crate::{
     pseudorandom::prg::double_prg_many_inplace,
 };
 pub struct PprfSender {
-    seed: GF128,
     pub evals: Vec<GF128>,
     pub leaves_sum: GF128,
 }
@@ -37,7 +36,6 @@ pub async fn pprf_sender<T: MultiPartyEngine>(
         (
             ot_msgs,
             PprfSender {
-                seed,
                 evals: output,
                 leaves_sum,
             },

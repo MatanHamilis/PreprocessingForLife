@@ -1,4 +1,7 @@
-use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use std::{
+    iter::Sum,
+    ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
@@ -46,6 +49,11 @@ impl FieldElement for PackedGF2U64 {
     // }
     fn random(mut rng: impl rand::CryptoRng + rand::RngCore) -> Self {
         Self(rng.next_u64())
+    }
+}
+impl Sum for PackedGF2U64 {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::zero(), |acc, v| acc + v)
     }
 }
 
@@ -218,5 +226,11 @@ impl<const SIZE: usize> Neg for PackedGF2Array<SIZE> {
     type Output = Self;
     fn neg(self) -> Self::Output {
         self + Self::one()
+    }
+}
+
+impl<const SIZE: usize> Sum for PackedGF2Array<SIZE> {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::zero(), |acc, v| acc + v)
     }
 }
