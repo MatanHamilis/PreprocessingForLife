@@ -1,7 +1,7 @@
 use crate::{
     engine::MultiPartyEngine,
     fields::{FieldElement, GF128, GF2},
-    pprf::{pprf_receiver, pprf_sender},
+    pprf::{pprf_receiver, pprf_sender, OfflinePprfSender, PprfSender},
     pseudorandom::hash::correlation_robust_hash_block_field,
 };
 use aes_prng::AesRng;
@@ -18,26 +18,26 @@ pub struct ReceiverPcgKey {
 }
 pub async fn receiver_pcg_key<E: MultiPartyEngine>(
     engine: E,
-    pprf_count: usize,
-    pprf_depth: usize,
+    offline_pprfs: &[OfflinePprfSender],
     code_seed: AesRng,
     code_width: usize,
 ) -> Result<ReceiverPcgKey, ()> {
-    let t = pprf_count;
-    let n = pprf_count * (1 << pprf_depth);
+    let n = offline_pprfs.iter().map(|v| 1 << v.depth).sum();
     let delta = GF128::random(E::rng());
-    let pprf_futures: Vec<_> = (0..t)
-        .map(|i| {
+    let pprf_futures: Vec<_> = offline_pprfs
+        .iter()
+        .map(|v| v.into())
+        .enumerate()
+        .map(|(i, pprf_sender_val)| {
             let sub_engine = engine.sub_protocol(format!("PCG TO PPRF {}", i));
-            tokio::spawn(pprf_sender(sub_engine, pprf_depth, delta))
+            tokio::spawn(pprf_sender(sub_engine, pprf_sender_val, delta))
         })
         .collect();
     let pprfs = try_join_all(pprf_futures).await.or(Err(()))?;
     let mut acc = GF128::zero();
     let mut evals = Vec::<GF128>::with_capacity(n);
     for pprf in pprfs.into_iter() {
-        let pprf = pprf?;
-        for o in pprf.evals.into_iter() {
+        for o in pprf.unwrap().evals.into_iter() {
             acc += o;
             evals.push(acc);
         }
@@ -166,8 +166,8 @@ pub struct FullPcgKey {
 }
 
 impl FullPcgKey {
-    pub async fn new(
-        engine: impl MultiPartyEngine,
+    pub async fn new<E: MultiPartyEngine>(
+        engine: E,
         pprf_count: usize,
         pprf_depth: usize,
         code_seed: [u8; 16],
@@ -191,13 +191,13 @@ impl FullPcgKey {
             code_width,
         ));
         let seed_receiver = AesRng::from_seed(code_seed);
-        let receiver = tokio::spawn(receiver_pcg_key(
-            second_engine,
-            pprf_count,
-            pprf_depth,
-            seed_receiver,
-            code_width,
-        ));
+        let offline_pcg_keys: Vec<_> = (0..pprf_count)
+            .map(|_| OfflinePprfSender::new(pprf_depth, GF128::random(E::rng())))
+            .collect();
+        let receiver = tokio::spawn(async move {
+            let offline_pcg_keys = offline_pcg_keys;
+            receiver_pcg_key(second_engine, &offline_pcg_keys, seed_receiver, code_width).await
+        });
         let (snd_res, rcv_res) = join!(sender, receiver);
         Ok(Self {
             sender: snd_res.or(Err(()))??,
@@ -224,10 +224,17 @@ impl FullPcgKey {
 mod test {
     use std::collections::HashSet;
 
+    use rand::thread_rng;
     use tokio::join;
 
     use super::{receiver_pcg_key, sender_pcg_key};
-    use crate::{engine::LocalRouter, pcg::FullPcgKey, uc_tags::UCTag};
+    use crate::{
+        engine::LocalRouter,
+        fields::{FieldElement, GF128},
+        pcg::FullPcgKey,
+        pprf::OfflinePprfSender,
+        uc_tags::UCTag,
+    };
     use aes_prng::AesRng;
     use rand_core::SeedableRng;
 
@@ -252,10 +259,12 @@ mod test {
             AesRng::from_seed(seed),
             CODE_WIDTH,
         );
+        let offline_pprfs: Vec<_> = (0..PPRF_COUNT)
+            .map(|_| OfflinePprfSender::new(PPRF_DEPTH, GF128::random(thread_rng())))
+            .collect();
         let receiver_h = receiver_pcg_key(
             receiver_engine,
-            PPRF_COUNT,
-            PPRF_DEPTH,
+            &offline_pprfs,
             AesRng::from_seed(seed),
             CODE_WIDTH,
         );
