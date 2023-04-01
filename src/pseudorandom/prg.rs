@@ -10,6 +10,13 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 pub const PRG_KEY_SIZE: usize = 16;
 
+pub fn fill_prg(seed: &GF128, output: &mut [GF128]) {
+    let depth = output.len().leading_zeros();
+    assert_eq!(1 << depth, output.len());
+    for i in 1..=depth {
+        double_prg_many_inplace(&mut output[..1 << i]);
+    }
+}
 #[cfg(not(feature = "aesni"))]
 pub fn double_prg(input: &PrgValue) -> (PrgValue, PrgValue) {
     let mut seed: [u8; 32] = [0; 32];

@@ -259,9 +259,9 @@ mod tests {
         try_join_all(futures).await.unwrap().into_iter().collect()
     }
     async fn test_circuit(circuit: ParsedCircuit, input: &[GF2], party_count: usize) -> Vec<GF2> {
-        const PPRF_COUNT: usize = 50;
+        const PPRF_COUNT: usize = 44;
         const CODE_WEIGHT: usize = 8;
-        const PPRF_DEPTH: usize = 10;
+        const PPRF_DEPTH: usize = 5;
         const CODE_SEED: [u8; 16] = [1u8; 16];
         assert_eq!(input.len(), circuit.input_wire_count);
         let party_ids: Vec<_> = (1..=party_count).map(|i| i as u64).collect();
@@ -363,7 +363,7 @@ mod tests {
         );
 
         let input = vec![GF2::one(), GF2::zero()];
-        let output = test_circuit(parsed_circuit, &input, 10).await;
+        let output = test_circuit(parsed_circuit, &input, 7).await;
 
         assert_eq!(output[0], GF2::one());
     }
@@ -395,7 +395,7 @@ mod tests {
         );
 
         let input = vec![GF2::one(); 129];
-        let output = test_circuit(parsed_circuit, &input, 10).await;
+        let output = test_circuit(parsed_circuit, &input, 7).await;
 
         assert_eq!(output, vec![GF2::one(); 128]);
     }

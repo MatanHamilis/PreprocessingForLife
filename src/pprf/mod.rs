@@ -4,7 +4,7 @@ use crate::{
     engine::{MultiPartyEngine, PartyId},
     fields::{FieldElement, GF128},
     ot::{ChosenMessageOTReceiver, ChosenMessageOTSender},
-    pseudorandom::prg::double_prg_many_inplace,
+    pseudorandom::prg::{double_prg_many_inplace, fill_prg},
 };
 
 pub struct OfflinePprfSender {
@@ -63,6 +63,40 @@ pub async fn pprf_sender<T: MultiPartyEngine>(
     let last_msg = sender.left_right_sums.last().unwrap();
     engine.broadcast(last_msg.0 + last_msg.1 + delta);
     Ok(sender)
+}
+
+pub struct OfflinePprfReceiver {
+    pub punctured_index: usize,
+    pub subtree_seeds: Vec<GF128>,
+    pub val_at_index: GF128,
+}
+
+impl From<&OfflinePprfReceiver> for PprfReceiver {
+    fn from(value: &OfflinePprfReceiver) -> Self {
+        let depth = value.subtree_seeds.len();
+        let n = 1 << depth;
+        let mut evals = Vec::with_capacity(n);
+        assert!(value.punctured_index < n);
+        let mut current_index = value.val_at_index;
+        let mut top = n;
+        let mut bottom = 0;
+        for seed in value.subtree_seeds.iter() {
+            let mid = (top + bottom) / 2;
+            if value.punctured_index >= mid {
+                fill_prg(seed, &mut evals[bottom..mid]);
+                bottom = mid;
+            } else {
+                fill_prg(seed, &mut evals[mid..top]);
+                top = mid;
+            }
+        }
+        debug_assert_eq!(bottom, value.punctured_index);
+        evals[value.punctured_index] = value.val_at_index;
+        Self {
+            punctured_index: value.punctured_index,
+            evals,
+        }
+    }
 }
 
 pub struct PprfReceiver {

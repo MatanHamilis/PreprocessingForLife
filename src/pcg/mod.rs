@@ -1,7 +1,10 @@
 use crate::{
     engine::MultiPartyEngine,
     fields::{FieldElement, GF128, GF2},
-    pprf::{pprf_receiver, pprf_sender, OfflinePprfSender, PprfSender},
+    pprf::{
+        pprf_receiver, pprf_sender, OfflinePprfReceiver, OfflinePprfSender, PprfReceiver,
+        PprfSender,
+    },
     pseudorandom::hash::correlation_robust_hash_block_field,
 };
 use aes_prng::AesRng;
@@ -9,6 +12,11 @@ use futures::future::try_join_all;
 use rand::SeedableRng;
 use rand_core::RngCore;
 use tokio::join;
+
+pub struct OfflineReceiverPcgKey {
+    pprfs: Vec<OfflinePprfSender>,
+    delta: GF128,
+}
 
 pub struct ReceiverPcgKey {
     evals: Vec<GF128>,
@@ -50,6 +58,23 @@ pub async fn receiver_pcg_key<E: MultiPartyEngine>(
     })
 }
 impl ReceiverPcgKey {
+    fn new(code_seed: AesRng, code_width: usize, value: &OfflineReceiverPcgKey) -> Self {
+        let n = value.pprfs.iter().map(|v| 1 << v.depth).sum();
+        let mut evals = Vec::<GF128>::with_capacity(n);
+        let mut acc = GF128::zero();
+        for pprf in value.pprfs.iter().map(|v| PprfSender::from(v)) {
+            for i in pprf.evals.into_iter() {
+                acc += i;
+                evals.push(acc);
+            }
+        }
+        Self {
+            evals,
+            delta: value.delta,
+            code_seed,
+            code_width,
+        }
+    }
     fn next_subfield_vole(&mut self) -> GF128 {
         let mut acc = GF128::zero();
         for _ in 0..self.code_width {
@@ -84,6 +109,10 @@ impl ReceiverPcgKey {
         m_1_1 -= m_1_0;
         (m_1_1, m_0_1, m_1_1 * m_0_1 + m_0_0 + m_1_0)
     }
+}
+
+pub struct OfflineSenderPcgKey {
+    receivers: Vec<OfflinePprfReceiver>,
 }
 
 pub struct SenderPcgKey {
@@ -128,6 +157,34 @@ pub async fn sender_pcg_key<E: MultiPartyEngine>(
 }
 
 impl SenderPcgKey {
+    pub fn new(
+        offline_key: &OfflineSenderPcgKey,
+        code_seed: AesRng,
+        code_width: usize,
+    ) -> SenderPcgKey {
+        let n = offline_key
+            .receivers
+            .iter()
+            .map(|v| 1 << v.subtree_seeds.len())
+            .sum();
+        let mut evals = Vec::with_capacity(n);
+        let mut acc = GF128::zero();
+        let mut bin_acc = GF2::zero();
+        for pprf in offline_key.receivers.iter().map(|v| PprfReceiver::from(v)) {
+            for (idx, v) in pprf.evals.into_iter().enumerate() {
+                acc += v;
+                if idx == pprf.punctured_index {
+                    bin_acc.flip();
+                }
+                evals.push((acc, bin_acc));
+            }
+        }
+        Self {
+            code_seed,
+            code_width,
+            evals,
+        }
+    }
     fn next_subfield_vole(&mut self) -> (GF128, GF2) {
         let mut acc = GF128::zero();
         let mut acc_bit = GF2::zero();
