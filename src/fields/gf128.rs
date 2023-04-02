@@ -19,7 +19,7 @@ const IRREDUCIBLE_POLYNOMIAL_U64: u64 = (1 << 7) + (1 << 2) + (1 << 1) + (1 << 0
 const IRREDUCIBLE_POLYNOMIAL: u64x2 = u64x2::from_array([IRREDUCIBLE_POLYNOMIAL_U64, 0]);
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub struct GF128(u64x2);
+pub struct GF128(pub u64x2);
 
 impl Serialize for GF128 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

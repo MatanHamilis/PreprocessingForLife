@@ -81,6 +81,17 @@ impl DerefMut for PrgValue {
     }
 }
 
+pub fn double_prg_field(input: &GF128) -> (GF128, GF128) {
+    let v = unsafe {
+        (input.0.as_array().as_ptr() as *const PrgValue)
+            .as_ref()
+            .unwrap()
+    };
+    let (v0, v1) = double_prg(v);
+    let p0 = GF128::from(v0.0);
+    let p1 = GF128::from(v1.0);
+    (p0, p1)
+}
 #[cfg(feature = "aesni")]
 pub fn double_prg(input: &PrgValue) -> (PrgValue, PrgValue) {
     let mut blocks = [Block::from(*input); 2];

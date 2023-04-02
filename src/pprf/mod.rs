@@ -1,4 +1,5 @@
 use rand::{CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     engine::{MultiPartyEngine, PartyId},
@@ -7,6 +8,7 @@ use crate::{
     pseudorandom::prg::{double_prg_many_inplace, fill_prg},
 };
 
+#[derive(Serialize, Deserialize)]
 pub struct OfflinePprfSender {
     pub seed: GF128,
     pub depth: usize,
@@ -51,28 +53,27 @@ impl From<&OfflinePprfSender> for PprfSender {
 }
 pub async fn pprf_sender<T: MultiPartyEngine>(
     mut engine: T,
-    sender: PprfSender,
+    left_right_sums: &[(GF128, GF128)],
     delta: GF128,
-) -> Result<PprfSender, ()> {
-    let ot_sender = ChosenMessageOTSender::init(
-        engine.sub_protocol(&"PPRF TO OT"),
-        sender.left_right_sums.len(),
-    )
-    .await?;
-    ot_sender.choose(&sender.left_right_sums).await;
-    let last_msg = sender.left_right_sums.last().unwrap();
+) -> Result<(), ()> {
+    let ot_sender =
+        ChosenMessageOTSender::init(engine.sub_protocol(&"PPRF TO OT"), left_right_sums.len())
+            .await?;
+    ot_sender.choose(left_right_sums).await;
+    let last_msg = left_right_sums.last().unwrap();
     engine.broadcast(last_msg.0 + last_msg.1 + delta);
-    Ok(sender)
+    Ok(())
 }
 
-pub struct OfflinePprfReceiver {
+#[derive(Serialize, Deserialize)]
+pub struct PackedPprfReceiver {
     pub punctured_index: usize,
     pub subtree_seeds: Vec<GF128>,
     pub val_at_index: GF128,
 }
 
-impl From<&OfflinePprfReceiver> for PprfReceiver {
-    fn from(value: &OfflinePprfReceiver) -> Self {
+impl From<&PackedPprfReceiver> for PprfReceiver {
+    fn from(value: &PackedPprfReceiver) -> Self {
         let depth = value.subtree_seeds.len();
         let n = 1 << depth;
         let mut evals = Vec::with_capacity(n);
@@ -161,19 +162,19 @@ mod tests {
         let pprf_sender_val: PprfSender =
             OfflinePprfSender::new(PPRF_DEPTH, GF128::random(&mut rng)).into();
         let pprf_sender_handle =
-            tokio::spawn(pprf_sender(pprf_sender_engine, pprf_sender_val, delta));
+            pprf_sender(pprf_sender_engine, &pprf_sender_val.left_right_sums, delta);
         let pprf_receiver_handle = tokio::spawn(pprf_receiver(pprf_receiver_engine, PPRF_DEPTH));
 
         let (pprf_sender_future, pprf_receiver_res) =
             join!(pprf_sender_handle, pprf_receiver_handle);
-        let (pprf_sender_res, pprf_receiver_res) = (
-            pprf_sender_future.unwrap().unwrap(),
+        let (_, pprf_receiver_res) = (
+            pprf_sender_future.unwrap(),
             pprf_receiver_res.unwrap().unwrap(),
         );
 
-        assert_eq!(pprf_receiver_res.evals.len(), pprf_sender_res.evals.len());
+        assert_eq!(pprf_receiver_res.evals.len(), pprf_sender_val.evals.len());
         let rec_evals = pprf_receiver_res.evals;
-        let snd_evals = pprf_sender_res.evals;
+        let snd_evals = pprf_sender_val.evals;
         let punctured_index = pprf_receiver_res.punctured_index;
         rec_evals
             .into_iter()

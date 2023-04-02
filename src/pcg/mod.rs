@@ -1,20 +1,73 @@
+use std::mem::MaybeUninit;
+
 use crate::{
     engine::MultiPartyEngine,
     fields::{FieldElement, GF128, GF2},
     pprf::{
-        pprf_receiver, pprf_sender, OfflinePprfReceiver, OfflinePprfSender, PprfReceiver,
-        PprfSender,
+        pprf_receiver, pprf_sender, OfflinePprfSender, PackedPprfReceiver, PprfReceiver, PprfSender,
     },
-    pseudorandom::hash::correlation_robust_hash_block_field,
+    pseudorandom::{
+        double_prg,
+        hash::correlation_robust_hash_block_field,
+        prg::{double_prg_field, fill_prg},
+    },
 };
 use aes_prng::AesRng;
 use futures::future::try_join_all;
-use rand::SeedableRng;
+use rand::{random, CryptoRng, SeedableRng};
 use rand_core::RngCore;
+use serde::{Deserialize, Serialize};
 use tokio::join;
 
-pub struct OfflineReceiverPcgKey {
+#[derive(Serialize, Deserialize)]
+pub struct PackedOfflineReceiverPcgKey {
     pprfs: Vec<OfflinePprfSender>,
+    delta: GF128,
+}
+
+impl PackedOfflineReceiverPcgKey {
+    fn random(pprf_count: usize, pprf_depth: usize, mut rng: impl RngCore + CryptoRng) -> Self {
+        let pprfs: Vec<_> = (0..pprf_count)
+            .map(|_| OfflinePprfSender::new(pprf_depth, GF128::random(&mut rng)))
+            .collect();
+        Self {
+            pprfs,
+            delta: GF128::random(&mut rng),
+        }
+    }
+
+    fn unpack(&self) -> (OfflineReceiverPcgKey, Vec<Vec<(GF128, GF128)>>) {
+        let n = self.pprfs.iter().map(|v| 1 << v.depth).sum();
+        let delta = self.delta;
+        let mut evals = Vec::with_capacity(n);
+        let (left_right_sums, evals_vecs): (Vec<_>, Vec<_>) = self
+            .pprfs
+            .iter()
+            .enumerate()
+            .map(|(idx, v)| {
+                let sender = PprfSender::from(v);
+                (sender.left_right_sums, sender.evals)
+            })
+            .unzip();
+        let mut acc = GF128::zero();
+        evals_vecs.iter().for_each(|v| {
+            v.iter().for_each(|o| {
+                acc += o;
+                evals.push(acc);
+            })
+        });
+        (
+            OfflineReceiverPcgKey {
+                delta: self.delta,
+                evals,
+            },
+            left_right_sums,
+        )
+    }
+}
+
+pub struct OfflineReceiverPcgKey {
+    evals: Vec<GF128>,
     delta: GF128,
 }
 
@@ -26,51 +79,30 @@ pub struct ReceiverPcgKey {
 }
 pub async fn receiver_pcg_key<E: MultiPartyEngine>(
     engine: E,
-    offline_pprfs: &[OfflinePprfSender],
-    code_seed: AesRng,
-    code_width: usize,
-) -> Result<ReceiverPcgKey, ()> {
-    let n = offline_pprfs.iter().map(|v| 1 << v.depth).sum();
-    let delta = GF128::random(E::rng());
-    let pprf_futures: Vec<_> = offline_pprfs
-        .iter()
-        .map(|v| v.into())
+    packed_key: &PackedOfflineReceiverPcgKey,
+) -> Result<OfflineReceiverPcgKey, ()> {
+    let n: usize = packed_key.pprfs.iter().map(|v| 1 << v.depth).sum();
+    let (offline_key, left_right_sums) = packed_key.unpack();
+    let delta = packed_key.delta;
+    let pprf_futures: Vec<_> = left_right_sums
+        .into_iter()
         .enumerate()
-        .map(|(i, pprf_sender_val)| {
+        .map(|(i, left_right_sum)| {
             let sub_engine = engine.sub_protocol(format!("PCG TO PPRF {}", i));
-            tokio::spawn(pprf_sender(sub_engine, pprf_sender_val, delta))
+            tokio::spawn(async move {
+                let left_right_sum = left_right_sum;
+                pprf_sender(sub_engine, &left_right_sum, delta).await;
+            })
         })
         .collect();
     let pprfs = try_join_all(pprf_futures).await.or(Err(()))?;
-    let mut acc = GF128::zero();
-    let mut evals = Vec::<GF128>::with_capacity(n);
-    for pprf in pprfs.into_iter() {
-        for o in pprf.unwrap().evals.into_iter() {
-            acc += o;
-            evals.push(acc);
-        }
-    }
-    Ok(ReceiverPcgKey {
-        evals,
-        code_seed,
-        code_width,
-        delta,
-    })
+    Ok(offline_key)
 }
 impl ReceiverPcgKey {
-    fn new(code_seed: AesRng, code_width: usize, value: &OfflineReceiverPcgKey) -> Self {
-        let n = value.pprfs.iter().map(|v| 1 << v.depth).sum();
-        let mut evals = Vec::<GF128>::with_capacity(n);
-        let mut acc = GF128::zero();
-        for pprf in value.pprfs.iter().map(|v| PprfSender::from(v)) {
-            for i in pprf.evals.into_iter() {
-                acc += i;
-                evals.push(acc);
-            }
-        }
+    fn new(code_seed: AesRng, code_width: usize, offline_key: OfflineReceiverPcgKey) -> Self {
         Self {
-            evals,
-            delta: value.delta,
+            evals: offline_key.evals,
+            delta: offline_key.delta,
             code_seed,
             code_width,
         }
@@ -111,8 +143,36 @@ impl ReceiverPcgKey {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct PackedOfflineSenderPcgKey {
+    receivers: Vec<PackedPprfReceiver>,
+}
+
 pub struct OfflineSenderPcgKey {
-    receivers: Vec<OfflinePprfReceiver>,
+    evals: Vec<(GF128, GF2)>,
+}
+
+impl From<&PackedOfflineSenderPcgKey> for OfflineSenderPcgKey {
+    fn from(value: &PackedOfflineSenderPcgKey) -> Self {
+        let n = value
+            .receivers
+            .iter()
+            .map(|v| 1 << v.subtree_seeds.len())
+            .sum();
+        let mut evals = Vec::with_capacity(n);
+        let mut acc = GF128::zero();
+        let mut bin_acc = GF2::zero();
+        for pprf in value.receivers.iter().map(|v| PprfReceiver::from(v)) {
+            for (idx, v) in pprf.evals.into_iter().enumerate() {
+                acc += v;
+                if idx == pprf.punctured_index {
+                    bin_acc.flip();
+                }
+                evals.push((acc, bin_acc));
+            }
+        }
+        OfflineSenderPcgKey { evals }
+    }
 }
 
 pub struct SenderPcgKey {
@@ -158,31 +218,14 @@ pub async fn sender_pcg_key<E: MultiPartyEngine>(
 
 impl SenderPcgKey {
     pub fn new(
-        offline_key: &OfflineSenderPcgKey,
+        offline_key: OfflineSenderPcgKey,
         code_seed: AesRng,
         code_width: usize,
     ) -> SenderPcgKey {
-        let n = offline_key
-            .receivers
-            .iter()
-            .map(|v| 1 << v.subtree_seeds.len())
-            .sum();
-        let mut evals = Vec::with_capacity(n);
-        let mut acc = GF128::zero();
-        let mut bin_acc = GF2::zero();
-        for pprf in offline_key.receivers.iter().map(|v| PprfReceiver::from(v)) {
-            for (idx, v) in pprf.evals.into_iter().enumerate() {
-                acc += v;
-                if idx == pprf.punctured_index {
-                    bin_acc.flip();
-                }
-                evals.push((acc, bin_acc));
-            }
-        }
         Self {
             code_seed,
             code_width,
-            evals,
+            evals: offline_key.evals,
         }
     }
     fn next_subfield_vole(&mut self) -> (GF128, GF2) {
@@ -216,6 +259,79 @@ impl SenderPcgKey {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct PackedOfflineFullPcgKey {
+    sender: PackedOfflineSenderPcgKey,
+    receiver: PackedOfflineReceiverPcgKey,
+    is_first: bool,
+}
+
+fn deal_sender_receiver_keys(
+    pprf_count: usize,
+    pprf_depth: usize,
+    mut rng: impl RngCore + CryptoRng,
+) -> (PackedOfflineSenderPcgKey, PackedOfflineReceiverPcgKey) {
+    let code_seed = AesRng::from_random_seed();
+    let receiver = PackedOfflineReceiverPcgKey::random(pprf_count, pprf_depth, &mut rng);
+    let (receiver_offline, _) = receiver.unpack();
+    let receivers = receiver
+        .pprfs
+        .iter()
+        .map(|v| {
+            let mut punctured_index = 0;
+            let mut seed = v.seed;
+            let mut random_number = rng.next_u64();
+            let subtree_seeds: Vec<_> = (0..pprf_depth)
+                .into_iter()
+                .map(|i| {
+                    let (mut s_0, mut s_1) = double_prg_field(&seed);
+                    punctured_index <<= 1;
+                    if random_number & 1 == 1 {
+                        punctured_index += 1;
+                        seed = s_1;
+                        s_0
+                    } else {
+                        seed = s_0;
+                        s_1
+                    }
+                })
+                .collect();
+            let val_at_index = seed + receiver.delta;
+            PackedPprfReceiver {
+                punctured_index,
+                subtree_seeds,
+                val_at_index,
+            }
+        })
+        .collect();
+    let sender = PackedOfflineSenderPcgKey { receivers };
+    (sender, receiver)
+}
+impl PackedOfflineFullPcgKey {
+    pub fn deal(
+        pprf_count: usize,
+        pprf_depth: usize,
+        code_width: usize,
+        mut rng: impl RngCore + CryptoRng,
+    ) -> (PackedOfflineFullPcgKey, PackedOfflineFullPcgKey) {
+        let (first_sender, first_receiver) =
+            deal_sender_receiver_keys(pprf_count, pprf_depth, &mut rng);
+        let (second_sender, second_receiver) =
+            deal_sender_receiver_keys(pprf_count, pprf_depth, &mut rng);
+        let first_full_key = PackedOfflineFullPcgKey {
+            sender: first_sender,
+            receiver: second_receiver,
+            is_first: true,
+        };
+        let second_full_key = PackedOfflineFullPcgKey {
+            sender: second_sender,
+            receiver: first_receiver,
+            is_first: false,
+        };
+        (first_full_key, second_full_key)
+    }
+}
+
 pub struct FullPcgKey {
     sender: SenderPcgKey,
     receiver: ReceiverPcgKey,
@@ -223,6 +339,25 @@ pub struct FullPcgKey {
 }
 
 impl FullPcgKey {
+    pub fn new_from_offline(
+        offline_key: &PackedOfflineFullPcgKey,
+        code_seed: [u8; 16],
+        code_width: usize,
+    ) -> Self {
+        let sender = SenderPcgKey::new(
+            OfflineSenderPcgKey::from(&offline_key.sender),
+            AesRng::from_seed(code_seed),
+            code_width,
+        );
+        let (offline_key_recv, _) = offline_key.receiver.unpack();
+        let receiver =
+            ReceiverPcgKey::new(AesRng::from_seed(code_seed), code_width, offline_key_recv);
+        Self {
+            sender,
+            receiver,
+            is_first: offline_key.is_first,
+        }
+    }
     pub async fn new<E: MultiPartyEngine>(
         engine: E,
         pprf_count: usize,
@@ -247,18 +382,23 @@ impl FullPcgKey {
             seed_sender,
             code_width,
         ));
-        let seed_receiver = AesRng::from_seed(code_seed);
-        let offline_pcg_keys: Vec<_> = (0..pprf_count)
+        let delta = GF128::random(E::rng());
+        let pprfs: Vec<_> = (0..pprf_count)
             .map(|_| OfflinePprfSender::new(pprf_depth, GF128::random(E::rng())))
             .collect();
         let receiver = tokio::spawn(async move {
-            let offline_pcg_keys = offline_pcg_keys;
-            receiver_pcg_key(second_engine, &offline_pcg_keys, seed_receiver, code_width).await
+            let pprfs = pprfs;
+            let packed_key = PackedOfflineReceiverPcgKey { delta, pprfs };
+            receiver_pcg_key(second_engine, &packed_key).await
         });
         let (snd_res, rcv_res) = join!(sender, receiver);
         Ok(Self {
             sender: snd_res.or(Err(()))??,
-            receiver: rcv_res.or(Err(()))??,
+            receiver: ReceiverPcgKey::new(
+                AesRng::from_seed(code_seed),
+                code_width,
+                rcv_res.or(Err(()))??,
+            ),
             is_first: my_id < peer_id,
         })
     }
