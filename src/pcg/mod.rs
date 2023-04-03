@@ -1,34 +1,35 @@
-use std::mem::MaybeUninit;
-
 use crate::{
     engine::MultiPartyEngine,
     fields::{FieldElement, GF128, GF2},
     pprf::{
-        pprf_receiver, pprf_sender, OfflinePprfSender, PackedPprfReceiver, PprfReceiver, PprfSender,
+        distributed_pprf_receiver, distributed_pprf_sender, PackedPprfReceiver, PackedPprfSender,
+        PprfReceiver, PprfSender,
     },
     pseudorandom::{
-        double_prg,
-        hash::correlation_robust_hash_block_field,
-        prg::{double_prg_field, fill_prg},
+        hash::correlation_robust_hash_block_field, prf::prf_eval, prg::double_prg_field,
     },
 };
 use aes_prng::AesRng;
+use bincode::de;
 use futures::future::try_join_all;
-use rand::{random, CryptoRng, SeedableRng};
+use rand::{CryptoRng, SeedableRng};
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::join;
 
 #[derive(Serialize, Deserialize)]
 pub struct PackedOfflineReceiverPcgKey {
-    pprfs: Vec<OfflinePprfSender>,
+    pprfs: Vec<PackedPprfSender>,
     delta: GF128,
 }
 
 impl PackedOfflineReceiverPcgKey {
+    fn new(pprfs: Vec<PackedPprfSender>, delta: GF128) -> Self {
+        Self { pprfs, delta }
+    }
     fn random(pprf_count: usize, pprf_depth: usize, mut rng: impl RngCore + CryptoRng) -> Self {
         let pprfs: Vec<_> = (0..pprf_count)
-            .map(|_| OfflinePprfSender::new(pprf_depth, GF128::random(&mut rng)))
+            .map(|_| PackedPprfSender::new(pprf_depth, GF128::random(&mut rng)))
             .collect();
         Self {
             pprfs,
@@ -77,29 +78,33 @@ pub struct ReceiverPcgKey {
     code_width: usize,
     delta: GF128,
 }
-pub async fn receiver_pcg_key<E: MultiPartyEngine>(
+pub async fn distributed_receiver_pcg_key<E: MultiPartyEngine>(
     engine: E,
     packed_key: &PackedOfflineReceiverPcgKey,
 ) -> Result<OfflineReceiverPcgKey, ()> {
-    let n: usize = packed_key.pprfs.iter().map(|v| 1 << v.depth).sum();
     let (offline_key, left_right_sums) = packed_key.unpack();
     let delta = packed_key.delta;
     let pprf_futures: Vec<_> = left_right_sums
         .into_iter()
         .enumerate()
         .map(|(i, left_right_sum)| {
-            let sub_engine = engine.sub_protocol(format!("PCG TO PPRF {}", i));
+            let mut sub_engine = engine.sub_protocol(format!("PCG TO PPRF {}", i));
             tokio::spawn(async move {
                 let left_right_sum = left_right_sum;
-                pprf_sender(sub_engine, &left_right_sum, delta).await;
+                let last = left_right_sum.last().unwrap();
+                let leaf_sum = last.0 + last.1;
+                sub_engine.broadcast(leaf_sum + delta);
+                distributed_pprf_sender(sub_engine, &left_right_sum)
+                    .await
+                    .unwrap()
             })
         })
         .collect();
-    let pprfs = try_join_all(pprf_futures).await.or(Err(()))?;
+    try_join_all(pprf_futures).await.or(Err(()))?;
     Ok(offline_key)
 }
 impl ReceiverPcgKey {
-    fn new(code_seed: AesRng, code_width: usize, offline_key: OfflineReceiverPcgKey) -> Self {
+    fn new(offline_key: OfflineReceiverPcgKey, code_seed: AesRng, code_width: usize) -> Self {
         Self {
             evals: offline_key.evals,
             delta: offline_key.delta,
@@ -145,7 +150,7 @@ impl ReceiverPcgKey {
 
 #[derive(Serialize, Deserialize)]
 pub struct PackedOfflineSenderPcgKey {
-    receivers: Vec<PackedPprfReceiver>,
+    receivers: Vec<(PackedPprfReceiver, GF128)>,
 }
 
 pub struct OfflineSenderPcgKey {
@@ -157,12 +162,17 @@ impl From<&PackedOfflineSenderPcgKey> for OfflineSenderPcgKey {
         let n = value
             .receivers
             .iter()
-            .map(|v| 1 << v.subtree_seeds.len())
+            .map(|v| 1 << v.0.subtree_seeds.len())
             .sum();
         let mut evals = Vec::with_capacity(n);
         let mut acc = GF128::zero();
         let mut bin_acc = GF2::zero();
-        for pprf in value.receivers.iter().map(|v| PprfReceiver::from(v)) {
+        for (mut pprf, punctured_val) in value
+            .receivers
+            .iter()
+            .map(|v| (PprfReceiver::from(&v.0), v.1))
+        {
+            pprf.evals[pprf.punctured_index] = punctured_val;
             for (idx, v) in pprf.evals.into_iter().enumerate() {
                 acc += v;
                 if idx == pprf.punctured_index {
@@ -180,19 +190,23 @@ pub struct SenderPcgKey {
     code_seed: AesRng,
     code_width: usize,
 }
-pub async fn sender_pcg_key<E: MultiPartyEngine>(
+pub async fn distributed_sender_pcg_key<E: MultiPartyEngine>(
     engine: E,
     pprf_count: usize,
     pprf_depth: usize,
-    code_seed: AesRng,
-    code_width: usize,
-) -> Result<SenderPcgKey, ()> {
+) -> Result<OfflineSenderPcgKey, ()> {
     let t = pprf_count;
     let n = pprf_count * (1 << pprf_depth);
     let pprf_futures: Vec<_> = (0..t)
         .map(|i| {
-            let sub_engine = engine.sub_protocol(format!("PCG TO PPRF {}", i));
-            tokio::spawn(pprf_receiver(sub_engine, pprf_depth))
+            let mut sub_engine = engine.sub_protocol(format!("PCG TO PPRF {}", i));
+            tokio::spawn(async move {
+                let (sum, _): (GF128, _) = sub_engine.recv().await.unwrap();
+                let mut recv = distributed_pprf_receiver(sub_engine, pprf_depth).await?;
+                let leaf_sum = recv.evals.iter().fold(GF128::zero(), |acc, cur| acc + *cur);
+                recv.evals[recv.punctured_index] = sum - leaf_sum;
+                Ok(recv)
+            })
         })
         .collect();
     let pprfs = try_join_all(pprf_futures).await.or(Err(()))?;
@@ -209,11 +223,7 @@ pub async fn sender_pcg_key<E: MultiPartyEngine>(
             evals.push((acc, acc_bit));
         }
     }
-    Ok(SenderPcgKey {
-        evals,
-        code_seed,
-        code_width,
-    })
+    Ok(OfflineSenderPcgKey { evals })
 }
 
 impl SenderPcgKey {
@@ -271,37 +281,14 @@ fn deal_sender_receiver_keys(
     pprf_depth: usize,
     mut rng: impl RngCore + CryptoRng,
 ) -> (PackedOfflineSenderPcgKey, PackedOfflineReceiverPcgKey) {
-    let code_seed = AesRng::from_random_seed();
     let receiver = PackedOfflineReceiverPcgKey::random(pprf_count, pprf_depth, &mut rng);
-    let (receiver_offline, _) = receiver.unpack();
     let receivers = receiver
         .pprfs
         .iter()
         .map(|v| {
-            let mut punctured_index = 0;
-            let mut seed = v.seed;
-            let mut random_number = rng.next_u64();
-            let subtree_seeds: Vec<_> = (0..pprf_depth)
-                .into_iter()
-                .map(|i| {
-                    let (mut s_0, mut s_1) = double_prg_field(&seed);
-                    punctured_index <<= 1;
-                    if random_number & 1 == 1 {
-                        punctured_index += 1;
-                        seed = s_1;
-                        s_0
-                    } else {
-                        seed = s_0;
-                        s_1
-                    }
-                })
-                .collect();
-            let val_at_index = seed + receiver.delta;
-            PackedPprfReceiver {
-                punctured_index,
-                subtree_seeds,
-                val_at_index,
-            }
+            let punctured_index = (rng.next_u64() % (1 << v.depth)) as usize;
+            let leaf_val = prf_eval(&v.seed, v.depth, punctured_index);
+            (v.puncture(punctured_index), leaf_val + receiver.delta)
         })
         .collect();
     let sender = PackedOfflineSenderPcgKey { receivers };
@@ -311,7 +298,6 @@ impl PackedOfflineFullPcgKey {
     pub fn deal(
         pprf_count: usize,
         pprf_depth: usize,
-        code_width: usize,
         mut rng: impl RngCore + CryptoRng,
     ) -> (PackedOfflineFullPcgKey, PackedOfflineFullPcgKey) {
         let (first_sender, first_receiver) =
@@ -351,7 +337,7 @@ impl FullPcgKey {
         );
         let (offline_key_recv, _) = offline_key.receiver.unpack();
         let receiver =
-            ReceiverPcgKey::new(AesRng::from_seed(code_seed), code_width, offline_key_recv);
+            ReceiverPcgKey::new(offline_key_recv, AesRng::from_seed(code_seed), code_width);
         Self {
             sender,
             receiver,
@@ -375,30 +361,30 @@ impl FullPcgKey {
             (first_engine, second_engine) = (second_engine, first_engine)
         }
         let seed_sender = AesRng::from_seed(code_seed);
-        let sender = tokio::spawn(sender_pcg_key(
+        let sender = tokio::spawn(distributed_sender_pcg_key(
             first_engine,
             pprf_count,
             pprf_depth,
-            seed_sender,
-            code_width,
         ));
         let delta = GF128::random(E::rng());
         let pprfs: Vec<_> = (0..pprf_count)
-            .map(|_| OfflinePprfSender::new(pprf_depth, GF128::random(E::rng())))
+            .map(|_| PackedPprfSender::new(pprf_depth, GF128::random(E::rng())))
             .collect();
         let receiver = tokio::spawn(async move {
             let pprfs = pprfs;
             let packed_key = PackedOfflineReceiverPcgKey { delta, pprfs };
-            receiver_pcg_key(second_engine, &packed_key).await
+            distributed_receiver_pcg_key(second_engine, &packed_key).await
         });
         let (snd_res, rcv_res) = join!(sender, receiver);
+        let sender = SenderPcgKey::new(snd_res.or(Err(()))??, seed_sender, code_width);
+        let receiver = ReceiverPcgKey::new(
+            rcv_res.or(Err(()))??,
+            AesRng::from_seed(code_seed),
+            code_width,
+        );
         Ok(Self {
-            sender: snd_res.or(Err(()))??,
-            receiver: ReceiverPcgKey::new(
-                AesRng::from_seed(code_seed),
-                code_width,
-                rcv_res.or(Err(()))??,
-            ),
+            sender,
+            receiver,
             is_first: my_id < peer_id,
         })
     }
@@ -424,12 +410,18 @@ mod test {
     use rand::thread_rng;
     use tokio::join;
 
-    use super::{receiver_pcg_key, sender_pcg_key};
+    use super::{
+        distributed_receiver_pcg_key, distributed_sender_pcg_key, PackedOfflineReceiverPcgKey,
+        PackedOfflineSenderPcgKey, ReceiverPcgKey, SenderPcgKey,
+    };
     use crate::{
         engine::LocalRouter,
         fields::{FieldElement, GF128},
-        pcg::FullPcgKey,
-        pprf::OfflinePprfSender,
+        pcg::{
+            deal_sender_receiver_keys, FullPcgKey, OfflineReceiverPcgKey, OfflineSenderPcgKey,
+            PackedOfflineFullPcgKey,
+        },
+        pprf::PackedPprfSender,
         uc_tags::UCTag,
     };
     use aes_prng::AesRng;
@@ -449,28 +441,18 @@ mod test {
         let receiver_engine = engines.remove(&party_ids[1]).unwrap();
 
         let local_handle = tokio::spawn(router.launch());
-        let sender_h = sender_pcg_key(
-            sender_engine,
-            PPRF_COUNT,
-            PPRF_DEPTH,
-            AesRng::from_seed(seed),
-            CODE_WIDTH,
-        );
-        let offline_pprfs: Vec<_> = (0..PPRF_COUNT)
-            .map(|_| OfflinePprfSender::new(PPRF_DEPTH, GF128::random(thread_rng())))
-            .collect();
-        let receiver_h = receiver_pcg_key(
-            receiver_engine,
-            &offline_pprfs,
-            AesRng::from_seed(seed),
-            CODE_WIDTH,
-        );
+        let sender_h = distributed_sender_pcg_key(sender_engine, PPRF_COUNT, PPRF_DEPTH);
+        let packed_offline_receiver =
+            PackedOfflineReceiverPcgKey::random(PPRF_COUNT, PPRF_DEPTH, thread_rng());
+        let receiver_h = distributed_receiver_pcg_key(receiver_engine, &packed_offline_receiver);
 
         let (snd_res, rcv_res) = join!(sender_h, receiver_h);
-        let (mut snd_res, mut rcv_res) = (snd_res.unwrap(), rcv_res.unwrap());
+        let (snd_res, rcv_res) = (snd_res.unwrap(), rcv_res.unwrap());
+        let mut online_sender = SenderPcgKey::new(snd_res, AesRng::from_seed(seed), CODE_WIDTH);
+        let mut online_receiver = ReceiverPcgKey::new(rcv_res, AesRng::from_seed(seed), CODE_WIDTH);
         for _ in 0..CORRELATION_COUNT {
-            let sender_corr = snd_res.next_bit_beaver_triplet();
-            let rcv_corr = rcv_res.next_bit_beaver_triple();
+            let sender_corr = online_sender.next_bit_beaver_triplet();
+            let rcv_corr = online_receiver.next_bit_beaver_triple();
             assert_eq!(
                 (sender_corr.0 + rcv_corr.0) * (sender_corr.1 + rcv_corr.1),
                 sender_corr.2 + rcv_corr.2
@@ -513,5 +495,43 @@ mod test {
             );
         }
         local_handle.await.unwrap().unwrap();
+    }
+    #[test]
+    fn test_deal() {
+        const PPRF_COUNT: usize = 1;
+        const PPRF_DEPTH: usize = 2;
+        const CODE_WIDTH: usize = 8;
+        const CORRELATION_COUNT: usize = 10_000;
+        let seed = [0u8; 16];
+        let (sender, receiver) = deal_sender_receiver_keys(PPRF_COUNT, PPRF_DEPTH, thread_rng());
+        let offline_sender = OfflineSenderPcgKey::from(&sender);
+        let (offline_receiver, sums) = receiver.unpack();
+        for i in 0..offline_receiver.evals.len() {
+            assert_eq!(
+                dbg!(offline_sender.evals[i].0) + dbg!(offline_receiver.evals[i]),
+                dbg!(receiver.delta) * dbg!(offline_sender.evals[i].1)
+            );
+        }
+    }
+    #[test]
+    fn test_deal_full() {
+        const PPRF_COUNT: usize = 10;
+        const PPRF_DEPTH: usize = 13;
+        const CODE_WIDTH: usize = 8;
+        const CORRELATION_COUNT: usize = 10_000;
+        let seed = [0u8; 16];
+        let (packed_full_key_1, packed_full_key_2) =
+            PackedOfflineFullPcgKey::deal(PPRF_COUNT, PPRF_DEPTH, thread_rng());
+        let mut full_key_1 = FullPcgKey::new_from_offline(&packed_full_key_1, seed, CODE_WIDTH);
+        let mut full_key_2 = FullPcgKey::new_from_offline(&packed_full_key_2, seed, CODE_WIDTH);
+
+        for _ in 0..CORRELATION_COUNT {
+            let sender_corr = full_key_1.next_wide_beaver_triple();
+            let rcv_corr = full_key_2.next_wide_beaver_triple();
+            assert_eq!(
+                (sender_corr.1 + rcv_corr.1) * (sender_corr.0 + rcv_corr.0),
+                sender_corr.2 + rcv_corr.2
+            );
+        }
     }
 }

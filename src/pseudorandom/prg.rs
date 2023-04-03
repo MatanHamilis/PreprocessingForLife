@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 pub const PRG_KEY_SIZE: usize = 16;
 
 pub fn fill_prg(seed: &GF128, output: &mut [GF128]) {
-    let depth = output.len().leading_zeros();
+    let depth = output.len().ilog2();
     assert_eq!(1 << depth, output.len());
+    output[0] = *seed;
     for i in 1..=depth {
         double_prg_many_inplace(&mut output[..1 << i]);
     }
@@ -156,5 +157,25 @@ fn double_prg_many_inplace_parametrized<const BLOCK_SIZE: usize>(in_out: &mut [B
             xor_arrays(&mut output[2 * i + 1].into(), &input[i].into());
             output[2 * i + 1][0] = !output[2 * i + 1][0];
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::fields::FieldElement;
+    use crate::fields::GF128;
+    use rand::thread_rng;
+
+    use super::double_prg_field;
+    use super::double_prg_many_inplace;
+
+    #[test]
+    pub fn test() {
+        let v = GF128::random(thread_rng());
+        let (v_0, v_1) = double_prg_field(&v);
+        let mut vect = vec![v, GF128::zero()];
+        double_prg_many_inplace(&mut vect);
+        assert_eq!(v_0, vect[0]);
+        assert_eq!(v_1, vect[1]);
     }
 }

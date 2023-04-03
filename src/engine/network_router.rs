@@ -304,7 +304,7 @@ mod test {
     }
     #[tokio::test]
     async fn test_networked_router() {
-        const PARTIES_COUNT: usize = 10;
+        const PARTIES_COUNT: usize = 8;
         const ROOT_TAG: &str = "ROOT TAG";
         let party_ids: [PartyId; PARTIES_COUNT] = core::array::from_fn(|i| (i + 1) as PartyId);
         let addresses = HashMap::from_iter(party_ids.iter().map(|i| {

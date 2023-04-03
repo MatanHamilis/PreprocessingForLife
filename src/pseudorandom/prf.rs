@@ -1,8 +1,11 @@
 // use crate::pprf::bits_to_usize;
 // use crate::pprf::usize_to_bits;
 
+use crate::fields::GF128;
+
 use super::double_prg;
 use super::double_prg_many;
+use super::prg::double_prg_field;
 use super::prg::PrgValue;
 #[cfg(feature = "aesni")]
 use aes::Block;
@@ -30,27 +33,18 @@ impl<const INPUT_BITLEN: usize> AsRef<[bool; INPUT_BITLEN]> for PrfInput<INPUT_B
     }
 }
 
-// impl<const INPUT_BITLEN: usize> From<usize> for PrfInput<INPUT_BITLEN> {
-//     fn from(v: usize) -> Self {
-//         Self(usize_to_bits(v))
-//     }
-// }
-
-// impl<const INPUT_BITLEN: usize> From<&PrfInput<INPUT_BITLEN>> for usize {
-//     fn from(v: &PrfInput<INPUT_BITLEN>) -> Self {
-//         bits_to_usize(v.as_ref())
-//     }
-// }
-
-pub fn prf_eval(key: &PrgValue, input: &[bool]) -> PrgValue {
-    input.iter().fold(*key, |prf_out, &input_bit| {
-        let prg_out = double_prg(&prf_out);
-        if input_bit {
-            prg_out.1
-        } else {
-            prg_out.0
-        }
-    })
+pub fn prf_eval(key: &GF128, bits: usize, input: usize) -> GF128 {
+    (0..bits)
+        .rev()
+        .map(|i| ((input >> i) & 1) == 1)
+        .fold(*key, |prf_out, input_bit| {
+            let prg_out = double_prg_field(&prf_out);
+            if input_bit {
+                prg_out.1
+            } else {
+                prg_out.0
+            }
+        })
 }
 
 #[inline(always)]
@@ -61,44 +55,6 @@ fn block_vec(size: usize) -> Vec<Block> {
     std::mem::forget(v);
     unsafe { Vec::from_raw_parts(ptr.cast(), len / BLOCK_SIZE, cap / BLOCK_SIZE) }
 }
-
-// pub fn prf_eval_all_into_slice(key: &[u8; KEY_SIZE], depth: usize, output: &mut [[u8; KEY_SIZE]]) {
-//     const SINGLE_THREAD_THRESH: usize = 10;
-//     assert!(output.len() == (1 << depth));
-//     let mut helper = block_vec(output.len());
-//     let mut helper_two = block_vec(output.len());
-//     helper[0] = Block::from(*key);
-//     let mut cur_from = &mut helper;
-//     let mut cur_to = &mut helper_two;
-
-//     for i in 0..std::cmp::min(depth, SINGLE_THREAD_THRESH) {
-//         double_prg_many(&cur_from[0..1 << i], &mut cur_to[..1 << (i + 1)]);
-//         (cur_from, cur_to) = (cur_to, cur_from);
-//     }
-//     if depth > SINGLE_THREAD_THRESH {
-//         for i in (0..1 << SINGLE_THREAD_THRESH).rev() {
-//             cur_from[i << (depth - SINGLE_THREAD_THRESH)] = cur_from[i];
-//         }
-//         cur_from
-//             .par_chunks_mut(1 << (depth - SINGLE_THREAD_THRESH))
-//             .zip(cur_to.par_chunks_mut(1 << (depth - SINGLE_THREAD_THRESH)))
-//             .for_each(|(mut cur_from, mut cur_to)| {
-//                 for i in 0..(depth - SINGLE_THREAD_THRESH) {
-//                     double_prg_many(&cur_from[0..1 << i], &mut cur_to[..1 << (i + 1)]);
-//                     (cur_from, cur_to) = (cur_to, cur_from);
-//                 }
-//             })
-//     }
-//     let chunk_size = 1 << SINGLE_THREAD_THRESH;
-//     output
-//         .chunks_mut(chunk_size)
-//         .zip(cur_from.chunks(chunk_size))
-//         .for_each(|(output_chunk, helper_chunk)| {
-//             for i in 0..output_chunk.len() {
-//                 output_chunk[i] = *helper_chunk[i].as_ref();
-//             }
-//         });
-// }
 
 pub fn prf_eval_all_into_slice(key: &PrgValue, depth: usize, output: &mut [PrgValue]) {
     let cache_depth = CACHE_LEVEL_DEPTH;

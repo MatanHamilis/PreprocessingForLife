@@ -1,3 +1,5 @@
+use std::mem::MaybeUninit;
+
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 
@@ -5,16 +7,16 @@ use crate::{
     engine::{MultiPartyEngine, PartyId},
     fields::{FieldElement, GF128},
     ot::{ChosenMessageOTReceiver, ChosenMessageOTSender},
-    pseudorandom::prg::{double_prg_many_inplace, fill_prg},
+    pseudorandom::prg::{double_prg_field, double_prg_many_inplace, fill_prg},
 };
 
 #[derive(Serialize, Deserialize)]
-pub struct OfflinePprfSender {
+pub struct PackedPprfSender {
     pub seed: GF128,
     pub depth: usize,
 }
 
-impl OfflinePprfSender {
+impl PackedPprfSender {
     pub fn new(depth: usize, seed: GF128) -> Self {
         Self { seed, depth }
     }
@@ -24,14 +26,36 @@ pub struct PprfSender {
     pub evals: Vec<GF128>,
     pub left_right_sums: Vec<(GF128, GF128)>,
 }
-impl From<OfflinePprfSender> for PprfSender {
-    fn from(value: OfflinePprfSender) -> Self {
+impl From<PackedPprfSender> for PprfSender {
+    fn from(value: PackedPprfSender) -> Self {
         (&value).into()
     }
 }
 
-impl From<&OfflinePprfSender> for PprfSender {
-    fn from(value: &OfflinePprfSender) -> Self {
+impl PackedPprfSender {
+    pub fn puncture(&self, punctured_index: usize) -> PackedPprfReceiver {
+        let mut seed = self.seed;
+        let mut subtree_seeds = Vec::with_capacity(self.depth);
+        for i in (0..self.depth).rev() {
+            let (s_0, s_1) = double_prg_field(&seed);
+            let bit = (punctured_index >> i) & 1 == 1;
+            if bit {
+                subtree_seeds.push(s_0);
+                seed = s_1;
+            } else {
+                subtree_seeds.push(s_1);
+                seed = s_0;
+            }
+        }
+        PackedPprfReceiver {
+            punctured_index,
+            subtree_seeds,
+        }
+    }
+}
+
+impl From<&PackedPprfSender> for PprfSender {
+    fn from(value: &PackedPprfSender) -> Self {
         let mut evals = vec![GF128::zero(); 1 << value.depth];
         let mut left_right_sums = Vec::<(GF128, GF128)>::with_capacity(value.depth);
         evals[0] = value.seed;
@@ -51,17 +75,14 @@ impl From<&OfflinePprfSender> for PprfSender {
         }
     }
 }
-pub async fn pprf_sender<T: MultiPartyEngine>(
-    mut engine: T,
+pub async fn distributed_pprf_sender(
+    engine: impl MultiPartyEngine,
     left_right_sums: &[(GF128, GF128)],
-    delta: GF128,
 ) -> Result<(), ()> {
     let ot_sender =
         ChosenMessageOTSender::init(engine.sub_protocol(&"PPRF TO OT"), left_right_sums.len())
             .await?;
     ot_sender.choose(left_right_sums).await;
-    let last_msg = left_right_sums.last().unwrap();
-    engine.broadcast(last_msg.0 + last_msg.1 + delta);
     Ok(())
 }
 
@@ -69,16 +90,14 @@ pub async fn pprf_sender<T: MultiPartyEngine>(
 pub struct PackedPprfReceiver {
     pub punctured_index: usize,
     pub subtree_seeds: Vec<GF128>,
-    pub val_at_index: GF128,
 }
 
 impl From<&PackedPprfReceiver> for PprfReceiver {
     fn from(value: &PackedPprfReceiver) -> Self {
         let depth = value.subtree_seeds.len();
         let n = 1 << depth;
-        let mut evals = Vec::with_capacity(n);
+        let mut evals = unsafe { vec![MaybeUninit::<GF128>::uninit().assume_init(); n] };
         assert!(value.punctured_index < n);
-        let mut current_index = value.val_at_index;
         let mut top = n;
         let mut bottom = 0;
         for seed in value.subtree_seeds.iter() {
@@ -92,7 +111,7 @@ impl From<&PackedPprfReceiver> for PprfReceiver {
             }
         }
         debug_assert_eq!(bottom, value.punctured_index);
-        evals[value.punctured_index] = value.val_at_index;
+        evals[value.punctured_index] = GF128::zero();
         Self {
             punctured_index: value.punctured_index,
             evals,
@@ -104,14 +123,14 @@ pub struct PprfReceiver {
     pub punctured_index: usize,
     pub evals: Vec<GF128>,
 }
-pub async fn pprf_receiver<T: MultiPartyEngine>(
+pub async fn distributed_pprf_receiver<T: MultiPartyEngine>(
     mut engine: T,
     depth: usize,
 ) -> Result<PprfReceiver, ()> {
     let ot_receiver =
         ChosenMessageOTReceiver::init(engine.sub_protocol(&"PPRF TO OT"), depth).await?;
     let receiver_ots = ot_receiver.handle_choice().await?;
-    let mut evals = vec![GF128::zero(); 1 << depth];
+    let mut evals = unsafe { vec![MaybeUninit::<GF128>::uninit().assume_init(); 1 << depth] };
     let mut punctured_index = 0;
     receiver_ots.into_iter().enumerate().for_each(|(idx, ot)| {
         let round_slice = &mut evals[0..2 << idx];
@@ -126,19 +145,28 @@ pub async fn pprf_receiver<T: MultiPartyEngine>(
         node_val -= evals[point_to_restore];
         evals[point_to_restore] = node_val;
     });
-    let xor_all = evals.iter().fold(GF128::zero(), |acc, cur| acc + *cur);
-    let (xor_all_with_delta, _): (GF128, PartyId) = engine.recv().await.ok_or(())?;
-    evals[punctured_index] += xor_all - xor_all_with_delta;
+    evals[punctured_index] = GF128::zero();
     Ok(PprfReceiver {
         punctured_index,
         evals,
     })
 }
 
+pub fn deal_pprf(
+    depth: usize,
+    mut rng: impl CryptoRng + RngCore,
+) -> (PackedPprfSender, PackedPprfReceiver) {
+    let sender = PackedPprfSender::new(depth, GF128::random(&mut rng));
+    let punctured_index = (rng.next_u64() % (1 << depth)) as usize;
+    let receiver = sender.puncture(punctured_index);
+    (sender, receiver)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{pprf_receiver, pprf_sender};
-    use super::{OfflinePprfSender, PprfSender};
+    use super::{deal_pprf, distributed_pprf_receiver, distributed_pprf_sender};
+    use super::{PackedPprfSender, PprfSender};
+    use crate::pprf::PprfReceiver;
     use crate::{
         engine::LocalRouter,
         fields::{FieldElement, GF128},
@@ -158,12 +186,12 @@ mod tests {
         let pprf_sender_engine = engines.remove(&party_ids[0]).unwrap();
         let pprf_receiver_engine = engines.remove(&party_ids[1]).unwrap();
         let mut rng = thread_rng();
-        let delta = GF128::random(&mut rng);
         let pprf_sender_val: PprfSender =
-            OfflinePprfSender::new(PPRF_DEPTH, GF128::random(&mut rng)).into();
+            PackedPprfSender::new(PPRF_DEPTH, GF128::random(&mut rng)).into();
         let pprf_sender_handle =
-            pprf_sender(pprf_sender_engine, &pprf_sender_val.left_right_sums, delta);
-        let pprf_receiver_handle = tokio::spawn(pprf_receiver(pprf_receiver_engine, PPRF_DEPTH));
+            distributed_pprf_sender(pprf_sender_engine, &pprf_sender_val.left_right_sums);
+        let pprf_receiver_handle =
+            tokio::spawn(distributed_pprf_receiver(pprf_receiver_engine, PPRF_DEPTH));
 
         let (pprf_sender_future, pprf_receiver_res) =
             join!(pprf_sender_handle, pprf_receiver_handle);
@@ -180,13 +208,25 @@ mod tests {
             .into_iter()
             .zip(snd_evals.iter().copied())
             .enumerate()
-            .for_each(|(idx, (snd, rcv))| {
+            .for_each(|(idx, (rcv, snd))| {
                 if idx != punctured_index {
                     assert_eq!(snd, rcv);
                 } else {
-                    assert_eq!(snd + rcv, delta);
+                    assert!(rcv.is_zero());
                 }
             });
         router_handle.await.unwrap().unwrap();
+    }
+    #[test]
+    fn test_puncture() {
+        const DEPTH: usize = 1;
+        let (sender, receiver) = deal_pprf(DEPTH, thread_rng());
+        let sender = PprfSender::from(&sender);
+        let receiver = PprfReceiver::from(&receiver);
+        for i in 0..1 << DEPTH {
+            if i != receiver.punctured_index {
+                assert_eq!(sender.evals[i], receiver.evals[i])
+            }
+        }
     }
 }
