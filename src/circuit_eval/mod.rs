@@ -1,3 +1,3 @@
 mod bristol_fashion;
-// mod malicious;
+// mod verify;
 mod semi_honest;

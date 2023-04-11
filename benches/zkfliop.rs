@@ -158,8 +158,8 @@ fn bench_single(log_length: usize, parties: usize, b: &mut Bencher) {
 pub fn bench_zkfliop(c: &mut Criterion) {
     const PARTIES_START: usize = 3;
     const PARTIES_END: usize = 3;
-    const LOG_Z_START: usize = 20;
-    const LOG_Z_END: usize = 20;
+    const LOG_Z_START: usize = 10;
+    const LOG_Z_END: usize = 24;
 
     for parties in PARTIES_START..=PARTIES_END {
         let mut g = c.benchmark_group(format!("parties {}", parties).as_str());

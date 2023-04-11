@@ -1,14 +1,15 @@
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
 use rand_core::OsRng;
+use silent_party::fields::FieldElement;
 use silent_party::fields::GF128;
 use std::time::Instant;
 
 pub fn mul_benchmark(c: &mut Criterion) {
     c.bench_function("mul_bench", |b| {
         b.iter_custom(|iters| {
-            let rng = &mut OsRng;
-            let a: Vec<_> = (0..iters).map(|_| GF128::random(rng)).collect();
-            let b: Vec<_> = (0..iters).map(|_| GF128::random(rng)).collect();
+            let mut rng = &mut OsRng;
+            let a: Vec<_> = (0..iters).map(|_| GF128::random(&mut rng)).collect();
+            let b: Vec<_> = (0..iters).map(|_| GF128::random(&mut rng)).collect();
             let start = Instant::now();
             for i in 0..iters as usize {
                 black_box(a[i] * b[i]);
@@ -19,9 +20,9 @@ pub fn mul_benchmark(c: &mut Criterion) {
 }
 pub fn mul_benchmark_with_mem(c: &mut Criterion) {
     c.bench_function("mul_bench_with_mem", |bench| {
-        let rng = &mut OsRng;
+        let mut rng = &mut OsRng;
         bench.iter_batched(
-            || (GF128::random(rng), GF128::random(rng)),
+            || (GF128::random(&mut rng), GF128::random(&mut rng)),
             |(a, b)| (a * b),
             BatchSize::SmallInput,
         );
