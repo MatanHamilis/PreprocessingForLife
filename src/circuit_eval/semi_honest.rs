@@ -90,7 +90,8 @@ async fn create_multi_party_beaver_triples(
                     } => {
                         let x = GF2::random(&mut prg);
                         let y = GF2::random(&mut prg);
-                        let mut z = GF2::zero();
+                        let xy = x * y;
+                        let mut z = xy;
                         for party in peers.iter() {
                             let (a, b, c) = pcg_correlations
                                 .get_mut(&party)
@@ -100,7 +101,7 @@ async fn create_multi_party_beaver_triples(
                                 (layer_idx, gate_idx, GateOpening::And(x - a, y - b)),
                                 *party,
                             );
-                            z += c + y * (x - a) + (y - b) * a;
+                            z += c + y * (x - a) + (y - b) * a - xy;
                             pairwise_beaver_triples.insert((layer_idx, gate_idx, *party), a);
                         }
                         n_wise_beaver_triples.insert(
@@ -115,7 +116,8 @@ async fn create_multi_party_beaver_triples(
                     } => {
                         let x = GF2::random(&mut prg);
                         let wy = GF128::random(&mut prg);
-                        let mut wz = GF128::zero();
+                        let xwy = wy * x;
+                        let mut wz = xwy;
                         for party in peers.iter() {
                             let (a, wb, wc) = pcg_correlations
                                 .get_mut(&party)
@@ -125,7 +127,7 @@ async fn create_multi_party_beaver_triples(
                                 (layer_idx, gate_idx, GateOpening::WideAnd(x - a, wy - wb)),
                                 *party,
                             );
-                            wz += wc + wy * (x - a) + (wy - wb) * a;
+                            wz += wc + wy * (x - a) + (wy - wb) * a - xwy;
                             pairwise_beaver_triples.insert((layer_idx, gate_idx, *party), a);
                         }
                         n_wise_beaver_triples.insert(
@@ -148,7 +150,7 @@ async fn create_multi_party_beaver_triples(
             .unwrap();
         match (opening, beaver_triple) {
             (GateOpening::And(xa, yb), MultiPartyBeaverTriple::Regular(_, y, z)) => {
-                *z += xa * *y + yb * a
+                *z += xa * *y + yb * a;
             }
             (GateOpening::WideAnd(xa, wyb), MultiPartyBeaverTriple::Wide(_, wy, wz)) => {
                 *wz += *wy * xa + wyb * a;
@@ -210,6 +212,8 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
                         MultiPartyBeaverTriple::Regular(a, b, c) => (*a, *b, *c),
                         _ => panic!(),
                     };
+                    wire_mask_shares.insert(input[0], a);
+                    wire_mask_shares.insert(input[1], b);
 
                     let (x, y) = (wires[input[0]], wires[input[1]]);
                     wires[*output] = c + y * (x - a) + (y - b) * a;
@@ -236,9 +240,10 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
                     };
                     let x = wires[*input_bit];
                     let mut wy = GF128::zero();
+                    assert!(wire_mask_shares.insert(*input_bit, a).is_none());
                     for i in 0..input.len() {
                         let input_wire = wires[input[i]];
-                        wires[output[i]] = input_wire * x;
+                        wire_mask_shares.insert(input[i], GF2::from(wb.get_bit(i)));
                         wy.set_bit(input_wire.into(), i);
                     }
                     let wz = wc + wy * (x - a) + (wy - wb) * a;
@@ -246,7 +251,7 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
                         wires[*output_wire] = wz.get_bit(idx).into();
                     }
                     let msg = EvalMessage {
-                        opening: GateOpening::WideAnd(a + x, wb + wy),
+                        opening: GateOpening::WideAnd(x - a, wy - wb),
                         gate_idx_in_layer: gate_idx,
                     };
                     engine.broadcast(msg);
@@ -285,7 +290,7 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
                     MultiPartyBeaverTriple::Wide(a, _, _),
                     ParsedGate::WideAndGate {
                         input,
-                        input_bit: _,
+                        input_bit,
                         output,
                     },
                 ) => {
@@ -293,6 +298,7 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
                         *wire_masked_values.get_mut(input_wire).unwrap() +=
                             GF2::from(wby.get_bit(input_wire_idx));
                     }
+                    *wire_masked_values.get_mut(&input_bit).unwrap() += ax;
                     for i in 0..output.len() {
                         let y = wires[input[i]];
                         wires[output[i]] += y * ax + GF2::from(wby.get_bit(i)) * *a;
@@ -457,7 +463,7 @@ mod tests {
         });
         let exec_results = try_join_all(engine_futures).await.unwrap();
         let mut cloned = HashMap::clone(&exec_results[0].1);
-        exec_results.iter().for_each(|(_, v)| {
+        exec_results.iter().skip(1).for_each(|(_, v)| {
             v.iter().for_each(|((layer_idx, gate_idx), bt)| {
                 let current = cloned.get_mut(&(*layer_idx, *gate_idx)).unwrap();
                 match (current, bt) {
@@ -506,9 +512,7 @@ mod tests {
         let mut local_computation_output = local_computation_wires
             [local_computation_wires.len() - circuit.output_wire_count..]
             .to_vec();
-        let output = local_computation_output
-            [local_computation_output.len() - circuit.output_wire_count..]
-            .to_vec();
+        let output = local_computation_output.clone();
         for e in exec_results.iter() {
             assert_eq!(e.0.len(), local_computation_output.len());
         }
@@ -519,9 +523,12 @@ mod tests {
                 .for_each(|(ei, li)| li.sub_assign(*ei));
         });
         router_handle.await.unwrap().unwrap();
+
+        // Check Computation is Correct
         for i in 0..circuit.output_wire_count {
             assert_eq!(local_computation_output[i], GF2::zero());
         }
+
         for e in exec_results.iter() {
             for (wire_idx, wire_mask_share) in e.2.iter() {
                 local_computation_wires[*wire_idx] += *wire_mask_share;
