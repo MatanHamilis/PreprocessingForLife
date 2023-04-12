@@ -508,8 +508,8 @@ mod test {
         let (offline_receiver, sums) = receiver.unpack();
         for i in 0..offline_receiver.evals.len() {
             assert_eq!(
-                dbg!(offline_sender.evals[i].0) + dbg!(offline_receiver.evals[i]),
-                dbg!(receiver.delta) * dbg!(offline_sender.evals[i].1)
+                offline_sender.evals[i].0 + offline_receiver.evals[i],
+                receiver.delta * offline_sender.evals[i].1
             );
         }
     }
