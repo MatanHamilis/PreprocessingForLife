@@ -4,6 +4,7 @@ use std::fmt::Debug;
 
 use aes_prng::AesRng;
 use blake3::Hash;
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 
 use crate::circuit_eval::bristol_fashion::ParsedGate;
@@ -64,6 +65,7 @@ async fn create_multi_party_beaver_triples(
     mut engine: impl MultiPartyEngine,
     circuit: &ParsedCircuit,
     pcg_correlations: &mut HashMap<PartyId, FullPcgKey>,
+    randomness_seed: [u8; 16],
 ) -> HashMap<(usize, usize), MultiPartyBeaverTriple> {
     let my_id = engine.my_party_id();
     let peers: Vec<_> = engine
@@ -72,7 +74,7 @@ async fn create_multi_party_beaver_triples(
         .copied()
         .filter(|v| *v != my_id)
         .collect();
-    let mut prg = AesRng::from_random_seed();
+    let mut prg = AesRng::from_seed(randomness_seed);
     let mut pairwise_beaver_triples = HashMap::new();
     let mut n_wise_beaver_triples = HashMap::new();
     circuit
@@ -167,6 +169,7 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
     circuit: ParsedCircuit,
     pre_shared_input: Vec<GF2>,
     multi_party_beaver_triples: HashMap<(usize, usize), MultiPartyBeaverTriple>,
+    output_wire_masks: HashMap<usize, GF2>,
 ) -> Result<(Vec<GF2>, HashMap<usize, GF2>, HashMap<usize, GF2>), CircuitEvalError> {
     let my_id = engine.my_party_id();
     let min_id = engine
@@ -184,8 +187,10 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
         .iter()
         .map(|layer| layer.iter().filter(|g| !g.is_linear()).count())
         .sum();
-    let mut wire_mask_shares = HashMap::<usize, GF2>::with_capacity(total_non_linear_gates);
-    let mut wire_masked_values = HashMap::<usize, GF2>::with_capacity(total_non_linear_gates);
+    let mut wire_mask_shares = output_wire_masks;
+    wire_mask_shares.reserve(total_non_linear_gates);
+    let mut wire_masked_values =
+        HashMap::<usize, GF2>::with_capacity(total_non_linear_gates + circuit.output_wire_count);
     let max_layer_size = circuit.gates.iter().fold(0, |acc, cur| {
         let non_linear_gates_in_layer = cur.iter().filter(|cur| !cur.is_linear()).count();
         usize::max(acc, non_linear_gates_in_layer)
@@ -308,6 +313,23 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
             }
         }
     }
+    // Create a robust secret sharing of the output wires.
+    for (i, wire) in wires
+        .iter()
+        .enumerate()
+        .skip(wires.len() - circuit.output_wire_count)
+    {
+        let mask = wire_mask_shares.get(&i).unwrap();
+        engine.broadcast((i, *wire - *mask));
+        wire_masked_values.insert(i, *wire - *mask);
+    }
+
+    for _ in 0..circuit.output_wire_count * number_of_peers {
+        let ((wire_id, masked_val), _): ((usize, GF2), _) = engine.recv().await.unwrap();
+        assert!(wires.len() - circuit.output_wire_count <= wire_id && wire_id < wires.len());
+        *wire_masked_values.get_mut(&wire_id).unwrap() += masked_val;
+    }
+
     Ok((
         wires[wires.len() - circuit.output_wire_count..].to_vec(),
         wire_masked_values,
@@ -361,7 +383,7 @@ mod tests {
     };
 
     use futures::{future::try_join_all, FutureExt};
-    use rand::thread_rng;
+    use rand::{random, thread_rng};
 
     use super::bristol_fashion::{parse_bristol, ParsedCircuit};
     use crate::{
@@ -454,10 +476,11 @@ mod tests {
             let circuit = circuit.clone();
             let engine = execs.get(&id).unwrap().sub_protocol("MULTIPARTY BEAVER");
             async move {
+                let random_seed = core::array::from_fn(|_| random());
                 let circuit = circuit.clone();
                 Result::<_, ()>::Ok((
                     id,
-                    create_multi_party_beaver_triples(engine, &circuit, pcg_key).await,
+                    create_multi_party_beaver_triples(engine, &circuit, pcg_key, random_seed).await,
                 ))
             }
         });
@@ -499,11 +522,19 @@ mod tests {
         }
 
         let engine_futures = exec_results.into_iter().map(|(id, n_party_correlation)| {
+            let output_wire_masks: HashMap<_, _> = (circuit.input_wire_count
+                + circuit.internal_wire_count
+                ..circuit.input_wire_count
+                    + circuit.internal_wire_count
+                    + circuit.output_wire_count)
+                .map(|i| (i, GF2::random(&mut rng)))
+                .collect();
             multi_party_semi_honest_eval_circuit(
                 execs.remove(&id).unwrap(),
                 circuit.clone(),
                 inputs.remove(&id).unwrap(),
                 n_party_correlation,
+                output_wire_masks,
             )
         });
 
