@@ -225,6 +225,13 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
     output_wire_mask_shares: Vec<F>,
     circuit: &ParsedCircuit,
 ) {
+    let my_id = engine.my_party_id();
+    let peers: Vec<_> = engine
+        .party_ids()
+        .iter()
+        .copied()
+        .filter(|v| v != &dealer_id && v != &my_id)
+        .collect();
     let si: F = engine.recv_from(dealer_id).await.unwrap();
     let alpha: F = engine.recv_from(dealer_id).await.unwrap();
     // Length of alphas is the total number of output wires + input wires to AND gates.
@@ -248,6 +255,15 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
 
     // Compute Gamma_i
     let gamma_i = compute_gamma_i(&gammas, &masks_shares, &masked_values);
+    let masked_gamma_i = gamma_i - si;
+    // Send Gamma_i
+    engine.send_multicast(masked_gamma_i, &peers);
+
+    // Receive masked Gamma_is
+    let mut masked_gamma_i_s: HashMap<u64, F> = HashMap::with_capacity(peers.len());
+    for pid in peers {
+        masked_gamma_i_s.insert(pid, engine.recv_from(pid).await.unwrap());
+    }
 }
 
 pub async fn verify_dealer<F: FieldElement, E: MultiPartyEngine>(
