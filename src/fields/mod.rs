@@ -44,4 +44,18 @@ pub trait FieldElement:
     const BITS: usize;
     fn set_bit(&mut self, bit: bool, idx: usize);
     fn random(rng: impl CryptoRng + RngCore) -> Self;
+    fn from_bit(bit: bool) -> Self {
+        if bit {
+            Self::one()
+        } else {
+            Self::zero()
+        }
+    }
+    fn switch(&self, bit: bool) -> Self {
+        if bit {
+            *self
+        } else {
+            Self::zero()
+        }
+    }
 }
