@@ -4,17 +4,8 @@
 #![feature(split_array)]
 
 use fields::GF128;
-// use pcg::{
-//     codes::EACode,
-//     full_key::{FullPcgKey, Role},
-//     receiver_key::PcgKeyReceiver,
-//     sender_key::PcgKeySender,
-//     sparse_vole::{scalar_party, vector_party},
-//     KEY_SIZE,
-// };
-// use pseudorandom::prf::PrfInput;
-
 pub mod circuit_eval;
+pub mod commitment;
 pub mod engine;
 pub mod fields;
 pub mod ot;
