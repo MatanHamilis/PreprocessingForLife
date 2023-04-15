@@ -1,12 +1,8 @@
-use std::{
-    collections::{HashMap, HashSet},
-    mem::MaybeUninit,
-};
+use std::collections::HashMap;
 
 use crate::{
     engine::{MultiPartyEngine, PartyId},
-    fields::{FieldElement, GF128, GF2},
-    pcg::FullPcgKey,
+    fields::{FieldElement, GF128},
 };
 
 use super::{
@@ -211,6 +207,84 @@ fn dot_product_alpha<F: FieldElement>(
         .map(|(u, v)| *u * *v)
         .sum();
     sigma_alpha_w_r_w_gates + sigma_alpha_w_r_w_outputs
+}
+fn construct_statement<F: FieldElement>(
+    masked_gamma_i: Option<F>,
+    gamma_i_mask: Option<F>,
+    gate_gammas: &[(usize, usize, GateGamma<F>)],
+    masked_inputs: Option<&HashMap<(usize, usize), Mask>>,
+    mask_shares: Option<&HashMap<(usize, usize), Mask>>,
+) -> Vec<F> {
+    let statement_length: usize = gate_gammas
+        .iter()
+        .map(|(_, _, g)| match g {
+            GateGamma::And(_) => 4,
+            GateGamma::WideAnd(_) => 512,
+        })
+        .sum();
+    // We create a statement of size that is 1 + power of 2.
+    let upscaled_statement_length: usize =
+        usize::try_from(1 + ((2 * statement_length - 1).ilog2())).unwrap();
+    let mut statement = Vec::with_capacity(upscaled_statement_length);
+    unsafe { statement.set_len(upscaled_statement_length) };
+    // Nullify all redundant place.
+    for i in &mut statement[statement_length..] {
+        *i = F::zero();
+    }
+
+    // Initialize first entry
+    statement[0] = masked_gamma_i.unwrap_or(F::zero()) + gamma_i_mask.unwrap_or(F::zero());
+
+    let mut iter_masks = statement.iter_mut().skip(2).step_by(2);
+
+    // Initialize mask shares
+    if mask_shares.is_none() {
+        iter_masks.for_each(|v| *v = F::zero());
+    } else {
+        let gate_masks = mask_shares.unwrap();
+        for (layer_idx, gate_idx, _) in gate_gammas {
+            let gate_mask = gate_masks.get(&(*layer_idx, *gate_idx)).unwrap();
+            match gate_mask {
+                Mask::And(m_a, m_b) => {
+                    *iter_masks.next().unwrap() = F::one().switch(m_a.is_one());
+                    *iter_masks.next().unwrap() = F::one().switch(m_b.is_one());
+                }
+                Mask::WideAnd(m_a, m_wb) => {
+                    let v_a = F::one().switch(m_a.is_one());
+                    for i in 0..128 {
+                        *iter_masks.next().unwrap() = v_a;
+                        *iter_masks.next().unwrap() = F::one().switch(m_wb.get_bit(i));
+                    }
+                }
+            }
+        }
+    }
+
+    // Initialize masked values.
+    let mut iter_masked_values = statement.iter_mut().skip(1).step_by(2);
+    if masked_inputs.is_none() {
+        iter_masked_values.for_each(|v| *v = F::zero());
+    } else {
+        let gate_masked_inputs = masked_inputs.unwrap();
+        for (layer_idx, gate_idx, gate_gamma) in gate_gammas {
+            let gate_mask_input = gate_masked_inputs.get(&(*layer_idx, *gate_idx)).unwrap();
+            match (gate_mask_input, gate_gamma) {
+                (Mask::And(m_a, m_b), GateGamma::And((g, _))) => {
+                    *iter_masked_values.next().unwrap() = g.switch(m_a.is_one());
+                    *iter_masked_values.next().unwrap() = g.switch(m_b.is_one());
+                }
+                (Mask::WideAnd(m_a, m_wb), GateGamma::WideAnd(gs)) => {
+                    for i in 0..gs.len() {
+                        *iter_masked_values.next().unwrap() = gs[i].0.switch(m_a.is_one());
+                        *iter_masked_values.next().unwrap() = gs[i].0.switch(m_wb.get_bit(i));
+                    }
+                }
+                _ => panic!(),
+            }
+        }
+    }
+
+    statement
 }
 
 pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
