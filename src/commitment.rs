@@ -29,7 +29,7 @@ pub struct OfflineCommitment {
 }
 
 impl OfflineCommitment {
-    async fn offline_commit<E: MultiPartyEngine, T: Serialize + DeserializeOwned>(
+    pub async fn offline_commit<E: MultiPartyEngine, T: Serialize + DeserializeOwned>(
         mut engine: E,
         value: &T,
     ) {
@@ -76,7 +76,7 @@ impl OfflineCommitment {
         }
     }
 
-    async fn offline_obtain_commit(
+    pub async fn offline_obtain_commit(
         mut engine: impl MultiPartyEngine,
         committer: PartyId,
     ) -> OfflineCommitment {
@@ -88,7 +88,7 @@ impl OfflineCommitment {
         }
     }
 
-    async fn online_decommit<T: Serialize + DeserializeOwned>(
+    pub async fn online_decommit<T: Serialize + DeserializeOwned>(
         self,
         mut engine: impl MultiPartyEngine,
     ) -> T {
@@ -102,15 +102,29 @@ impl OfflineCommitment {
         let mut seeds = HashMap::with_capacity(peers.len() - 1);
         let mut v = Option::<(Box<[u8]>, PartyId)>::None;
         let self_len = self.commit_share.len();
+        engine.broadcast(&self.commit_share);
+        let ser_len = match self.commit_share {
+            CommmitShare::Seed(s, length) => {
+                seeds.insert(my_id, s);
+                length
+            }
+            CommmitShare::Value(vec) => {
+                let len = vec.len();
+                v = Some((vec, my_id));
+                len
+            }
+        };
         for _ in 0..peers.len() {
             let (commit_share, from): (CommmitShare, PartyId) = engine.recv().await.unwrap();
             assert_eq!(commit_share.len(), self_len);
             match commit_share {
-                CommmitShare::Seed(seed, _) => {
+                CommmitShare::Seed(seed, len) => {
+                    assert_eq!(ser_len, len);
                     assert!(seeds.insert(from, seed).is_none());
                 }
                 CommmitShare::Value(vec) => {
                     assert!(v.is_none());
+                    assert_eq!(ser_len, vec.len());
                     v = Some((vec, from));
                 }
             }
