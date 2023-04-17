@@ -30,7 +30,7 @@ pub struct OfflineCommitment {
 
 impl OfflineCommitment {
     pub async fn offline_commit<E: MultiPartyEngine, T: Serialize + DeserializeOwned>(
-        mut engine: E,
+        engine: &mut E,
         value: &T,
     ) {
         let my_id = engine.my_party_id();
@@ -77,7 +77,7 @@ impl OfflineCommitment {
     }
 
     pub async fn offline_obtain_commit(
-        mut engine: impl MultiPartyEngine,
+        engine: &mut impl MultiPartyEngine,
         committer: PartyId,
     ) -> OfflineCommitment {
         let (commit_share, commitment): (CommmitShare, [u8; blake3::OUT_LEN]) =
@@ -88,9 +88,9 @@ impl OfflineCommitment {
         }
     }
 
-    pub async fn online_decommit<T: Serialize + DeserializeOwned>(
+    pub async fn online_decommit<T: Serialize + DeserializeOwned, E: MultiPartyEngine>(
         self,
-        mut engine: impl MultiPartyEngine,
+        engine: &mut E,
     ) -> T {
         let my_id = engine.my_party_id();
         let peers: Box<[PartyId]> = engine

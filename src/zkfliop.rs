@@ -54,8 +54,8 @@ pub struct OfflineVerifier {
     round_challenges: Vec<OfflineCommitment>,
     final_msg: OfflineCommitment,
 }
-pub async fn prover_offline<F: FieldElement, E: MultiPartyEngine>(
-    mut engine: E,
+pub async fn prover_offline<F: FieldElement>(
+    mut engine: impl MultiPartyEngine,
     round_count: usize,
     dealer_id: PartyId,
 ) -> OfflineProver<F> {
@@ -65,17 +65,11 @@ pub async fn prover_offline<F: FieldElement, E: MultiPartyEngine>(
         INTERNAL_ROUND_PROOF_LENGTH * (round_count - 1) + LAST_ROUND_PROOF_LENGTH
     );
     let mut round_challenges = Vec::with_capacity(round_count);
-    for i in 1..=round_count {
-        let comm = OfflineCommitment::offline_obtain_commit(
-            engine.sub_protocol(format!("RANDOM COMMIT {}", i).as_str()),
-            dealer_id,
-        )
-        .await;
+    for _ in 1..=round_count {
+        let comm = OfflineCommitment::offline_obtain_commit(&mut engine, dealer_id).await;
         round_challenges.push(comm);
     }
-    let final_msg =
-        OfflineCommitment::offline_obtain_commit(engine.sub_protocol("FINAL COMMIT"), dealer_id)
-            .await;
+    let final_msg = OfflineCommitment::offline_obtain_commit(&mut engine, dealer_id).await;
     OfflineProver {
         proof_masks,
         s_tilde,
@@ -85,22 +79,16 @@ pub async fn prover_offline<F: FieldElement, E: MultiPartyEngine>(
 }
 
 pub async fn verifier_offline<E: MultiPartyEngine>(
-    engine: E,
+    mut engine: E,
     round_count: usize,
     dealer_id: PartyId,
 ) -> OfflineVerifier {
     let mut round_challenges = Vec::with_capacity(round_count);
-    for i in 1..=round_count {
-        let comm = OfflineCommitment::offline_obtain_commit(
-            engine.sub_protocol(format!("RANDOM COMMIT {}", i).as_str()),
-            dealer_id,
-        )
-        .await;
+    for _ in 1..=round_count {
+        let comm = OfflineCommitment::offline_obtain_commit(&mut engine, dealer_id).await;
         round_challenges.push(comm);
     }
-    let final_msg =
-        OfflineCommitment::offline_obtain_commit(engine.sub_protocol("FINAL COMMIT"), dealer_id)
-            .await;
+    let final_msg = OfflineCommitment::offline_obtain_commit(&mut engine, dealer_id).await;
 
     OfflineVerifier {
         round_challenges,
@@ -143,11 +131,7 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
     for round_id in 1..round_count {
         let z_len = z_tilde.len();
         let r = F::random(&mut rng);
-        OfflineCommitment::offline_commit(
-            engine.sub_protocol(format!("RANDOM COMMIT {}", round_id)),
-            &r,
-        )
-        .await;
+        OfflineCommitment::offline_commit(&mut engine, &r).await;
         let q_base = (round_id - 1) * INTERNAL_ROUND_PROOF_LENGTH;
         let (q_1_tilde, q_2_tilde, q_3_tilde) = (
             proof_masks[q_base],
@@ -185,11 +169,7 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
     // last round
     debug_assert_eq!(z_tilde.len(), 5);
     let r = F::random(&mut rng);
-    OfflineCommitment::offline_commit(
-        engine.sub_protocol(format!("RANDOM COMMIT {}", round_count)),
-        &r,
-    )
-    .await;
+    OfflineCommitment::offline_commit(&mut engine, &r).await;
     let last_round_masks = &proof_masks[proof_masks.len() - LAST_ROUND_PROOF_LENGTH..];
     let mut f_1_tilde = [
         (F::zero(), s_tilde.0),
@@ -231,7 +211,7 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
         f_2_tilde[3].1,
         q_tilde[5].1,
     );
-    OfflineCommitment::offline_commit(engine.sub_protocol("FINAL COMMIT"), &final_value).await;
+    OfflineCommitment::offline_commit(&mut engine, &final_value).await;
 }
 
 pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
@@ -309,9 +289,7 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
 
         // Communication
         engine.broadcast(masked_proof);
-        let r: F = round_challenge
-            .online_decommit(engine.sub_protocol(round_id))
-            .await;
+        let r: F = round_challenge.online_decommit(&mut engine).await;
 
         // Query
         z.par_iter_mut()
@@ -360,14 +338,10 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
         q[4] - proof_masks_last_round[4],
     ];
     engine.broadcast(last_round_proof);
-    let r: F = last_round_challenge
-        .online_decommit(engine.sub_protocol(round_count))
-        .await;
+    let r: F = last_round_challenge.online_decommit(&mut engine).await;
 
     // Decision
-    let _: (Vec<F>, F, F, F, F) = final_msg
-        .online_decommit(engine.sub_protocol("FINAL MSG"))
-        .await;
+    let _: (Vec<F>, F, F, F, F) = final_msg.online_decommit(&mut engine).await;
 }
 
 pub async fn verifier<F: FieldElement>(
@@ -403,9 +377,7 @@ pub async fn verifier<F: FieldElement>(
     for (round_id, round_challenge) in round_challenges.into_iter().enumerate() {
         let z_len = z_hat.len();
         let (q_1_hat, q_2_hat, q_3_hat): (F, F, F) = engine.recv_from(prover_id).await.unwrap();
-        let r: F = round_challenge
-            .online_decommit(engine.sub_protocol(round_id))
-            .await;
+        let r: F = round_challenge.online_decommit(&mut engine).await;
         b_hat.push(z_hat[0] - q_1_hat - q_2_hat);
         slope_container
             .par_chunks_mut(CHUNK_SIZE)
@@ -433,9 +405,7 @@ pub async fn verifier<F: FieldElement>(
     //last_round
     debug_assert_eq!(z_hat.len(), 5);
     let last_round_proof: [F; 7] = engine.recv_from(prover_id).await.unwrap();
-    let r: F = last_round_challenge
-        .online_decommit(engine.sub_protocol(round_count))
-        .await;
+    let r: F = last_round_challenge.online_decommit(&mut engine).await;
     let mut f_1_hat = [
         (F::zero(), last_round_proof[0]),
         (F::one(), z_hat[1]),
@@ -463,9 +433,7 @@ pub async fn verifier<F: FieldElement>(
 
     // Decision
     let (betas, b_tilde_check, f_1_tilde_r, f_2_tilde_r, q_tilde_r): (Vec<F>, F, F, F, F) =
-        final_msg
-            .online_decommit(engine.sub_protocol("FINAL MSG"))
-            .await;
+        final_msg.online_decommit(&mut engine).await;
     assert_eq!(betas.len(), b_hat.len());
     let b_hat_check = betas
         .iter()
@@ -539,10 +507,10 @@ mod test {
         );
         let (_, round_count) = compute_round_count_and_m(Z_LEN);
         let prover_handle =
-            prover_offline::<GF128, _>(engines.remove(&prover_id).unwrap(), round_count, dealer_id);
+            prover_offline::<GF128>(engines.remove(&prover_id).unwrap(), round_count, dealer_id);
         let verifiers_handle: Vec<_> = engines
             .into_iter()
-            .map(|(pid, e)| async move {
+            .map(|(pid, mut e)| async move {
                 Result::<(u64, OfflineVerifier), ()>::Ok((
                     pid,
                     verifier_offline(e, round_count, dealer_id).await,

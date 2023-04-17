@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
+use futures::{future::try_join_all, FutureExt, join};
+
 use crate::{
     engine::{MultiPartyEngine, PartyId},
-    fields::{FieldElement, GF128},
+    fields::{FieldElement, GF128}, commitment::OfflineCommitment, zkfliop::{prover_offline, verifier_offline, OfflineVerifier, OfflineProver},
 };
 
 use super::{
@@ -287,9 +289,41 @@ fn construct_statement<F: FieldElement>(
     statement
 }
 
+pub struct OfflineCircuitVerify<F: FieldElement> {
+    s_i: F,
+    alpha_omega_commitment: OfflineCommitment,
+    verifiers_offline_material: Vec<(PartyId, OfflineVerifier)>,
+    prover_offline_material: OfflineProver<F>
+}
+pub async fn offline_verify_parties<F: FieldElement>(mut engine: impl MultiPartyEngine, dealer_id: PartyId, round_count: usize) -> OfflineCircuitVerify<F> {
+    let s_i: F = engine.recv_from(dealer_id).await.unwrap();
+    let alpha_omega_commitment = OfflineCommitment::offline_obtain_commit(&mut engine, dealer_id).await;
+
+    // Material for single zkFLIOP instances.
+    let parties = engine.party_ids().to_vec();
+    let my_id = engine.my_party_id();
+    let prover_offline_material = prover_offline::<F>(engine.sub_protocol(my_id), round_count, dealer_id);
+    let verifiers_offline_material: Vec<_> = parties.into_iter().filter(|prover_id| { prover_id != &dealer_id && prover_id != &my_id}).map(|prover_id|{
+        let engine_current = engine.sub_protocol(prover_id);
+        async move {
+            let verifier = verifier_offline(engine_current, round_count, dealer_id).await;
+            Result::<(PartyId, OfflineVerifier),()>::Ok((prover_id, verifier))
+        }
+    }).collect();
+    let verifiers_offline_material = try_join_all(verifiers_offline_material);
+    let (verifiers_offline_material, prover_offline_material) = join!(verifiers_offline_material, prover_offline_material);
+    let verifiers_offline_material = verifiers_offline_material.unwrap();
+
+    OfflineCircuitVerify{
+        s_i,
+        alpha_omega_commitment,
+        verifiers_offline_material,
+        prover_offline_material
+    }
+}
+
 pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
     mut engine: E,
-    dealer_id: PartyId,
     two: F,
     three: F,
     four: F,
@@ -298,23 +332,24 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
     output_wire_masked_values: Vec<F>,
     output_wire_mask_shares: Vec<F>,
     circuit: &ParsedCircuit,
+    offline_material: OfflineCircuitVerify<F>
 ) {
     let my_id = engine.my_party_id();
     let peers: Vec<_> = engine
         .party_ids()
         .iter()
         .copied()
-        .filter(|v| v != &dealer_id && v != &my_id)
+        .filter(|v| v != &my_id)
         .collect();
-    let si: F = engine.recv_from(dealer_id).await.unwrap();
-    let alpha: F = engine.recv_from(dealer_id).await.unwrap();
+    let parties = engine.party_ids().to_vec();
+    let OfflineCircuitVerify { s_i, alpha_omega_commitment, verifiers_offline_material, prover_offline_material } = offline_material;
+    let (alpha, omega_hat): (F,F) = alpha_omega_commitment.online_decommit(&mut engine).await;
     // Length of alphas is the total number of output wires + input wires to AND gates.
     // In case of fan out > 1 impose scenarios where the same wire is fed into multiple different wires.
     // We therefore have to "change" the representation of the circuit in a deterministic way so that each wire fed into a multiplication / output wire has a different idx.
 
     let (alphas, gammas, alphas_output_wires) = compute_gammas_alphas(&alpha, circuit);
 
-    let omega_hat: F = engine.recv_from(dealer_id).await.unwrap();
 
     // Compute Lambda
     let alpha_x_hat = dot_product_alpha(
@@ -329,18 +364,22 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
 
     // Compute Gamma_i
     let gamma_i = compute_gamma_i(&gammas, &masks_shares, &masked_values);
-    let masked_gamma_i = gamma_i - si;
+    let masked_gamma_i = gamma_i - s_i;
     // Send Gamma_i
-    engine.send_multicast(masked_gamma_i, &peers);
+    engine.broadcast(masked_gamma_i);
 
     // Receive masked Gamma_is
     let mut masked_gamma_i_s: HashMap<u64, F> = HashMap::with_capacity(peers.len());
-    for pid in peers {
-        masked_gamma_i_s.insert(pid, engine.recv_from(pid).await.unwrap());
+    for _ in peers {
+        let (masked_gamma_i_peer, pid) = engine.recv().await.unwrap();
+        masked_gamma_i_s.insert(pid, masked_gamma_i_peer);
     }
+    let proof_statement = construct_statement(Some(masked_gamma_i), Some(s_i), &gammas, Some(&masked_values), Some(&masks_shares));
+    let verify_statement = construct_statement(None, Some(s_i), &gammas, Some(&masked_values), Some(&masks_shares));
+    let proof_futures = parties.iter().map(|pid| )
 }
 
-pub async fn verify_dealer<F: FieldElement, E: MultiPartyEngine>(
+pub async fn offline_verify_dealer<F: FieldElement, E: MultiPartyEngine>(
     mut engine: E,
     two: F,
     three: F,
@@ -369,8 +408,6 @@ pub async fn verify_dealer<F: FieldElement, E: MultiPartyEngine>(
         })
         .collect();
 
-    // Send alpha
-    engine.broadcast(alpha);
 
     let (alphas, gammas, alphas_output_wires) = compute_gammas_alphas(&alpha, circuit);
 
@@ -386,5 +423,6 @@ pub async fn verify_dealer<F: FieldElement, E: MultiPartyEngine>(
     let sigma_gamma_l_r_l = dot_product_gamma(&gammas, &input_wire_masks).0;
     let omega = alpha_r + sigma_gamma_l_r_l;
     let omega_hat = omega - mu;
-    engine.broadcast(omega_hat);
+
+    OfflineCommitment::offline_commit(&mut engine, &(alpha, omega_hat));
 }
