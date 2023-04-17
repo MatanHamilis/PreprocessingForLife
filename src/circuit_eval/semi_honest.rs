@@ -55,12 +55,45 @@ pub enum MultiPartyBeaverTriple {
     Regular(GF2, GF2, GF2),
     Wide(GF2, GF128, GF128),
 }
-
+pub fn gate_masks_from_seed(
+    circuit: &ParsedCircuit,
+    seed: [u8; 16],
+) -> (Vec<(usize, usize, Mask)>, Vec<GF2>) {
+    let total_gates: usize = circuit
+        .gates
+        .iter()
+        .map(|layer| layer.iter().filter(|g| !g.is_linear()).count())
+        .sum();
+    let mut rng = AesRng::from_seed(seed);
+    let mut gate_input_masks = Vec::with_capacity(total_gates);
+    for (layer_idx, layer) in circuit.gates.iter().enumerate() {
+        for (gate_idx, gate) in layer.iter().enumerate() {
+            let mask = match gate {
+                ParsedGate::AndGate {
+                    input: _,
+                    output: _,
+                } => Mask::And(GF2::random(&mut rng), GF2::random(&mut rng)),
+                ParsedGate::WideAndGate {
+                    input: _,
+                    input_bit: _,
+                    output: _,
+                } => Mask::WideAnd(GF2::random(&mut rng), GF128::random(&mut rng)),
+                _ => continue,
+            };
+            gate_input_masks.push((layer_idx, gate_idx, mask));
+        }
+    }
+    let mut output_wire_masks = Vec::with_capacity(circuit.output_wire_count);
+    for _ in 0..circuit.output_wire_count {
+        output_wire_masks.push(GF2::random(&mut rng));
+    }
+    (gate_input_masks, output_wire_masks)
+}
 async fn create_multi_party_beaver_triples(
     mut engine: impl MultiPartyEngine,
     circuit: &ParsedCircuit,
     pcg_correlations: &mut HashMap<PartyId, FullPcgKey>,
-    randomness_seed: [u8; 16],
+    gate_input_masks: &Vec<(usize, usize, Mask)>,
 ) -> HashMap<(usize, usize), MultiPartyBeaverTriple> {
     let my_id = engine.my_party_id();
     let peers: Vec<_> = engine
@@ -69,66 +102,63 @@ async fn create_multi_party_beaver_triples(
         .copied()
         .filter(|v| *v != my_id)
         .collect();
-    let mut prg = AesRng::from_seed(randomness_seed);
     let mut pairwise_beaver_triples = HashMap::new();
     let mut n_wise_beaver_triples = HashMap::new();
-    circuit
-        .gates
+    gate_input_masks
         .iter()
-        .enumerate()
-        .for_each(|(layer_idx, layer)| {
-            layer
-                .iter()
-                .enumerate()
-                .for_each(|(gate_idx, gate)| match gate {
+        .copied()
+        .for_each(|(layer_idx, gate_idx, mask)| {
+            let gate = circuit.gates[layer_idx][gate_idx];
+            match (gate, mask) {
+                (
                     ParsedGate::AndGate {
                         input: _,
                         output: _,
-                    } => {
-                        let x = GF2::random(&mut prg);
-                        let y = GF2::random(&mut prg);
-                        let xy = x * y;
-                        let mut z = xy;
-                        for party in peers.iter() {
-                            let (a, b, c) = pcg_correlations
-                                .get_mut(&party)
-                                .unwrap()
-                                .next_bit_beaver_triple();
-                            engine.send((layer_idx, gate_idx, Mask::And(x - a, y - b)), *party);
-                            z += c + y * (x - a) + (y - b) * a - xy;
-                            pairwise_beaver_triples.insert((layer_idx, gate_idx, *party), a);
-                        }
-                        n_wise_beaver_triples.insert(
-                            (layer_idx, gate_idx),
-                            MultiPartyBeaverTriple::Regular(x, y, z),
-                        );
+                    },
+                    Mask::And(x, y),
+                ) => {
+                    let xy = x * y;
+                    let mut z = xy;
+                    for party in peers.iter() {
+                        let (a, b, c) = pcg_correlations
+                            .get_mut(&party)
+                            .unwrap()
+                            .next_bit_beaver_triple();
+                        engine.send((layer_idx, gate_idx, Mask::And(x - a, y - b)), *party);
+                        z += c + y * (x - a) + (y - b) * a - xy;
+                        pairwise_beaver_triples.insert((layer_idx, gate_idx, *party), a);
                     }
+                    n_wise_beaver_triples.insert(
+                        (layer_idx, gate_idx),
+                        MultiPartyBeaverTriple::Regular(x, y, z),
+                    );
+                }
+                (
                     ParsedGate::WideAndGate {
                         input: _,
                         input_bit: _,
                         output: _,
-                    } => {
-                        let x = GF2::random(&mut prg);
-                        let wy = GF128::random(&mut prg);
-                        let xwy = wy * x;
-                        let mut wz = xwy;
-                        for party in peers.iter() {
-                            let (a, wb, wc) = pcg_correlations
-                                .get_mut(&party)
-                                .unwrap()
-                                .next_wide_beaver_triple();
-                            engine
-                                .send((layer_idx, gate_idx, Mask::WideAnd(x - a, wy - wb)), *party);
-                            wz += wc + wy * (x - a) + (wy - wb) * a - xwy;
-                            pairwise_beaver_triples.insert((layer_idx, gate_idx, *party), a);
-                        }
-                        n_wise_beaver_triples.insert(
-                            (layer_idx, gate_idx),
-                            MultiPartyBeaverTriple::Wide(x, wy, wz),
-                        );
+                    },
+                    Mask::WideAnd(x, wy),
+                ) => {
+                    let xwy = wy * x;
+                    let mut wz = xwy;
+                    for party in peers.iter() {
+                        let (a, wb, wc) = pcg_correlations
+                            .get_mut(&party)
+                            .unwrap()
+                            .next_wide_beaver_triple();
+                        engine.send((layer_idx, gate_idx, Mask::WideAnd(x - a, wy - wb)), *party);
+                        wz += wc + wy * (x - a) + (wy - wb) * a - xwy;
+                        pairwise_beaver_triples.insert((layer_idx, gate_idx, *party), a);
                     }
-                    _ => {}
-                })
+                    n_wise_beaver_triples.insert(
+                        (layer_idx, gate_idx),
+                        MultiPartyBeaverTriple::Wide(x, wy, wz),
+                    );
+                }
+                _ => {}
+            }
         });
 
     while !pairwise_beaver_triples.is_empty() {
@@ -395,14 +425,14 @@ mod tests {
     };
 
     use futures::{future::try_join_all, FutureExt};
-    use rand::{random, thread_rng};
+    use rand::{random, thread_rng, RngCore};
 
     use super::bristol_fashion::{parse_bristol, ParsedCircuit};
     use crate::{
         circuit_eval::{
             bristol_fashion::ParsedGate,
             semi_honest::{
-                create_multi_party_beaver_triples, local_eval_circuit,
+                create_multi_party_beaver_triples, gate_masks_from_seed, local_eval_circuit,
                 multi_party_semi_honest_eval_circuit, Mask, MultiPartyBeaverTriple,
             },
         },
@@ -487,15 +517,23 @@ mod tests {
             })
             .collect();
         inputs.insert(first_id, first_id_input);
+        let mut wire_masks = HashMap::<PartyId, Vec<(usize, usize, Mask)>>::new();
+        let mut output_wire_masks = HashMap::<PartyId, Vec<GF2>>::new();
+        for id in party_ids.iter().copied() {
+            let seed = core::array::from_fn(|_| (rng.next_u32() & 255) as u8);
+            let (wire_masks_for_party, outputs_masks) = gate_masks_from_seed(&circuit, seed);
+            wire_masks.insert(id, wire_masks_for_party);
+            output_wire_masks.insert(id, outputs_masks);
+        }
         let engine_futures = pcg_keys.iter_mut().map(|(&id, pcg_key)| {
             let circuit = circuit.clone();
             let engine = execs.get(&id).unwrap().sub_protocol("MULTIPARTY BEAVER");
+            let wires_mask = wire_masks.remove(&id).unwrap();
             async move {
-                let random_seed = core::array::from_fn(|_| random());
                 let circuit = circuit.clone();
                 Result::<_, ()>::Ok((
                     id,
-                    create_multi_party_beaver_triples(engine, &circuit, pcg_key, random_seed).await,
+                    create_multi_party_beaver_triples(engine, &circuit, pcg_key, &wires_mask).await,
                 ))
             }
         });
@@ -541,10 +579,8 @@ mod tests {
             let engine = execs.remove(&id).unwrap();
             let circuit = circuit.clone();
             let input = inputs.remove(&id).unwrap();
+            let output_wire_masks: Vec<_> = output_wire_masks.remove(&id).unwrap();
             async move {
-                let output_wire_masks: Vec<_> = (0..output_wire_count)
-                    .map(|i| GF2::random(thread_rng()))
-                    .collect();
                 let n_party_correlation = n_party_correlation;
                 multi_party_semi_honest_eval_circuit(
                     engine,
