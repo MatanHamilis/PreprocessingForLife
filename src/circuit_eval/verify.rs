@@ -12,7 +12,7 @@ use crate::{
 
 use super::{
     bristol_fashion::{ParsedCircuit, ParsedGate},
-    semi_honest::Mask,
+    semi_honest::{Mask, MultiPartyBeaverTriple},
 };
 
 enum InputWireCoefficients<F: FieldElement> {
@@ -126,7 +126,7 @@ fn compute_gammas_alphas<F: FieldElement>(
 }
 fn compute_gamma_i<F: FieldElement>(
     gammas: &[(usize, usize, GateGamma<F>)],
-    mask_shares: &HashMap<(usize, usize), Mask>,
+    mask_shares: &HashMap<(usize, usize), MultiPartyBeaverTriple>,
     masked_values: &HashMap<(usize, usize), Mask>,
 ) -> F {
     gammas
@@ -135,11 +135,19 @@ fn compute_gamma_i<F: FieldElement>(
             let mask = mask_shares.get(&(*layer_idx, *gate_idx)).unwrap();
             let masked_values = masked_values.get(&(*layer_idx, *gate_idx)).unwrap();
             match (gamma, mask, masked_values) {
-                (GateGamma::And(g), Mask::And(m_a, m_b), Mask::And(v_a, v_b)) => {
+                (
+                    GateGamma::And(g),
+                    MultiPartyBeaverTriple::Regular(m_a, m_b, _),
+                    Mask::And(v_a, v_b),
+                ) => {
                     let bit = *m_a * *v_b + *v_a * *m_b;
                     g.0.switch(bit.is_one())
                 }
-                (GateGamma::WideAnd(g), Mask::WideAnd(m_a, m_wb), Mask::WideAnd(v_a, v_wb)) => {
+                (
+                    GateGamma::WideAnd(g),
+                    MultiPartyBeaverTriple::Wide(m_a, m_wb, _),
+                    Mask::WideAnd(v_a, v_wb),
+                ) => {
                     let bits = m_wb.switch(v_a.is_one()) + v_wb.switch(m_a.is_one());
                     let mut sum = F::zero();
                     for i in 0..g.len() {
@@ -238,7 +246,7 @@ fn construct_statement<F: FieldElement>(
     gamma_i_mask: Option<F>,
     gate_gammas: &[(usize, usize, GateGamma<F>)],
     masked_inputs: Option<&HashMap<(usize, usize), Mask>>,
-    mask_shares: Option<&HashMap<(usize, usize), Mask>>,
+    mask_shares: Option<&HashMap<(usize, usize), MultiPartyBeaverTriple>>,
     circuit: &ParsedCircuit,
 ) -> Vec<F> {
     let statement_length: usize = statement_length(circuit);
@@ -258,11 +266,11 @@ fn construct_statement<F: FieldElement>(
         for (layer_idx, gate_idx, _) in gate_gammas {
             let gate_mask = gate_masks.get(&(*layer_idx, *gate_idx)).unwrap();
             match gate_mask {
-                Mask::And(m_a, m_b) => {
+                MultiPartyBeaverTriple::Regular(m_a, m_b, _) => {
                     *iter_masks.next().unwrap() = F::one().switch(m_a.is_one());
                     *iter_masks.next().unwrap() = F::one().switch(m_b.is_one());
                 }
-                Mask::WideAnd(m_a, m_wb) => {
+                MultiPartyBeaverTriple::Wide(m_a, m_wb, _) => {
                     let v_a = F::one().switch(m_a.is_one());
                     for i in 0..128 {
                         *iter_masks.next().unwrap() = v_a;
@@ -348,14 +356,13 @@ pub async fn offline_verify_parties<F: FieldElement>(
 }
 
 pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
-    mut engine: E,
+    engine: &mut E,
     two: F,
     three: F,
     four: F,
     masked_values: HashMap<(usize, usize), Mask>,
-    masks_shares: HashMap<(usize, usize), Mask>,
+    masks_shares: HashMap<(usize, usize), MultiPartyBeaverTriple>,
     output_wire_masked_values: Vec<F>,
-    output_wire_mask_shares: Vec<F>,
     circuit: &ParsedCircuit,
     offline_material: OfflineCircuitVerify<F>,
 ) -> bool {
@@ -373,7 +380,7 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
         prover_offline_material,
         s_commitment,
     } = offline_material;
-    let (alpha, omega_hat): (F, F) = alpha_omega_commitment.online_decommit(&mut engine).await;
+    let (alpha, omega_hat): (F, F) = alpha_omega_commitment.online_decommit(engine).await;
     // Length of alphas is the total number of output wires + input wires to AND gates.
     // In case of fan out > 1 impose scenarios where the same wire is fed into multiple different wires.
     // We therefore have to "change" the representation of the circuit in a deterministic way so that each wire fed into a multiplication / output wire has a different idx.
@@ -458,7 +465,7 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
     for p in peers {
         let _: () = engine.recv_from(p).await.unwrap();
     }
-    let s = s_commitment.online_decommit(&mut engine).await;
+    let s = s_commitment.online_decommit(engine).await;
     let p = p_hat + s;
     return p.is_zero();
 }
@@ -596,7 +603,15 @@ pub async fn offline_verify_dealer<F: FieldElement, E: MultiPartyEngine>(
                 let gammas = gamma_rc.as_ref();
                 let mask_shares: HashMap<_, _> = gate_masks
                     .into_iter()
-                    .map(|(l, g, m)| ((l, g), m))
+                    .map(|(l, g, m)| {
+                        let m = match m {
+                            Mask::And(a, b) => MultiPartyBeaverTriple::Regular(a, b, GF2::zero()),
+                            Mask::WideAnd(a, wb) => {
+                                MultiPartyBeaverTriple::Wide(a, wb, GF128::zero())
+                            }
+                        };
+                        ((l, g), m)
+                    })
                     .collect();
                 let mut z_tilde =
                     construct_statement(None, Some(si), &gammas, None, Some(&mask_shares), circuit);

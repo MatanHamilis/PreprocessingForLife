@@ -216,7 +216,7 @@ impl Add for Mask {
 // We assume the input to the circuit is already additively shared between the parties.
 pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
     engine: &mut E,
-    circuit: ParsedCircuit,
+    circuit: &ParsedCircuit,
     pre_shared_input: Vec<GF2>,
     multi_party_beaver_triples: &HashMap<(usize, usize), MultiPartyBeaverTriple>,
     output_wire_masks: &Vec<GF2>,
@@ -585,7 +585,7 @@ mod tests {
                 let n_party_correlation = n_party_correlation;
                 multi_party_semi_honest_eval_circuit(
                     &mut engine,
-                    circuit,
+                    &circuit,
                     input,
                     &n_party_correlation,
                     &output_wire_masks,
