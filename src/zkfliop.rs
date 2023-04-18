@@ -10,7 +10,7 @@ const INTERNAL_ROUND_PROOF_LENGTH: usize = 3;
 const LAST_ROUND_PROOF_LENGTH: usize = 5;
 const CHUNK_SIZE: usize = 1 << 10;
 
-fn compute_round_count_and_m(z_len: usize) -> (usize, usize) {
+pub fn compute_round_count_and_m(z_len: usize) -> (usize, usize) {
     assert_eq!((z_len - 1) & 3, 0);
     let m = (z_len - 1) / 4;
     let round_count = usize::ilog2(m);

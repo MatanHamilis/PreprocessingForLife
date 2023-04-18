@@ -7,7 +7,7 @@ use crate::{
     commitment::OfflineCommitment,
     engine::{MultiPartyEngine, PartyId},
     fields::{FieldElement, GF128, GF2},
-    zkfliop::{dealer, prover_offline, verifier_offline, OfflineProver, OfflineVerifier},
+    zkfliop::{self, dealer, prover_offline, verifier_offline, OfflineProver, OfflineVerifier},
 };
 
 use super::{
@@ -213,29 +213,37 @@ fn dot_product_alpha<F: FieldElement>(
         .sum();
     sigma_alpha_w_r_w_gates + sigma_alpha_w_r_w_outputs
 }
+pub fn statement_length(circuit: &ParsedCircuit) -> usize {
+    let statement_length: usize = circuit
+        .gates
+        .iter()
+        .flatten()
+        .map(|g| match g {
+            ParsedGate::AndGate {
+                input: _,
+                output: _,
+            } => 4,
+            ParsedGate::WideAndGate {
+                input: _,
+                input_bit: _,
+                output: _,
+            } => 512,
+            _ => 0,
+        })
+        .sum();
+    usize::try_from(1 + ((2 * statement_length - 1).ilog2())).unwrap()
+}
 fn construct_statement<F: FieldElement>(
     masked_gamma_i: Option<F>,
     gamma_i_mask: Option<F>,
     gate_gammas: &[(usize, usize, GateGamma<F>)],
     masked_inputs: Option<&HashMap<(usize, usize), Mask>>,
     mask_shares: Option<&HashMap<(usize, usize), Mask>>,
+    circuit: &ParsedCircuit,
 ) -> Vec<F> {
-    let statement_length: usize = gate_gammas
-        .iter()
-        .map(|(_, _, g)| match g {
-            GateGamma::And(_) => 4,
-            GateGamma::WideAnd(_) => 512,
-        })
-        .sum();
+    let statement_length: usize = statement_length(circuit);
     // We create a statement of size that is 1 + power of 2.
-    let upscaled_statement_length: usize =
-        usize::try_from(1 + ((2 * statement_length - 1).ilog2())).unwrap();
-    let mut statement = Vec::with_capacity(upscaled_statement_length);
-    unsafe { statement.set_len(upscaled_statement_length) };
-    // Nullify all redundant place.
-    for i in &mut statement[statement_length..] {
-        *i = F::zero();
-    }
+    let mut statement = vec![F::zero(); statement_length];
 
     // Initialize first entry
     statement[0] = masked_gamma_i.unwrap_or(F::zero()) + gamma_i_mask.unwrap_or(F::zero());
@@ -295,6 +303,7 @@ fn construct_statement<F: FieldElement>(
 pub struct OfflineCircuitVerify<F: FieldElement> {
     s_i: F,
     alpha_omega_commitment: OfflineCommitment,
+    s_commitment: OfflineCommitment,
     verifiers_offline_material: Vec<(PartyId, OfflineVerifier)>,
     prover_offline_material: OfflineProver<F>,
 }
@@ -306,6 +315,7 @@ pub async fn offline_verify_parties<F: FieldElement>(
     let s_i: F = engine.recv_from(dealer_id).await.unwrap();
     let alpha_omega_commitment =
         OfflineCommitment::offline_obtain_commit(&mut engine, dealer_id).await;
+    let s_commitment = OfflineCommitment::offline_obtain_commit(&mut engine, dealer_id).await;
 
     // Material for single zkFLIOP instances.
     let parties = engine.party_ids().to_vec();
@@ -333,6 +343,7 @@ pub async fn offline_verify_parties<F: FieldElement>(
         alpha_omega_commitment,
         verifiers_offline_material,
         prover_offline_material,
+        s_commitment,
     }
 }
 
@@ -347,7 +358,7 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
     output_wire_mask_shares: Vec<F>,
     circuit: &ParsedCircuit,
     offline_material: OfflineCircuitVerify<F>,
-) {
+) -> bool {
     let my_id = engine.my_party_id();
     let peers: Vec<_> = engine
         .party_ids()
@@ -355,12 +366,12 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
         .copied()
         .filter(|v| v != &my_id)
         .collect();
-    let parties = engine.party_ids().to_vec();
     let OfflineCircuitVerify {
         s_i,
         alpha_omega_commitment,
         verifiers_offline_material,
         prover_offline_material,
+        s_commitment,
     } = offline_material;
     let (alpha, omega_hat): (F, F) = alpha_omega_commitment.online_decommit(&mut engine).await;
     // Length of alphas is the total number of output wires + input wires to AND gates.
@@ -388,25 +399,68 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
 
     // Receive masked Gamma_is
     let mut masked_gamma_i_s: HashMap<u64, F> = HashMap::with_capacity(peers.len());
-    for _ in peers {
+    for _ in 0..peers.len() {
         let (masked_gamma_i_peer, pid) = engine.recv().await.unwrap();
         masked_gamma_i_s.insert(pid, masked_gamma_i_peer);
     }
-    let proof_statement = construct_statement(
+    let p_hat = lambda - masked_gamma_i_s.values().copied().sum() - masked_gamma_i + omega_hat;
+    let mut proof_statement = construct_statement(
         Some(masked_gamma_i),
         Some(s_i),
         &gammas,
         Some(&masked_values),
         Some(&masks_shares),
+        circuit,
     );
-    let verify_statement = construct_statement(
-        Some(masked_gamma_i),
-        Some(s_i),
+    let verify_statement = Arc::new(construct_statement(
+        None,
+        None,
         &gammas,
         Some(&masked_values),
-        Some(&masks_shares),
+        None,
+        circuit,
+    ));
+    let prover_futures = zkfliop::prover(
+        engine.sub_protocol(my_id),
+        &mut proof_statement,
+        prover_offline_material,
+        two,
+        three,
+        four,
     );
-    // let proof_futures = parties.iter().map(|pid| )
+
+    let verifiers_futures =
+        verifiers_offline_material
+            .into_iter()
+            .map(|(prover_id, offline_material)| {
+                let verifier_engine = engine.sub_protocol(prover_id);
+                let verify_statement_arc = verify_statement.clone();
+                let masked_gamma_prover = *masked_gamma_i_s.get(&prover_id).unwrap();
+                async move {
+                    // We only modify the first entry (the masked Gamma_i) in the verifying statement.
+                    let mut z_hat = verify_statement_arc.as_ref().clone();
+                    z_hat[0] = masked_gamma_prover;
+                    zkfliop::verifier(
+                        verifier_engine,
+                        &mut z_hat,
+                        prover_id,
+                        offline_material,
+                        two,
+                        three,
+                        four,
+                    )
+                    .await;
+                    Result::<(), ()>::Ok(())
+                }
+            });
+    try_join_all(verifiers_futures).await.unwrap();
+    engine.broadcast(());
+    for p in peers {
+        let _: () = engine.recv_from(p).await.unwrap();
+    }
+    let s = s_commitment.online_decommit(&mut engine).await;
+    let p = p_hat + s;
+    return p.is_zero();
 }
 
 pub async fn offline_verify_dealer<F: FieldElement, E: MultiPartyEngine>(
@@ -416,7 +470,7 @@ pub async fn offline_verify_dealer<F: FieldElement, E: MultiPartyEngine>(
     four: F,
     mask_seeds: Vec<(PartyId, [u8; 16])>,
     circuit: &ParsedCircuit,
-) {
+) -> Vec<GF2> {
     let mut rng = E::rng();
     let alpha = F::random(&mut rng);
     let dealer_id = engine.my_party_id();
@@ -427,7 +481,7 @@ pub async fn offline_verify_dealer<F: FieldElement, E: MultiPartyEngine>(
         .filter(|i| *i != dealer_id)
         .collect();
     // Send s_i
-    let s: HashMap<PartyId, F> = parties
+    let si_s: HashMap<PartyId, F> = parties
         .iter()
         .map(|pid| {
             let si = F::random(&mut rng);
@@ -529,11 +583,13 @@ pub async fn offline_verify_dealer<F: FieldElement, E: MultiPartyEngine>(
     let gammas_rc = Arc::new(gammas);
 
     OfflineCommitment::offline_commit(&mut engine, &(alpha, omega_hat)).await;
+    let s = mu - si_s.values().copied().sum();
+    OfflineCommitment::offline_commit(&mut engine, &s).await;
     let dealer_offline_futures: Vec<_> = parties
         .into_iter()
         .map(|prover_id| {
             let gate_masks = per_party_input_wires_masks.remove(&prover_id).unwrap();
-            let si = *s.get(&prover_id).unwrap();
+            let si = *si_s.get(&prover_id).unwrap();
             let gamma_rc = gammas_rc.clone();
             let engine = engine.sub_protocol(prover_id);
             async move {
@@ -543,11 +599,12 @@ pub async fn offline_verify_dealer<F: FieldElement, E: MultiPartyEngine>(
                     .map(|(l, g, m)| ((l, g), m))
                     .collect();
                 let mut z_tilde =
-                    construct_statement(None, Some(si), &gammas, None, Some(&mask_shares));
+                    construct_statement(None, Some(si), &gammas, None, Some(&mask_shares), circuit);
                 dealer(engine, &mut z_tilde, prover_id, two, three, four).await;
                 Result::<(), ()>::Ok(())
             }
         })
         .collect();
     try_join_all(dealer_offline_futures).await.unwrap();
+    total_output_masks
 }

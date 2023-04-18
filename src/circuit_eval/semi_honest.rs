@@ -89,8 +89,8 @@ pub fn gate_masks_from_seed(
     }
     (gate_input_masks, output_wire_masks)
 }
-async fn create_multi_party_beaver_triples(
-    mut engine: impl MultiPartyEngine,
+pub async fn create_multi_party_beaver_triples(
+    engine: &mut impl MultiPartyEngine,
     circuit: &ParsedCircuit,
     pcg_correlations: &mut HashMap<PartyId, FullPcgKey>,
     gate_input_masks: &Vec<(usize, usize, Mask)>,
@@ -215,7 +215,7 @@ impl Add for Mask {
 
 // We assume the input to the circuit is already additively shared between the parties.
 pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
-    mut engine: E,
+    engine: &mut E,
     circuit: ParsedCircuit,
     pre_shared_input: Vec<GF2>,
     multi_party_beaver_triples: &HashMap<(usize, usize), MultiPartyBeaverTriple>,
@@ -527,13 +527,14 @@ mod tests {
         }
         let engine_futures = pcg_keys.iter_mut().map(|(&id, pcg_key)| {
             let circuit = circuit.clone();
-            let engine = execs.get(&id).unwrap().sub_protocol("MULTIPARTY BEAVER");
+            let mut engine = execs.get(&id).unwrap().sub_protocol("MULTIPARTY BEAVER");
             let wires_mask = wire_masks.remove(&id).unwrap();
             async move {
                 let circuit = circuit.clone();
                 Result::<_, ()>::Ok((
                     id,
-                    create_multi_party_beaver_triples(engine, &circuit, pcg_key, &wires_mask).await,
+                    create_multi_party_beaver_triples(&mut engine, &circuit, pcg_key, &wires_mask)
+                        .await,
                 ))
             }
         });
@@ -576,14 +577,14 @@ mod tests {
 
         let engine_futures = exec_results.into_iter().map(|(id, n_party_correlation)| {
             let output_wire_count = circuit.output_wire_count;
-            let engine = execs.remove(&id).unwrap();
+            let mut engine = execs.remove(&id).unwrap();
             let circuit = circuit.clone();
             let input = inputs.remove(&id).unwrap();
             let output_wire_masks: Vec<_> = output_wire_masks.remove(&id).unwrap();
             async move {
                 let n_party_correlation = n_party_correlation;
                 multi_party_semi_honest_eval_circuit(
-                    engine,
+                    &mut engine,
                     circuit,
                     input,
                     &n_party_correlation,
