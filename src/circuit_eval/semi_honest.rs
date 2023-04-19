@@ -379,7 +379,7 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
     Ok((masked_gate_inputs, masked_output_wires))
 }
 
-fn local_eval_circuit(circuit: &ParsedCircuit, input: &[GF2]) -> Vec<GF2> {
+pub fn local_eval_circuit(circuit: &ParsedCircuit, input: &[GF2]) -> Vec<GF2> {
     debug_assert_eq!(input.len(), circuit.input_wire_count);
     let mut wires =
         vec![

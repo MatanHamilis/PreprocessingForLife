@@ -63,32 +63,6 @@ pub fn main() {
     };
 }
 
-fn circuit_from_file(path: &Path) -> Option<ParsedCircuit> {
-    let circuit_file = match File::open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            error!("Failed to open circuit file! Error: {}", e);
-            return None;
-        }
-    };
-    let lines = std::io::BufReader::new(circuit_file)
-        .lines()
-        .map_while(|line| match line {
-            Ok(str) => Some(str),
-            Err(e) => {
-                error!("File reading error! Error: {}", e);
-                None
-            }
-        });
-    match parse_bristol(lines) {
-        n @ Some(_) => n,
-        None => {
-            error!("Failed to parse circuit!");
-            None
-        }
-    }
-}
-
 fn handle_server(parsed_circuit: &ParsedCircuit, local_port: u16) {
     info!("I am SERVER");
     info!("Listening to port: {}", local_port);

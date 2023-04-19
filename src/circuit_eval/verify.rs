@@ -15,11 +15,13 @@ use super::{
     semi_honest::{Mask, MultiPartyBeaverTriple},
 };
 
+#[derive(Debug)]
 enum InputWireCoefficients<F: FieldElement> {
     And(F, F),
     WideAnd(F, [F; 128]),
 }
 
+#[derive(Debug)]
 enum GateGamma<F: FieldElement> {
     And((F, F)),
     WideAnd([(F, F); 128]),
@@ -53,7 +55,7 @@ fn compute_gammas_alphas<F: FieldElement>(
     let alphas_outputs: Vec<_> = output_wires.iter().map(|(a, _)| *a).collect();
 
     // Next, distribute alphas for the relevant gates' input wires.
-    for (layer_idx, layer) in circuit.gates.iter().enumerate() {
+    for (layer_idx, layer) in circuit.gates.iter().enumerate().skip(1) {
         for (gate_idx, gate) in layer.iter().enumerate() {
             let c = match gate {
                 ParsedGate::AndGate { input, output } => {
@@ -80,7 +82,7 @@ fn compute_gammas_alphas<F: FieldElement>(
                     });
                     InputWireCoefficients::WideAnd(bit_coefficient, wide_coefficents)
                 }
-                _ => panic!(),
+                _ => continue,
             };
             alphas.push((layer_idx, gate_idx, c));
         }
@@ -102,7 +104,7 @@ fn compute_gammas_alphas<F: FieldElement>(
                 ParsedGate::NotGate { input, output } => {
                     let v_output = weights_per_wire[*output];
                     weights_per_wire[*input].0 += v_output.0;
-                    weights_per_wire[*input].1 += v_output.1 + F::one();
+                    weights_per_wire[*input].1 += v_output.1 + v_output.0;
                 }
                 ParsedGate::AndGate { input, output } => {
                     gammas.push((
@@ -239,7 +241,8 @@ pub fn statement_length(circuit: &ParsedCircuit) -> usize {
             _ => 0,
         })
         .sum();
-    usize::try_from(1 + ((2 * statement_length - 1).ilog2())).unwrap()
+    let statement_length = (1 << (usize::ilog2(2 * statement_length - 1))) as usize;
+    usize::try_from(1 + statement_length).unwrap()
 }
 fn construct_statement<F: FieldElement>(
     masked_gamma_i: Option<F>,
@@ -267,14 +270,14 @@ fn construct_statement<F: FieldElement>(
             let gate_mask = gate_masks.get(&(*layer_idx, *gate_idx)).unwrap();
             match gate_mask {
                 MultiPartyBeaverTriple::Regular(m_a, m_b, _) => {
-                    *iter_masks.next().unwrap() = F::one().switch(m_a.is_one());
                     *iter_masks.next().unwrap() = F::one().switch(m_b.is_one());
+                    *iter_masks.next().unwrap() = F::one().switch(m_a.is_one());
                 }
                 MultiPartyBeaverTriple::Wide(m_a, m_wb, _) => {
                     let v_a = F::one().switch(m_a.is_one());
                     for i in 0..128 {
-                        *iter_masks.next().unwrap() = v_a;
                         *iter_masks.next().unwrap() = F::one().switch(m_wb.get_bit(i));
+                        *iter_masks.next().unwrap() = v_a;
                     }
                 }
             }
@@ -360,11 +363,11 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
     two: F,
     three: F,
     four: F,
-    masked_values: HashMap<(usize, usize), Mask>,
-    masks_shares: HashMap<(usize, usize), MultiPartyBeaverTriple>,
-    output_wire_masked_values: Vec<F>,
+    masked_values: &HashMap<(usize, usize), Mask>,
+    masks_shares: &HashMap<(usize, usize), MultiPartyBeaverTriple>,
+    output_wire_masked_values: &[F],
     circuit: &ParsedCircuit,
-    offline_material: OfflineCircuitVerify<F>,
+    offline_material: &OfflineCircuitVerify<F>,
 ) -> bool {
     let my_id = engine.my_party_id();
     let peers: Vec<_> = engine
@@ -389,18 +392,18 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
 
     // Compute Lambda
     let alpha_x_hat = dot_product_alpha(
-        &alphas,
+        dbg!(&alphas),
         &alphas_output_wires,
         &masked_values,
         &output_wire_masked_values,
     );
-    let gamma_x_hat = dot_product_gamma(&gammas, &masked_values);
+    let gamma_x_hat = dot_product_gamma(dbg!(&gammas), dbg!(&masked_values));
 
-    let lambda = alpha_x_hat - gamma_x_hat.0 - gamma_x_hat.1;
+    let lambda = dbg!(alpha_x_hat) - dbg!(gamma_x_hat.0) - dbg!(gamma_x_hat.1);
 
     // Compute Gamma_i
     let gamma_i = compute_gamma_i(&gammas, &masks_shares, &masked_values);
-    let masked_gamma_i = gamma_i - s_i;
+    let masked_gamma_i = gamma_i - *s_i;
     // Send Gamma_i
     engine.broadcast(masked_gamma_i);
 
@@ -413,7 +416,7 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
     let p_hat = lambda - masked_gamma_i_s.values().copied().sum() - masked_gamma_i + omega_hat;
     let mut proof_statement = construct_statement(
         Some(masked_gamma_i),
-        Some(s_i),
+        Some(*s_i),
         &gammas,
         Some(&masked_values),
         Some(&masks_shares),
@@ -429,7 +432,7 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
     ));
     let prover_futures = zkfliop::prover(
         engine.sub_protocol(my_id),
-        &mut proof_statement,
+        dbg!(&mut proof_statement),
         prover_offline_material,
         two,
         three,
@@ -449,8 +452,8 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
                     z_hat[0] = masked_gamma_prover;
                     zkfliop::verifier(
                         verifier_engine,
-                        &mut z_hat,
-                        prover_id,
+                        dbg!(&mut z_hat),
+                        *prover_id,
                         offline_material,
                         two,
                         three,
@@ -460,7 +463,9 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
                     Result::<(), ()>::Ok(())
                 }
             });
-    try_join_all(verifiers_futures).await.unwrap();
+    let verifiers_futures = try_join_all(verifiers_futures);
+    let (_, verifiers_futures) = join!(prover_futures, verifiers_futures);
+    verifiers_futures.unwrap();
     engine.broadcast(());
     for p in peers {
         let _: () = engine.recv_from(p).await.unwrap();
@@ -492,6 +497,7 @@ pub async fn offline_verify_dealer<F: FieldElement, E: MultiPartyEngine>(
         .iter()
         .map(|pid| {
             let si = F::random(&mut rng);
+            println!("si: {:?}, pid:{}", si, pid);
             engine.send(si, *pid);
             (*pid, si)
         })

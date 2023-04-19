@@ -89,7 +89,7 @@ impl OfflineCommitment {
     }
 
     pub async fn online_decommit<T: Serialize + DeserializeOwned, E: MultiPartyEngine>(
-        self,
+        &self,
         engine: &mut E,
     ) -> T {
         let my_id = engine.my_party_id();
@@ -103,14 +103,14 @@ impl OfflineCommitment {
         let mut v = Option::<(Box<[u8]>, PartyId)>::None;
         let self_len = self.commit_share.len();
         engine.broadcast(&self.commit_share);
-        let ser_len = match self.commit_share {
+        let ser_len = match &self.commit_share {
             CommmitShare::Seed(s, length) => {
-                seeds.insert(my_id, s);
-                length
+                seeds.insert(my_id, *s);
+                *length
             }
             CommmitShare::Value(vec) => {
                 let len = vec.len();
-                v = Some((vec, my_id));
+                v = Some((vec.clone(), my_id));
                 len
             }
         };

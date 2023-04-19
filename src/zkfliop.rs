@@ -217,7 +217,7 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
 pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     mut engine: E,
     mut z: &mut [F],
-    offline_material: OfflineProver<F>,
+    offline_material: &OfflineProver<F>,
     two: F,
     three: F,
     four: F,
@@ -225,10 +225,10 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     let OfflineProver {
         proof_masks,
         s_tilde,
-        mut round_challenges,
+        round_challenges,
         final_msg,
     } = offline_material;
-    let last_round_challenge = round_challenges.pop().unwrap();
+    let last_round_challenge = round_challenges.last().unwrap();
     // Init
     let (_, round_count) = compute_round_count_and_m(z.len());
 
@@ -260,7 +260,11 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     };
     std::mem::forget(slope_container_uninit);
     // Rounds
-    for (round_id, round_challenge) in round_challenges.into_iter().enumerate() {
+    for (round_id, round_challenge) in round_challenges
+        .into_iter()
+        .take(round_challenges.len() - 1)
+        .enumerate()
+    {
         // Computation
         let z_len = z.len();
         let i1 = &z[1..=z_len / 2];
@@ -348,7 +352,7 @@ pub async fn verifier<F: FieldElement>(
     mut engine: impl MultiPartyEngine,
     mut z_hat: &mut [F],
     prover_id: PartyId,
-    offline_material: OfflineVerifier,
+    offline_material: &OfflineVerifier,
     two: F,
     three: F,
     four: F,
@@ -358,9 +362,9 @@ pub async fn verifier<F: FieldElement>(
     debug_assert!(z_hat.iter().skip(2).step_by(2).all(|v| v.is_zero()));
     let OfflineVerifier {
         final_msg,
-        mut round_challenges,
+        round_challenges,
     } = offline_material;
-    let last_round_challenge = round_challenges.pop().unwrap();
+    let last_round_challenge = round_challenges.last().unwrap();
 
     let mut b_hat = Vec::with_capacity(round_count);
     // Rounds
@@ -374,7 +378,11 @@ pub async fn verifier<F: FieldElement>(
         )
     };
     std::mem::forget(slope_container_uninit);
-    for (round_id, round_challenge) in round_challenges.into_iter().enumerate() {
+    for (round_id, round_challenge) in round_challenges
+        .into_iter()
+        .take(round_challenges.len() - 1)
+        .enumerate()
+    {
         let z_len = z_hat.len();
         let (q_1_hat, q_2_hat, q_3_hat): (F, F, F) = engine.recv_from(prover_id).await.unwrap();
         let r: F = round_challenge.online_decommit(&mut engine).await;
@@ -549,7 +557,7 @@ mod test {
             prover(
                 prover_exec,
                 &mut prover_input,
-                prover_offline,
+                &prover_offline,
                 two,
                 three,
                 four,
@@ -568,7 +576,7 @@ mod test {
                         engine,
                         &mut input,
                         prover_id,
-                        offline_verifier,
+                        &offline_verifier,
                         two,
                         three,
                         four,
