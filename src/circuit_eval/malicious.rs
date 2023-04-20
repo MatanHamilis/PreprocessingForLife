@@ -407,7 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_aes() {
-        let path = Path::new("circuits/aes_128.txt");
+        let path = Path::new("circuits/adder64.txt");
         let circuit = super::super::circuit_from_file(path).unwrap();
         let mut aes_rng = AesRng::from_random_seed();
         let mut input = Vec::with_capacity(circuit.input_wire_count);

@@ -3,9 +3,9 @@ use std::{fs::File, io::BufRead, path::Path};
 use self::bristol_fashion::{parse_bristol, ParsedCircuit};
 
 mod bristol_fashion;
-mod malicious;
+// mod malicious;
 mod semi_honest;
-mod verify;
+// mod verify;
 
 pub fn circuit_from_file(path: &Path) -> Option<ParsedCircuit> {
     let circuit_file = match File::open(path) {

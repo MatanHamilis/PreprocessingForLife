@@ -58,13 +58,14 @@ pub enum MultiPartyBeaverTriple {
 pub fn gate_masks_from_seed(
     circuit: &ParsedCircuit,
     seed: [u8; 16],
-) -> (Vec<(usize, usize, Mask)>, Vec<GF2>) {
+) -> (Vec<(usize, usize, Mask)>, Vec<GF2>, Vec<GF2>) {
     let total_gates: usize = circuit
         .gates
         .iter()
         .map(|layer| layer.iter().filter(|g| !g.is_linear()).count())
         .sum();
     let mut rng = AesRng::from_seed(seed);
+    let mut input_wires_masks: Vec<_> = Vec::with_capacity(circuit.input_wire_count);
     let mut gate_input_masks = Vec::with_capacity(total_gates);
     for (layer_idx, layer) in circuit.gates.iter().enumerate() {
         for (gate_idx, gate) in layer.iter().enumerate() {
@@ -87,7 +88,10 @@ pub fn gate_masks_from_seed(
     for _ in 0..circuit.output_wire_count {
         output_wire_masks.push(GF2::random(&mut rng));
     }
-    (gate_input_masks, output_wire_masks)
+    for _ in 0..circuit.input_wire_count {
+        input_wires_masks.push(GF2::random(&mut rng));
+    }
+    (gate_input_masks, output_wire_masks, input_wires_masks)
 }
 pub async fn create_multi_party_beaver_triples(
     engine: &mut impl MultiPartyEngine,
@@ -213,11 +217,45 @@ impl Add for Mask {
     }
 }
 
+pub async fn obtain_masked_and_shared_input(
+    engine: &mut impl MultiPartyEngine,
+    my_input: &[GF2],
+    my_input_mask: &[GF2],
+    input_mask_shares: &mut [GF2],
+    circuit: &ParsedCircuit,
+) -> Vec<GF2> {
+    let my_id = engine.my_party_id();
+    let mut my_masked_input: Vec<_> = my_input
+        .iter()
+        .zip(my_input_mask.iter())
+        .map(|(a, b)| *a + *b)
+        .collect();
+    engine.broadcast(&my_masked_input);
+    let mut masked_input = Vec::with_capacity(circuit.input_wire_count);
+    let mut parties = engine.party_ids().to_vec();
+    parties.sort();
+    for p in parties {
+        if p == my_id {
+            let masking_start = masked_input.len();
+            masked_input.append(&mut my_masked_input);
+            for i in masking_start..masking_start + my_input.len() {
+                input_mask_shares[i] += masked_input[i];
+            }
+        } else {
+            let mut v: Vec<_> = engine.recv_from(p).await.unwrap();
+            masked_input.append(&mut v);
+        }
+    }
+    masked_input
+}
+
 // We assume the input to the circuit is already additively shared between the parties.
 pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
     engine: &mut E,
     circuit: &ParsedCircuit,
-    pre_shared_input: Vec<GF2>,
+    my_input: &[GF2],
+    my_input_mask: &[GF2],
+    mut input_mask_shares: Vec<GF2>,
     multi_party_beaver_triples: &HashMap<(usize, usize), MultiPartyBeaverTriple>,
     output_wire_masks: &Vec<GF2>,
 ) -> Result<(HashMap<(usize, usize), Mask>, Vec<GF2>), CircuitEvalError> {
@@ -231,6 +269,15 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
     let wires_num =
         circuit.input_wire_count + circuit.internal_wire_count + circuit.output_wire_count;
     let mut wires = vec![GF2::zero(); wires_num];
+    let masked_input = obtain_masked_and_shared_input(
+        engine,
+        my_input,
+        my_input_mask,
+        &mut input_mask_shares,
+        circuit,
+    )
+    .await;
+    let pre_shared_input = input_mask_shares;
     wires[0..circuit.input_wire_count].copy_from_slice(&pre_shared_input);
     let total_non_linear_gates: usize = circuit
         .gates
@@ -420,6 +467,7 @@ pub fn local_eval_circuit(circuit: &ParsedCircuit, input: &[GF2]) -> Vec<GF2> {
 mod tests {
     use std::{
         collections::{HashMap, HashSet},
+        f32::consts::E,
         ops::SubAssign,
         sync::Arc,
     };
@@ -481,7 +529,8 @@ mod tests {
         const PPRF_DEPTH: usize = 5;
         const CODE_SEED: [u8; 16] = [1u8; 16];
         assert_eq!(input.len(), circuit.input_wire_count);
-        let party_ids: Vec<_> = (1..=party_count).map(|i| i as u64).collect();
+        let mut party_ids: Vec<_> = (1..=party_count).map(|i| i as u64).collect();
+        party_ids.sort();
         let party_ids_set = HashSet::from_iter(party_ids.iter().copied());
         let (local_router, mut execs) = LocalRouter::new(UCTag::new(&"root_tag"), &party_ids_set);
         let router_handle = tokio::spawn(local_router.launch());
@@ -500,31 +549,43 @@ mod tests {
         let first_id = party_ids[0];
         let mut first_id_input = input.to_vec();
         let mut rng = thread_rng();
+        let addition_threshold = circuit.input_wire_count % party_count;
+        let mut total_input_previous = 0;
 
-        let mut inputs: HashMap<_, _> = party_ids[1..]
-            .iter()
-            .copied()
-            .map(|id| {
-                let id_input: Vec<GF2> = first_id_input
-                    .iter_mut()
-                    .map(|v| {
-                        let r = GF2::random(&mut rng);
-                        v.sub_assign(r);
-                        r
-                    })
-                    .collect();
-                (id, id_input)
-            })
-            .collect();
-        inputs.insert(first_id, first_id_input);
         let mut wire_masks = HashMap::<PartyId, Vec<(usize, usize, Mask)>>::new();
         let mut output_wire_masks = HashMap::<PartyId, Vec<GF2>>::new();
+        let mut input_wire_masks_shares = HashMap::<PartyId, Vec<GF2>>::new();
+        let mut input_wire_masks = vec![GF2::zero(); circuit.input_wire_count];
         for id in party_ids.iter().copied() {
             let seed = core::array::from_fn(|_| (rng.next_u32() & 255) as u8);
-            let (wire_masks_for_party, outputs_masks) = gate_masks_from_seed(&circuit, seed);
+            let (wire_masks_for_party, outputs_masks, inputs_masks_shares) =
+                gate_masks_from_seed(&circuit, seed);
             wire_masks.insert(id, wire_masks_for_party);
             output_wire_masks.insert(id, outputs_masks);
+            input_wire_masks
+                .iter_mut()
+                .zip(inputs_masks_shares.iter())
+                .for_each(|(d, s)| *d += s);
+            input_wire_masks_shares.insert(id, inputs_masks_shares);
         }
+
+        let mut party_input_masks = HashMap::with_capacity(party_count);
+        let mut inputs: HashMap<_, _> = party_ids
+            .iter()
+            .enumerate()
+            .map(|(i, pid)| {
+                let addition = (i < addition_threshold) as usize;
+                let my_input_length = circuit.input_wire_count / party_count + addition;
+                let my_input =
+                    input[total_input_previous..total_input_previous + my_input_length].to_vec();
+                let my_input_mask = input_wire_masks
+                    [total_input_previous..total_input_previous + my_input_length]
+                    .to_vec();
+                party_input_masks.insert(*pid, my_input_mask);
+                total_input_previous += my_input_length;
+                (*pid, my_input)
+            })
+            .collect();
         let engine_futures = pcg_keys.iter_mut().map(|(&id, pcg_key)| {
             let circuit = circuit.clone();
             let mut engine = execs.get(&id).unwrap().sub_protocol("MULTIPARTY BEAVER");
@@ -581,12 +642,16 @@ mod tests {
             let circuit = circuit.clone();
             let input = inputs.remove(&id).unwrap();
             let output_wire_masks: Vec<_> = output_wire_masks.remove(&id).unwrap();
+            let input_wire_masks: Vec<_> = input_wire_masks_shares.remove(&id).unwrap();
+            let my_input_mask = party_input_masks.remove(&id).unwrap();
             async move {
                 let n_party_correlation = n_party_correlation;
                 multi_party_semi_honest_eval_circuit(
                     &mut engine,
                     &circuit,
-                    input,
+                    &input,
+                    &my_input_mask,
+                    input_wire_masks,
                     &n_party_correlation,
                     &output_wire_masks,
                 )
@@ -745,7 +810,7 @@ mod tests {
         );
 
         let input = vec![GF2::one(); 129];
-        let output = test_circuit(parsed_circuit, &input, 7).await;
+        let output = test_circuit(parsed_circuit, &input, 2).await;
 
         assert_eq!(output, vec![GF2::one(); 128]);
     }
