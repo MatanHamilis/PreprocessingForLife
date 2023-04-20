@@ -23,7 +23,8 @@ const CODE_WIDTH: usize = 7;
 
 pub struct MaliciousSecurityOffline<F: FieldElement, C: AsRef<ParsedCircuit>> {
     circuit: C,
-    input_mask_seeds: [u8; 16],
+    input_mask_seed: [u8; 16],
+    my_input_mask: Vec<GF2>,
     pcg_keys: HashMap<PartyId, (PackedOfflineFullPcgKey, [u8; 16])>,
     output_wire_mask_commitments: OfflineCommitment,
     offline_verification_material: OfflineCircuitVerify<F>,
@@ -35,14 +36,16 @@ impl<F: FieldElement, C: AsRef<ParsedCircuit>> MaliciousSecurityOffline<F, C> {
         three: F,
         four: F,
         circuit: C,
+        party_input_length: &HashMap<PartyId, usize>,
     ) {
         let my_id = engine.my_party_id();
-        let parties: Vec<_> = engine
+        let mut parties: Vec<_> = engine
             .party_ids()
             .iter()
             .copied()
             .filter(|p| p != &my_id)
             .collect();
+        parties.sort();
 
         // Correlated Randomness for Semi-Honest
         let mut aes_rng = AesRng::from_random_seed();
@@ -71,7 +74,7 @@ impl<F: FieldElement, C: AsRef<ParsedCircuit>> MaliciousSecurityOffline<F, C> {
             .collect();
 
         // Correlated random for Verify
-        let output_wire_masks = verify::offline_verify_dealer(
+        let (input_wire_masks, output_wire_masks) = verify::offline_verify_dealer(
             engine.sub_protocol("offline verify"),
             two,
             three,
@@ -82,13 +85,19 @@ impl<F: FieldElement, C: AsRef<ParsedCircuit>> MaliciousSecurityOffline<F, C> {
         .await;
 
         OfflineCommitment::offline_commit(engine, &output_wire_masks).await;
+        let mut total_sent = 0;
+        parties.iter().for_each(|pid| {
+            let input_len = *party_input_length.get(pid).unwrap();
+            engine.send(&input_wire_masks[total_sent..total_sent + input_len], *pid);
+            total_sent += input_len;
+        })
     }
     pub async fn malicious_security_offline_party(
         engine: &mut impl MultiPartyEngine,
         dealer_id: PartyId,
         circuit: C,
     ) -> MaliciousSecurityOffline<F, C> {
-        let (wires_masks_seed, pcg_key): (
+        let (input_mask_seed, pcg_key): (
             [u8; 16],
             HashMap<PartyId, (PackedOfflineFullPcgKey, [u8; 16])>,
         ) = engine.recv_from(dealer_id).await.unwrap();
@@ -102,12 +111,14 @@ impl<F: FieldElement, C: AsRef<ParsedCircuit>> MaliciousSecurityOffline<F, C> {
         .await;
         let output_wire_mask_commitments =
             OfflineCommitment::offline_obtain_commit(engine, dealer_id).await;
+        let my_input_mask: Vec<GF2> = engine.recv_from(dealer_id).await.unwrap();
         MaliciousSecurityOffline {
             circuit,
-            input_mask_seeds: wires_masks_seed,
+            input_mask_seed,
             pcg_keys: pcg_key,
             output_wire_mask_commitments,
             offline_verification_material,
+            my_input_mask,
         }
     }
     pub async fn into_pre_online_material<E: MultiPartyEngine>(
@@ -117,14 +128,15 @@ impl<F: FieldElement, C: AsRef<ParsedCircuit>> MaliciousSecurityOffline<F, C> {
         // In this phase we expand the compressed correlations, right before the online phase.
         let Self {
             circuit,
-            input_mask_seeds,
+            input_mask_seed,
+            my_input_mask,
             pcg_keys,
             output_wire_mask_commitments,
             offline_verification_material,
         } = self;
 
-        let (gate_input_masks, output_wire_mask_shares) =
-            semi_honest::gate_masks_from_seed(circuit.as_ref(), input_mask_seeds);
+        let (gate_input_masks, output_wire_mask_shares, input_wire_mask_shares) =
+            semi_honest::gate_masks_from_seed(circuit.as_ref(), input_mask_seed);
 
         let mut expanded_pcg_keys: HashMap<_, _> = pcg_keys
             .into_iter()
@@ -148,7 +160,9 @@ impl<F: FieldElement, C: AsRef<ParsedCircuit>> MaliciousSecurityOffline<F, C> {
             output_wire_mask_commitments,
             multi_party_beaver_triples,
             output_wire_mask_shares,
+            input_wire_mask_shares,
             offline_verification_material,
+            my_input_mask,
         }
     }
 }
@@ -158,6 +172,8 @@ pub struct PreOnlineMaterial<F: FieldElement, C: AsRef<ParsedCircuit>> {
     multi_party_beaver_triples: HashMap<(usize, usize), MultiPartyBeaverTriple>,
     output_wire_mask_commitments: OfflineCommitment,
     output_wire_mask_shares: Vec<GF2>,
+    input_wire_mask_shares: Vec<GF2>,
+    my_input_mask: Vec<GF2>,
     offline_verification_material: OfflineCircuitVerify<F>,
 }
 
@@ -165,7 +181,7 @@ impl<F: FieldElement, C: AsRef<ParsedCircuit>> PreOnlineMaterial<F, C> {
     pub async fn online_malicious_computation(
         &self,
         engine: &mut impl MultiPartyEngine,
-        pre_shared_input: Vec<GF2>,
+        my_input: Vec<GF2>,
         two: F,
         three: F,
         four: F,
@@ -176,18 +192,26 @@ impl<F: FieldElement, C: AsRef<ParsedCircuit>> PreOnlineMaterial<F, C> {
             output_wire_mask_commitments,
             output_wire_mask_shares,
             offline_verification_material,
+            input_wire_mask_shares,
+            my_input_mask,
         } = self;
-        debug_assert_eq!(pre_shared_input.len(), circuit.as_ref().input_wire_count);
-        let (masked_gate_inputs, masked_outputs) =
+        let input_wire_mask_shares = input_wire_mask_shares.clone();
+        let (masked_input_wires, masked_gate_inputs, masked_outputs) =
             semi_honest::multi_party_semi_honest_eval_circuit(
                 engine,
                 circuit.as_ref(),
-                pre_shared_input,
+                &my_input,
+                &my_input_mask,
+                input_wire_mask_shares,
                 &multi_party_beaver_triples,
                 &output_wire_mask_shares,
             )
             .await
             .unwrap();
+        let embedded_masked_input_wires: Vec<_> = masked_input_wires
+            .iter()
+            .map(|v| F::one().switch(v.is_one()))
+            .collect();
         let masked_outputs_in_field: Vec<_> = masked_outputs
             .iter()
             .map(|v| if v.is_one() { F::one() } else { F::zero() })
@@ -197,6 +221,7 @@ impl<F: FieldElement, C: AsRef<ParsedCircuit>> PreOnlineMaterial<F, C> {
             two,
             three,
             four,
+            &embedded_masked_input_wires,
             &masked_gate_inputs,
             multi_party_beaver_triples,
             &masked_outputs_in_field,
@@ -257,6 +282,23 @@ mod tests {
         let offline_party_ids: [PartyId; PARTIES + 1] =
             core::array::from_fn(|i| (i + 1) as PartyId);
         let offline_parties_set = HashSet::from_iter(offline_party_ids.iter().copied());
+        let default_input_length = input.len() / PARTIES;
+        let addition_threshold = input.len() % PARTIES;
+        let mut inputs = HashMap::with_capacity(PARTIES);
+        let mut used_input = 0;
+        let input_lengths: HashMap<_, _> = offline_party_ids
+            .iter()
+            .copied()
+            .filter(|i| i != &DEALER_ID)
+            .enumerate()
+            .map(|(idx, i)| {
+                let my_input_len = default_input_length + (idx < addition_threshold) as usize;
+                let my_input = input[used_input..used_input + my_input_len].to_vec();
+                inputs.insert(i, my_input);
+                used_input += my_input_len;
+                (i, my_input_len)
+            })
+            .collect();
         let (offline_router, mut offline_engines) =
             LocalRouter::new(UCTag::new(&"ROOT_TAG"), &offline_parties_set);
         let circuit_arc = Arc::new(circuit);
@@ -270,6 +312,7 @@ mod tests {
                     three,
                     four,
                     circuit_arc_clone,
+                    &input_lengths,
                 )
                 .await;
             }
@@ -323,21 +366,7 @@ mod tests {
         let pre_online_handles = try_join_all(pre_online_handles).await.unwrap();
 
         // Input sharing
-        let mut input_first_party = input.clone();
-        let mut inputs = HashMap::with_capacity(PARTIES);
         let mut aes_rng = AesRng::from_random_seed();
-        for p in online_party_ids.iter().skip(1).copied() {
-            let random_vec: Vec<_> = input_first_party
-                .iter_mut()
-                .map(|v| {
-                    let r = GF2::random(&mut aes_rng);
-                    *v += r;
-                    r
-                })
-                .collect();
-            inputs.insert(p, random_vec);
-        }
-        inputs.insert(online_party_ids[0], input_first_party);
 
         // Online
         let online_handles = pre_online_handles.into_iter().map(|(pid, pre)| {
@@ -412,7 +441,7 @@ mod tests {
         let mut aes_rng = AesRng::from_random_seed();
         let mut input = Vec::with_capacity(circuit.input_wire_count);
         for _ in 0..circuit.input_wire_count {
-            input.push(GF2::random(&mut aes_rng))
+            input.push(GF2::one())
         }
         test_malicious_circuit(circuit, input).await;
     }

@@ -2,6 +2,7 @@ use super::bristol_fashion;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::{Add, AddAssign};
+use std::time::Instant;
 
 use aes_prng::AesRng;
 use blake3::Hash;
@@ -258,7 +259,7 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
     mut input_mask_shares: Vec<GF2>,
     multi_party_beaver_triples: &HashMap<(usize, usize), MultiPartyBeaverTriple>,
     output_wire_masks: &Vec<GF2>,
-) -> Result<(HashMap<(usize, usize), Mask>, Vec<GF2>), CircuitEvalError> {
+) -> Result<(Vec<GF2>, HashMap<(usize, usize), Mask>, Vec<GF2>), CircuitEvalError> {
     let my_id = engine.my_party_id();
     let min_id = engine
         .party_ids()
@@ -269,6 +270,8 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
     let wires_num =
         circuit.input_wire_count + circuit.internal_wire_count + circuit.output_wire_count;
     let mut wires = vec![GF2::zero(); wires_num];
+
+    let timer_start = Instant::now();
     let masked_input = obtain_masked_and_shared_input(
         engine,
         my_input,
@@ -292,6 +295,7 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
         let non_linear_gates_in_layer = cur.iter().filter(|cur| !cur.is_linear()).count();
         usize::max(acc, non_linear_gates_in_layer)
     });
+    let timer_start = Instant::now();
     for (layer_idx, layer) in circuit.gates.iter().enumerate() {
         let mut and_gates_processed = 0;
         for (gate_idx, gate) in layer.iter().enumerate() {
@@ -423,7 +427,7 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
         masked_output_wires[wire_id] += masked_val;
     }
 
-    Ok((masked_gate_inputs, masked_output_wires))
+    Ok((masked_input, masked_gate_inputs, masked_output_wires))
 }
 
 pub fn local_eval_circuit(circuit: &ParsedCircuit, input: &[GF2]) -> Vec<GF2> {
@@ -469,11 +473,13 @@ mod tests {
         collections::{HashMap, HashSet},
         f32::consts::E,
         ops::SubAssign,
+        path::Path,
         sync::Arc,
     };
 
     use futures::{future::try_join_all, FutureExt};
     use rand::{random, thread_rng, RngCore};
+    use tokio::time::Instant;
 
     use super::bristol_fashion::{parse_bristol, ParsedCircuit};
     use crate::{
@@ -644,7 +650,7 @@ mod tests {
             let output_wire_masks: Vec<_> = output_wire_masks.remove(&id).unwrap();
             let input_wire_masks: Vec<_> = input_wire_masks_shares.remove(&id).unwrap();
             let my_input_mask = party_input_masks.remove(&id).unwrap();
-            async move {
+            tokio::spawn(async move {
                 let n_party_correlation = n_party_correlation;
                 multi_party_semi_honest_eval_circuit(
                     &mut engine,
@@ -656,18 +662,22 @@ mod tests {
                     &output_wire_masks,
                 )
                 .await
-                .map(|(masked_gate_inputs, masked_outputs)| {
+                .map(|(masked_input_wires, masked_gate_inputs, masked_outputs)| {
                     (
                         masked_gate_inputs,
                         masked_outputs,
                         output_wire_masks,
                         n_party_correlation,
+                        masked_input_wires,
                     )
                 })
-            }
+            })
         });
 
+        let timer_start = Instant::now();
         let exec_results = try_join_all(engine_futures).await.unwrap();
+        let end = timer_start.elapsed();
+        let exec_results: Vec<_> = exec_results.into_iter().map(|e| e.unwrap()).collect();
         let local_computation_wires = local_eval_circuit(&circuit, input);
         let mut local_computation_output = local_computation_wires
             [local_computation_wires.len() - circuit.output_wire_count..]
@@ -810,8 +820,16 @@ mod tests {
         );
 
         let input = vec![GF2::one(); 129];
-        let output = test_circuit(parsed_circuit, &input, 2).await;
+        let output = test_circuit(parsed_circuit, &input, 7).await;
 
         assert_eq!(output, vec![GF2::one(); 128]);
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_aes() {
+        let path = Path::new("circuits/aes_128.txt");
+        let parsed_circuit = super::super::circuit_from_file(path).unwrap();
+
+        let input = vec![GF2::one(); parsed_circuit.input_wire_count];
+        test_circuit(parsed_circuit, &input, 2).await;
     }
 }
