@@ -3,16 +3,20 @@ use std::{collections::HashMap, sync::Arc};
 use futures::{future::try_join_all, join};
 
 use crate::{
-    circuit_eval::semi_honest::gate_masks_from_seed,
+    circuit_eval::semi_honest::{
+        gate_masks_from_seed, input_wires_masks_from_seed, output_wires_masks_from_seed,
+    },
     commitment::OfflineCommitment,
     engine::{MultiPartyEngine, PartyId},
-    fields::{FieldElement, GF128, GF2},
+    fields::FieldElement,
     zkfliop::{self, dealer, prover_offline, verifier_offline, OfflineProver, OfflineVerifier},
 };
 
 use super::{
     bristol_fashion::{ParsedCircuit, ParsedGate},
-    semi_honest::{Mask, MultiPartyBeaverTriple},
+    semi_honest::{
+        BeaverTriple, Mask, OfflineSemiHonestCorrelation, RegularBeaverTriple, WideBeaverTriple,
+    },
 };
 
 #[derive(Debug)]
@@ -136,10 +140,10 @@ fn compute_gammas_alphas<F: FieldElement>(
         total_constant_addition,
     )
 }
-fn compute_gamma_i<F: FieldElement>(
+fn compute_gamma_i<CF: FieldElement, F: FieldElement + From<CF>>(
     gammas: &[(usize, usize, GateGamma<F>)],
-    mask_shares: &HashMap<(usize, usize), MultiPartyBeaverTriple>,
-    masked_values: &HashMap<(usize, usize), Mask>,
+    mask_shares: &HashMap<(usize, usize), BeaverTriple<CF>>,
+    masked_values: &HashMap<(usize, usize), Mask<CF>>,
 ) -> F {
     gammas
         .iter()
@@ -149,21 +153,21 @@ fn compute_gamma_i<F: FieldElement>(
             match (gamma, mask, masked_values) {
                 (
                     GateGamma::And(g),
-                    MultiPartyBeaverTriple::Regular(m_a, m_b, _),
+                    BeaverTriple::Regular(RegularBeaverTriple(m_a, m_b, _)),
                     Mask::And(v_a, v_b),
                 ) => {
                     let bit = *m_a * *v_b + *v_a * *m_b;
-                    g.switch(bit.is_one())
+                    *g * F::from(bit)
                 }
                 (
                     GateGamma::WideAnd(g),
-                    MultiPartyBeaverTriple::Wide(m_a, m_wb, _),
+                    BeaverTriple::Wide(WideBeaverTriple(m_a, m_wb, _)),
                     Mask::WideAnd(v_a, v_wb),
                 ) => {
-                    let bits = m_wb.switch(v_a.is_one()) + v_wb.switch(m_a.is_one());
                     let mut sum = F::zero();
                     for i in 0..g.len() {
-                        sum += g[i].switch(bits.get_bit(i));
+                        // sum += g[i] * F::from(bits[i]);
+                        sum += g[i] * F::from(m_wb[i] * *v_a + v_wb[i] * *m_a);
                     }
                     sum
                 }
@@ -172,28 +176,27 @@ fn compute_gamma_i<F: FieldElement>(
         })
         .sum()
 }
-fn dot_product_gamma<F: FieldElement>(
+fn dot_product_gamma<CF: FieldElement, F: FieldElement + From<CF>>(
     gammas: &[(usize, usize, GateGamma<F>)],
-    masks_gates: &HashMap<(usize, usize), Mask>,
+    masks_gates: &HashMap<(usize, usize), Mask<CF>>,
     input_wires_gammas: &[F],
-    input_wires_masks: &[F],
+    input_wires_masks: &[CF],
 ) -> F {
     let input_dp: F = input_wires_gammas
         .iter()
         .zip(input_wires_masks.iter())
-        .map(|(a, b)| *a * *b)
+        .map(|(a, b)| *a * F::from(*b))
         .sum();
     let gates_dp = gammas
         .iter()
         .map(|(layer_idx, gate_idx, gamma)| {
             let mask = masks_gates.get(&(*layer_idx, *gate_idx)).unwrap();
             match (gamma, mask) {
-                (GateGamma::And(g), Mask::And(m_a, m_b)) => g.switch(m_a.is_one() & m_b.is_one()),
+                (GateGamma::And(g), Mask::And(m_a, m_b)) => *g * F::from(*m_a * *m_b),
                 (GateGamma::WideAnd(g), Mask::WideAnd(m_a, m_wb)) => {
                     let mut sum = F::zero();
-                    let m = m_wb.switch(m_a.is_one());
                     for i in 0..g.len() {
-                        sum += g[i].switch(m.get_bit(i));
+                        sum += g[i] * F::from(m_wb[i] * *m_a);
                     }
                     sum
                 }
@@ -203,11 +206,11 @@ fn dot_product_gamma<F: FieldElement>(
         .sum();
     input_dp + gates_dp
 }
-fn dot_product_alpha<F: FieldElement>(
+fn dot_product_alpha<CF: FieldElement, F: FieldElement + From<CF>>(
     alphas_gate: &[(usize, usize, InputWireCoefficients<F>)],
     alphas_outputs: &[F],
-    masks_gates: &HashMap<(usize, usize), Mask>,
-    masks_outputs: &[F],
+    masks_gates: &HashMap<(usize, usize), Mask<CF>>,
+    masks_outputs: &[CF],
 ) -> F {
     // Sigma alpha_w r_w
     let sigma_alpha_w_r_w_gates: F = alphas_gate
@@ -216,12 +219,12 @@ fn dot_product_alpha<F: FieldElement>(
             let mask = masks_gates.get(&(*layer_id, *gate_id)).unwrap();
             match (mask, input_wire_coefficients) {
                 (Mask::And(a, b), InputWireCoefficients::And(c_a, c_b)) => {
-                    c_a.switch(a.is_one()) + c_b.switch(b.is_one())
+                    *c_a * F::from(*a) + *c_b * F::from(*b)
                 }
                 (Mask::WideAnd(a, wb), InputWireCoefficients::WideAnd(c_a, c_wb)) => {
-                    let mut sum = c_a.switch(a.is_one());
+                    let mut sum = *c_a * F::from(*a);
                     for i in 0..c_wb.len() {
-                        sum += c_wb[i].switch(wb.get_bit(i));
+                        sum += c_wb[i] * F::from(wb[i]);
                     }
                     sum
                 }
@@ -232,7 +235,7 @@ fn dot_product_alpha<F: FieldElement>(
     let sigma_alpha_w_r_w_outputs: F = alphas_outputs
         .iter()
         .zip(masks_outputs.iter())
-        .map(|(u, v)| *u * *v)
+        .map(|(u, v)| *u * F::from(*v))
         .sum();
     sigma_alpha_w_r_w_gates + sigma_alpha_w_r_w_outputs
 }
@@ -257,12 +260,12 @@ pub fn statement_length(circuit: &ParsedCircuit) -> usize {
     let statement_length = (1 << (usize::ilog2(2 * statement_length - 1))) as usize;
     usize::try_from(1 + statement_length).unwrap()
 }
-fn construct_statement<F: FieldElement>(
+fn construct_statement<CF: FieldElement, F: FieldElement + From<CF>>(
     masked_gamma_i: Option<F>,
     gamma_i_mask: Option<F>,
     gate_gammas: &[(usize, usize, GateGamma<F>)],
-    masked_inputs: Option<&HashMap<(usize, usize), Mask>>,
-    mask_shares: Option<&HashMap<(usize, usize), MultiPartyBeaverTriple>>,
+    masked_inputs: Option<&HashMap<(usize, usize), Mask<CF>>>,
+    mask_shares: Option<&HashMap<(usize, usize), BeaverTriple<CF>>>,
     circuit: &ParsedCircuit,
 ) -> Vec<F> {
     let statement_length: usize = statement_length(circuit);
@@ -282,14 +285,14 @@ fn construct_statement<F: FieldElement>(
         for (layer_idx, gate_idx, _) in gate_gammas {
             let gate_mask = gate_masks.get(&(*layer_idx, *gate_idx)).unwrap();
             match gate_mask {
-                MultiPartyBeaverTriple::Regular(m_a, m_b, _) => {
-                    *iter_masks.next().unwrap() = F::one().switch(m_b.is_one());
-                    *iter_masks.next().unwrap() = F::one().switch(m_a.is_one());
+                BeaverTriple::Regular(RegularBeaverTriple(m_a, m_b, _)) => {
+                    *iter_masks.next().unwrap() = F::from(*m_b);
+                    *iter_masks.next().unwrap() = F::from(*m_a);
                 }
-                MultiPartyBeaverTriple::Wide(m_a, m_wb, _) => {
-                    let v_a = F::one().switch(m_a.is_one());
+                BeaverTriple::Wide(WideBeaverTriple(m_a, m_wb, _)) => {
+                    let v_a = F::from(*m_a);
                     for i in 0..128 {
-                        *iter_masks.next().unwrap() = F::one().switch(m_wb.get_bit(i));
+                        *iter_masks.next().unwrap() = m_wb[i].into();
                         *iter_masks.next().unwrap() = v_a;
                     }
                 }
@@ -307,13 +310,14 @@ fn construct_statement<F: FieldElement>(
             let gate_mask_input = gate_masked_inputs.get(&(*layer_idx, *gate_idx)).unwrap();
             match (gate_mask_input, gate_gamma) {
                 (Mask::And(m_a, m_b), GateGamma::And(g)) => {
-                    *iter_masked_values.next().unwrap() = g.switch(m_a.is_one());
-                    *iter_masked_values.next().unwrap() = g.switch(m_b.is_one());
+                    *iter_masked_values.next().unwrap() = *g * F::from(*m_a);
+                    *iter_masked_values.next().unwrap() = *g * F::from(*m_b);
                 }
                 (Mask::WideAnd(m_a, m_wb), GateGamma::WideAnd(gs)) => {
+                    let v_a = F::from(*m_a);
                     for i in 0..gs.len() {
-                        *iter_masked_values.next().unwrap() = gs[i].switch(m_a.is_one());
-                        *iter_masked_values.next().unwrap() = gs[i].switch(m_wb.get_bit(i));
+                        *iter_masked_values.next().unwrap() = gs[i] * v_a;
+                        *iter_masked_values.next().unwrap() = gs[i] * F::from(m_wb[i]);
                     }
                 }
                 _ => panic!(),
@@ -371,15 +375,15 @@ pub async fn offline_verify_parties<F: FieldElement>(
     }
 }
 
-pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
+pub async fn verify_parties<CF: FieldElement, F: FieldElement + From<CF>, E: MultiPartyEngine>(
     engine: &mut E,
     two: F,
     three: F,
     four: F,
-    input_wire_masked_values: &[F],
-    masked_values: &HashMap<(usize, usize), Mask>,
-    masks_shares: &HashMap<(usize, usize), MultiPartyBeaverTriple>,
-    output_wire_masked_values: &[F],
+    input_wire_masked_values: &[CF],
+    masked_values: &HashMap<(usize, usize), Mask<CF>>,
+    masks_shares: &HashMap<(usize, usize), BeaverTriple<CF>>,
+    output_wire_masked_values: &[CF],
     circuit: &ParsedCircuit,
     offline_material: &OfflineCircuitVerify<F>,
 ) -> bool {
@@ -409,8 +413,8 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
     let alpha_x_hat = dot_product_alpha(
         &alphas,
         &alphas_output_wires,
-        &masked_values,
-        &output_wire_masked_values,
+        masked_values,
+        output_wire_masked_values,
     );
     let gamma_x_hat = dot_product_gamma(
         &gammas,
@@ -495,14 +499,21 @@ pub async fn verify_parties<F: FieldElement, E: MultiPartyEngine>(
     return p.is_zero();
 }
 
-pub async fn offline_verify_dealer<F: FieldElement, E: MultiPartyEngine>(
+pub async fn offline_verify_dealer<
+    CF: FieldElement,
+    F: FieldElement + From<CF>,
+    E: MultiPartyEngine,
+    SHO: OfflineSemiHonestCorrelation<CF>,
+>(
     mut engine: E,
     two: F,
     three: F,
     four: F,
-    mask_seeds: Vec<(PartyId, [u8; 16])>,
     circuit: &ParsedCircuit,
-) -> (Vec<GF2>, Vec<GF2>) {
+    total_input_wires_masks: &[CF],
+    total_output_wires_masks: &[CF],
+    sho: &[(PartyId, SHO)],
+) {
     let mut rng = E::rng();
     let alpha = F::random(&mut rng);
     let dealer_id = engine.my_party_id();
@@ -522,16 +533,14 @@ pub async fn offline_verify_dealer<F: FieldElement, E: MultiPartyEngine>(
         })
         .collect();
 
-    let mut per_party_gate_input_wires_masks = HashMap::with_capacity(mask_seeds.len());
-    let mut per_party_input_and_output_wires_masks = HashMap::with_capacity(mask_seeds.len());
+    let mut per_party_gate_input_wires_masks = HashMap::with_capacity(parties.len());
+    // let mut per_party_input_and_output_wires_masks = HashMap::with_capacity(mask_seeds.len());
     let total_gates: usize = circuit
         .gates
         .iter()
         .map(|layer| layer.iter().filter(|gate| !gate.is_linear()).count())
         .sum();
     let mut total_gate_input_masks = Vec::with_capacity(total_gates);
-    let mut total_input_wires_masks = vec![GF2::zero(); circuit.input_wire_count];
-    let mut total_output_masks = vec![GF2::zero(); circuit.output_wire_count];
     circuit
         .gates
         .iter()
@@ -542,89 +551,64 @@ pub async fn offline_verify_dealer<F: FieldElement, E: MultiPartyEngine>(
                     ParsedGate::AndGate {
                         input: _,
                         output: _,
-                    } => Mask::And(GF2::zero(), GF2::zero()),
+                    } => Mask::And(CF::zero(), CF::zero()),
                     ParsedGate::WideAndGate {
                         input: _,
                         input_bit: _,
                         output: _,
-                    } => Mask::WideAnd(GF2::zero(), GF128::zero()),
+                    } => Mask::WideAnd(CF::zero(), [CF::zero(); 128]),
                     _ => return,
                 };
-                total_gate_input_masks.push((layer_idx, gate_idx, zero_mask));
+                total_gate_input_masks.push(((layer_idx, gate_idx), zero_mask));
             })
         });
-    assert_eq!(mask_seeds.len(), engine.party_ids().len() - 1);
-    for (pid, seed) in mask_seeds {
-        let (gate_input_masks, output_wires_masks, input_wire_masks) =
-            gate_masks_from_seed(&circuit, seed);
+    for (pid, sho) in sho {
+        let gate_input_masks = sho.get_input_wires_masks(circuit);
         debug_assert_eq!(gate_input_masks.len(), total_gate_input_masks.len());
-        debug_assert_eq!(output_wires_masks.len(), total_output_masks.len());
         total_gate_input_masks
             .iter_mut()
             .zip(gate_input_masks.iter())
             .for_each(|(a, b)| {
                 debug_assert_eq!(a.0, b.0);
-                debug_assert_eq!(a.1, b.1);
                 match (a, b) {
-                    (
-                        (_, _, Mask::And(total_a, total_b)),
-                        (_, _, Mask::And(current_a, current_b)),
-                    ) => {
+                    ((_, Mask::And(total_a, total_b)), (_, Mask::And(current_a, current_b))) => {
                         *total_a += *current_a;
                         *total_b += *current_b;
                     }
                     (
-                        (_, _, Mask::WideAnd(total_a, total_wb)),
-                        (_, _, Mask::WideAnd(current_a, current_wb)),
+                        (_, Mask::WideAnd(total_a, total_wb)),
+                        (_, Mask::WideAnd(current_a, current_wb)),
                     ) => {
                         *total_a += *current_a;
-                        *total_wb += *current_wb;
+                        for i in 0..total_wb.len() {
+                            total_wb[i] += current_wb[i];
+                        }
                     }
                     _ => panic!(),
                 }
             });
-        total_output_masks
-            .iter_mut()
-            .zip(output_wires_masks.iter())
-            .for_each(|(d, s)| *d += *s);
-        total_input_wires_masks
-            .iter_mut()
-            .zip(input_wire_masks.iter())
-            .for_each(|(d, s)| *d += *s);
         per_party_gate_input_wires_masks.insert(pid, gate_input_masks);
-        per_party_input_and_output_wires_masks.insert(pid, (input_wire_masks, output_wires_masks));
+        // per_party_input_and_output_wires_masks.insert(pid, (input_wires_masks, output_wires_masks));
     }
 
     let (alphas, gammas, alphas_output_wires, gammas_inputs, total_constant_addition) =
         compute_gammas_alphas(&alpha, circuit);
 
     // Compute Omega
-    let output_wire_masks: Vec<_> = total_output_masks
-        .iter()
-        .map(|v| F::one().switch(v.is_one()))
-        .collect();
-    let input_wire_masks: Vec<_> = total_input_wires_masks
-        .iter()
-        .map(|v| F::one().switch(v.is_one()))
-        .collect();
-    let gates_input_wire_masks: HashMap<_, _> = total_gate_input_masks
-        .iter()
-        .copied()
-        .map(|(l, g, m)| ((l, g), m))
-        .collect();
+    let gates_input_wire_masks: HashMap<_, _> = total_gate_input_masks.iter().copied().collect();
     let mu = F::random(&mut rng);
     let alpha_r = dot_product_alpha(
         &alphas,
         &alphas_output_wires,
         &gates_input_wire_masks,
-        &output_wire_masks,
+        total_output_wires_masks,
     );
 
     let sigma_gamma_l_r_l = dot_product_gamma(
         &gammas,
         &gates_input_wire_masks,
         &gammas_inputs,
-        &input_wire_masks,
+        &total_input_wires_masks,
     );
     let omega = alpha_r + sigma_gamma_l_r_l;
     let omega_hat = omega - mu;
@@ -644,11 +628,13 @@ pub async fn offline_verify_dealer<F: FieldElement, E: MultiPartyEngine>(
                 let gammas = gamma_rc.as_ref();
                 let mask_shares: HashMap<_, _> = gate_masks
                     .into_iter()
-                    .map(|(l, g, m)| {
+                    .map(|((l, g), m)| {
                         let m = match m {
-                            Mask::And(a, b) => MultiPartyBeaverTriple::Regular(a, b, GF2::zero()),
+                            Mask::And(a, b) => {
+                                BeaverTriple::Regular(RegularBeaverTriple(a, b, CF::zero()))
+                            }
                             Mask::WideAnd(a, wb) => {
-                                MultiPartyBeaverTriple::Wide(a, wb, GF128::zero())
+                                BeaverTriple::Wide(WideBeaverTriple(a, wb, [CF::zero(); 128]))
                             }
                         };
                         ((l, g), m)
@@ -662,5 +648,4 @@ pub async fn offline_verify_dealer<F: FieldElement, E: MultiPartyEngine>(
         })
         .collect();
     try_join_all(dealer_offline_futures).await.unwrap();
-    (total_input_wires_masks, total_output_masks)
 }

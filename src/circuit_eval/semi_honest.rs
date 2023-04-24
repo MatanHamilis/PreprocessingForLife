@@ -5,20 +5,188 @@ use std::ops::{Add, AddAssign};
 use std::time::Instant;
 
 use aes_prng::AesRng;
-use blake3::Hash;
-use rand::SeedableRng;
+use async_trait::async_trait;
+use rand::{CryptoRng, RngCore, SeedableRng};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 
 use crate::circuit_eval::bristol_fashion::ParsedGate;
 use crate::engine::{MultiPartyEngine, PartyId};
 use crate::fields::{FieldElement, GF128, GF2};
-use crate::pcg::{self, FullPcgKey};
+use crate::pcg::{FullPcgKey, PackedOfflineFullPcgKey};
+
+const PPRF_COUNT: usize = 44;
+const PPRF_DEPTH: usize = 5;
+const CODE_WEIGHT: usize = 8;
+
+#[async_trait]
+pub trait OfflineSemiHonestCorrelation<CF: FieldElement>: Serialize + DeserializeOwned {
+    fn get_personal_circuit_input_wires_masks(&self) -> &[CF];
+    fn get_circuit_input_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<CF>;
+    fn get_circuit_output_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<CF>;
+    fn get_input_wires_masks(&self, circuit: &ParsedCircuit) -> Vec<((usize, usize), Mask<CF>)>;
+    fn deal<R: CryptoRng + RngCore>(
+        rng: &mut R,
+        parties_input_start_and_lengths: &HashMap<PartyId, (usize, usize)>,
+        circuit: &ParsedCircuit,
+    ) -> (Vec<CF>, Vec<CF>, Vec<(PartyId, Self)>);
+    /// This method may optionally be called in a pre-online phase to same computation time in the online phase itself.
+    fn pre_online_phase_preparation(&mut self, circuit: &ParsedCircuit);
+    /// This method is called in the online phase to obtain the semi honest correlation.
+    async fn get_multiparty_beaver_triples(
+        &mut self,
+        engine: &mut impl MultiPartyEngine,
+        circuit: &ParsedCircuit,
+    ) -> HashMap<(usize, usize), BeaverTriple<CF>>;
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PcgBasedPairwiseBooleanCorrelation {
+    pub input_wires_masks: Vec<GF2>,
+    pub shares_seed: [u8; 16],
+    pub pcg_keys: Vec<(PartyId, (PackedOfflineFullPcgKey, [u8; 16]))>,
+    pub expanded_pcg_keys: Option<Vec<((usize, usize), PairwiseBeaverTriple<GF2>)>>,
+}
+
+#[async_trait]
+impl OfflineSemiHonestCorrelation<GF2> for PcgBasedPairwiseBooleanCorrelation {
+    fn get_personal_circuit_input_wires_masks(&self) -> &[GF2] {
+        &self.input_wires_masks
+    }
+    fn get_circuit_input_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<GF2> {
+        input_wires_masks_from_seed(self.shares_seed, circuit)
+    }
+    fn pre_online_phase_preparation(&mut self, circuit: &ParsedCircuit) {
+        let m = expand_pairwise_beaver_triples::<CODE_WEIGHT>(circuit, &mut self.pcg_keys);
+        self.expanded_pcg_keys = Some(m);
+    }
+    fn get_input_wires_masks(&self, circuit: &ParsedCircuit) -> Vec<((usize, usize), Mask<GF2>)> {
+        let m = expand_pairwise_beaver_triples::<CODE_WEIGHT>(circuit, &self.pcg_keys);
+        // If there are only two parties...
+        if self.pcg_keys.len() == 1 {
+            return m
+                .iter()
+                .map(|(g, bts)| {
+                    let bt = match bts {
+                        PairwiseBeaverTriple::Regular(v) => Mask::And(v[0].1 .0, v[0].1 .1),
+                        PairwiseBeaverTriple::Wide(v) => Mask::WideAnd(v[0].1 .0, v[0].1 .1),
+                    };
+                    (*g, bt)
+                })
+                .collect();
+        }
+        gate_masks_from_seed(circuit, self.shares_seed)
+    }
+    async fn get_multiparty_beaver_triples(
+        &mut self,
+        engine: &mut impl MultiPartyEngine,
+        circuit: &ParsedCircuit,
+    ) -> HashMap<(usize, usize), BeaverTriple<GF2>> {
+        // If the preparation has not been done earlier, do it now.
+        if self.expanded_pcg_keys.is_none() {
+            self.pre_online_phase_preparation(circuit);
+        }
+        let pairwise_triples = self.expanded_pcg_keys.take().unwrap();
+
+        // If only two parties - expansion is silent.
+        if engine.party_ids().len() == 2 {
+            return pairwise_triples
+                .iter()
+                .map(|(g, bts)| {
+                    let bt = match bts {
+                        PairwiseBeaverTriple::Regular(v) => BeaverTriple::Regular(v[0].1),
+                        PairwiseBeaverTriple::Wide(v) => BeaverTriple::Wide(v[0].1),
+                    };
+                    (*g, bt)
+                })
+                .collect();
+        }
+
+        // Otherwise, we have to communicate.
+        let gate_input_masks = gate_masks_from_seed(circuit, self.shares_seed);
+        create_multi_party_beaver_triples(engine, circuit, &pairwise_triples, &gate_input_masks)
+            .await
+    }
+    fn get_circuit_output_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<GF2> {
+        output_wires_masks_from_seed(self.shares_seed, circuit)
+    }
+    fn deal<R: CryptoRng + RngCore>(
+        mut rng: &mut R,
+        parties_input_start_and_lengths: &HashMap<PartyId, (usize, usize)>,
+        circuit: &ParsedCircuit,
+    ) -> (Vec<GF2>, Vec<GF2>, Vec<(PartyId, Self)>) {
+        let parties_count = parties_input_start_and_lengths.len();
+        let mut pcg_keys = HashMap::with_capacity(parties_count);
+        for (i, i_pid) in parties_input_start_and_lengths.keys().copied().enumerate() {
+            pcg_keys.insert(i_pid, Vec::with_capacity(parties_count - 1));
+            for j_pid in parties_input_start_and_lengths.keys().copied().take(i) {
+                let mut pcg_code_seed = [0u8; 16];
+                rng.fill_bytes(&mut pcg_code_seed);
+                let (snd, rcv) = PackedOfflineFullPcgKey::deal(PPRF_COUNT, PPRF_DEPTH, &mut rng);
+                pcg_keys
+                    .get_mut(&j_pid)
+                    .unwrap()
+                    .push((i_pid, (snd, pcg_code_seed)));
+                pcg_keys
+                    .get_mut(&i_pid)
+                    .unwrap()
+                    .push((j_pid, (rcv, pcg_code_seed)));
+            }
+        }
+        let mut total_input_wires_masks = vec![GF2::zero(); circuit.input_wire_count];
+        let mut total_output_wires_masks = vec![GF2::zero(); circuit.output_wire_count];
+        let mut mask_seeds: HashMap<_, _> = parties_input_start_and_lengths
+            .keys()
+            .copied()
+            .map(|p| {
+                let mut seed = [0u8; 16];
+                rng.fill_bytes(&mut seed);
+                let input_wires_masks: Vec<GF2> = input_wires_masks_from_seed(seed, circuit);
+                total_input_wires_masks
+                    .iter_mut()
+                    .zip(input_wires_masks.iter())
+                    .for_each(|(d, s)| *d += *s);
+                let output_wires_masks: Vec<GF2> = output_wires_masks_from_seed(seed, circuit);
+                total_output_wires_masks
+                    .iter_mut()
+                    .zip(output_wires_masks.iter())
+                    .for_each(|(d, s)| *d += *s);
+                (p, seed)
+            })
+            .collect();
+        let offline_correlations: Vec<_> = parties_input_start_and_lengths
+            .iter()
+            .map(|(pid, (input_start, input_len))| {
+                let pcg_key = pcg_keys.remove(pid).unwrap();
+                let seed = mask_seeds.remove(pid).unwrap();
+                let input_wires_masks =
+                    total_input_wires_masks[*input_start..*input_start + *input_len].to_vec();
+                (
+                    *pid,
+                    Self {
+                        expanded_pcg_keys: None,
+                        shares_seed: seed,
+                        pcg_keys: pcg_key,
+                        input_wires_masks,
+                    },
+                )
+            })
+            .collect();
+        (
+            total_input_wires_masks,
+            total_output_wires_masks,
+            offline_correlations,
+        )
+    }
+}
 
 use self::bristol_fashion::ParsedCircuit;
 
 #[derive(Serialize, Deserialize)]
-struct EvalMessage {
-    pub opening: Mask,
+struct EvalMessage<F: FieldElement> {
+    #[serde(bound = "")]
+    pub opening: Mask<F>,
     pub gate_idx_in_layer: usize,
 }
 
@@ -51,22 +219,126 @@ pub struct SemiHonestCircuit {
     output_wires: usize,
 }
 
-#[derive(Clone, Copy)]
-pub enum MultiPartyBeaverTriple {
-    Regular(GF2, GF2, GF2),
-    Wide(GF2, GF128, GF128),
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct RegularBeaverTriple<F: FieldElement>(
+    #[serde(bound = "")] pub F,
+    #[serde(bound = "")] pub F,
+    #[serde(bound = "")] pub F,
+);
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct WideBeaverTriple<F: FieldElement>(
+    #[serde(bound = "")] pub F,
+    #[serde(with = "BigArray")]
+    #[serde(bound = "")]
+    pub [F; 128],
+    #[serde(with = "BigArray")]
+    #[serde(bound = "")]
+    pub [F; 128],
+);
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub enum BeaverTriple<F: FieldElement> {
+    Regular(#[serde(bound = "")] RegularBeaverTriple<F>),
+    Wide(#[serde(bound = "")] WideBeaverTriple<F>),
 }
-pub fn gate_masks_from_seed(
+
+#[derive(Serialize, Deserialize)]
+pub enum PairwiseBeaverTriple<F: FieldElement> {
+    Regular(#[serde(bound = "")] Vec<(PartyId, RegularBeaverTriple<F>)>),
+    Wide(#[serde(bound = "")] Vec<(PartyId, WideBeaverTriple<F>)>),
+}
+pub fn expand_pairwise_beaver_triples<const CODE_WIDTH: usize>(
+    circuit: &ParsedCircuit,
+    pcg_keys: &[(PartyId, (PackedOfflineFullPcgKey, [u8; 16]))],
+) -> Vec<((usize, usize), PairwiseBeaverTriple<GF2>)> {
+    let mut pcg_keys: Vec<_> = pcg_keys
+        .iter()
+        .map(|(pid, (pk, code))| (*pid, FullPcgKey::new_from_offline(pk, *code, CODE_WIDTH)))
+        .collect();
+    circuit
+        .iter()
+        .filter(|(_, _, gate)| !gate.is_linear())
+        .map(|(layer_idx, gate_idx, gate)| {
+            let gate_pairwise_beaver_triple = match gate {
+                ParsedGate::AndGate {
+                    input: _,
+                    output: _,
+                } => {
+                    let v: Vec<_> = pcg_keys
+                        .iter_mut()
+                        .map(|(pid, k)| {
+                            let bt = k.next_bit_beaver_triple();
+                            (*pid, RegularBeaverTriple(bt.0, bt.1, bt.2))
+                        })
+                        .collect();
+                    PairwiseBeaverTriple::Regular(v)
+                }
+                ParsedGate::WideAndGate {
+                    input: _,
+                    input_bit: _,
+                    output: _,
+                } => {
+                    let v: Vec<_> = pcg_keys
+                        .iter_mut()
+                        .map(|(pid, k)| {
+                            let bt = k.next_wide_beaver_triple();
+                            (
+                                *pid,
+                                WideBeaverTriple(
+                                    bt.0,
+                                    core::array::from_fn(|i| GF2::from(bt.1.get_bit(i))),
+                                    core::array::from_fn(|i| GF2::from(bt.2.get_bit(i))),
+                                ),
+                            )
+                        })
+                        .collect();
+                    PairwiseBeaverTriple::Wide(v)
+                }
+                _ => panic!(),
+            };
+            ((layer_idx, gate_idx), gate_pairwise_beaver_triple)
+        })
+        .collect()
+}
+
+pub fn derive_key_from_seed<const ID: usize>(seed: [u8; 16]) -> [u8; 16] {
+    let mut aes_rng = AesRng::from_seed(seed);
+    let mut array = [0u8; 16];
+    for i in 0..ID + 1 {
+        aes_rng.fill_bytes(&mut array);
+    }
+    array
+}
+pub fn input_wires_masks_from_seed<F: FieldElement>(
+    seed: [u8; 16],
+    circuit: &ParsedCircuit,
+) -> Vec<F> {
+    const INPUT_WIRES_SEED_ID: usize = 0;
+    let mut rng = AesRng::from_seed(derive_key_from_seed::<INPUT_WIRES_SEED_ID>(seed));
+    let mut input_wires_masks: Vec<_> = Vec::with_capacity(circuit.input_wire_count);
+    for _ in 0..circuit.input_wire_count {
+        input_wires_masks.push(F::random(&mut rng));
+    }
+    input_wires_masks
+}
+pub fn output_wires_masks_from_seed<F: FieldElement>(
+    seed: [u8; 16],
+    circuit: &ParsedCircuit,
+) -> Vec<F> {
+    const OUTPUT_WIRES_SEED_ID: usize = 1;
+    let mut rng = AesRng::from_seed(derive_key_from_seed::<OUTPUT_WIRES_SEED_ID>(seed));
+    let mut output_wire_masks = Vec::with_capacity(circuit.output_wire_count);
+    for _ in 0..circuit.output_wire_count {
+        output_wire_masks.push(F::random(&mut rng));
+    }
+    output_wire_masks
+}
+pub fn gate_masks_from_seed<F: FieldElement>(
     circuit: &ParsedCircuit,
     seed: [u8; 16],
-) -> (Vec<(usize, usize, Mask)>, Vec<GF2>, Vec<GF2>) {
-    let total_gates: usize = circuit
-        .gates
-        .iter()
-        .map(|layer| layer.iter().filter(|g| !g.is_linear()).count())
-        .sum();
-    let mut rng = AesRng::from_seed(seed);
-    let mut input_wires_masks: Vec<_> = Vec::with_capacity(circuit.input_wire_count);
+) -> Vec<((usize, usize), Mask<F>)> {
+    const GATE_INPUT_WIRES_SEED_ID: usize = 2;
+    let total_gates: usize = circuit.total_non_linear_gates();
+    let mut rng = AesRng::from_seed(derive_key_from_seed::<GATE_INPUT_WIRES_SEED_ID>(seed));
     let mut gate_input_masks = Vec::with_capacity(total_gates);
     for (layer_idx, layer) in circuit.gates.iter().enumerate() {
         for (gate_idx, gate) in layer.iter().enumerate() {
@@ -74,32 +346,28 @@ pub fn gate_masks_from_seed(
                 ParsedGate::AndGate {
                     input: _,
                     output: _,
-                } => Mask::And(GF2::random(&mut rng), GF2::random(&mut rng)),
+                } => Mask::And(F::random(&mut rng), F::random(&mut rng)),
                 ParsedGate::WideAndGate {
                     input: _,
                     input_bit: _,
                     output: _,
-                } => Mask::WideAnd(GF2::random(&mut rng), GF128::random(&mut rng)),
+                } => Mask::WideAnd(
+                    F::random(&mut rng),
+                    core::array::from_fn(|_| F::random(&mut rng)),
+                ),
                 _ => continue,
             };
-            gate_input_masks.push((layer_idx, gate_idx, mask));
+            gate_input_masks.push(((layer_idx, gate_idx), mask));
         }
     }
-    let mut output_wire_masks = Vec::with_capacity(circuit.output_wire_count);
-    for _ in 0..circuit.output_wire_count {
-        output_wire_masks.push(GF2::random(&mut rng));
-    }
-    for _ in 0..circuit.input_wire_count {
-        input_wires_masks.push(GF2::random(&mut rng));
-    }
-    (gate_input_masks, output_wire_masks, input_wires_masks)
+    gate_input_masks
 }
-pub async fn create_multi_party_beaver_triples(
+pub async fn create_multi_party_beaver_triples<F: FieldElement>(
     engine: &mut impl MultiPartyEngine,
     circuit: &ParsedCircuit,
-    pcg_correlations: &mut HashMap<PartyId, FullPcgKey>,
-    gate_input_masks: &Vec<(usize, usize, Mask)>,
-) -> HashMap<(usize, usize), MultiPartyBeaverTriple> {
+    pairwise_triples: &[((usize, usize), PairwiseBeaverTriple<F>)],
+    gate_input_masks: &[((usize, usize), Mask<F>)],
+) -> HashMap<(usize, usize), BeaverTriple<F>> {
     let my_id = engine.my_party_id();
     let peers: Vec<_> = engine
         .party_ids()
@@ -112,62 +380,74 @@ pub async fn create_multi_party_beaver_triples(
     gate_input_masks
         .iter()
         .copied()
-        .for_each(|(layer_idx, gate_idx, mask)| {
-            let gate = circuit.gates[layer_idx][gate_idx];
-            match (gate, mask) {
-                (
-                    ParsedGate::AndGate {
-                        input: _,
-                        output: _,
-                    },
-                    Mask::And(x, y),
-                ) => {
-                    let xy = x * y;
-                    let mut z = xy;
-                    for party in peers.iter() {
-                        let (a, b, c) = pcg_correlations
-                            .get_mut(&party)
-                            .unwrap()
-                            .next_bit_beaver_triple();
-                        engine.send((layer_idx, gate_idx, Mask::And(x - a, y - b)), *party);
-                        z += c + y * (x - a) + (y - b) * a - xy;
-                        pairwise_beaver_triples.insert((layer_idx, gate_idx, *party), a);
+        .zip(pairwise_triples.iter())
+        .for_each(
+            |(((layer_idx, gate_idx), mask), ((layer_idx_t, gate_idx_t), gate_beaver_triples))| {
+                assert_eq!(&layer_idx, layer_idx_t);
+                assert_eq!(&gate_idx, gate_idx_t);
+                let gate = circuit.gates[layer_idx][gate_idx];
+                match (gate, mask, gate_beaver_triples) {
+                    (
+                        ParsedGate::AndGate {
+                            input: _,
+                            output: _,
+                        },
+                        Mask::And(x, y),
+                        PairwiseBeaverTriple::Regular(gate_beaver_triples),
+                    ) => {
+                        let xy = x * y;
+                        let mut z = xy;
+                        for (party, RegularBeaverTriple(a, b, c)) in
+                            gate_beaver_triples.iter().copied()
+                        {
+                            engine.send((layer_idx, gate_idx, Mask::And(x - a, y - b)), party);
+                            z += c + y * x - b * a - xy;
+                            pairwise_beaver_triples.insert((layer_idx, gate_idx, party), a);
+                        }
+                        n_wise_beaver_triples.insert(
+                            (layer_idx, gate_idx),
+                            BeaverTriple::Regular(RegularBeaverTriple(x, y, z)),
+                        );
                     }
-                    n_wise_beaver_triples.insert(
-                        (layer_idx, gate_idx),
-                        MultiPartyBeaverTriple::Regular(x, y, z),
-                    );
-                }
-                (
-                    ParsedGate::WideAndGate {
-                        input: _,
-                        input_bit: _,
-                        output: _,
-                    },
-                    Mask::WideAnd(x, wy),
-                ) => {
-                    let xwy = wy * x;
-                    let mut wz = xwy;
-                    for party in peers.iter() {
-                        let (a, wb, wc) = pcg_correlations
-                            .get_mut(&party)
-                            .unwrap()
-                            .next_wide_beaver_triple();
-                        engine.send((layer_idx, gate_idx, Mask::WideAnd(x - a, wy - wb)), *party);
-                        wz += wc + wy * (x - a) + (wy - wb) * a - xwy;
-                        pairwise_beaver_triples.insert((layer_idx, gate_idx, *party), a);
+                    (
+                        ParsedGate::WideAndGate {
+                            input: _,
+                            input_bit: _,
+                            output: _,
+                        },
+                        Mask::WideAnd(x, wy),
+                        PairwiseBeaverTriple::Wide(gate_beaver_triples),
+                    ) => {
+                        let xwy = core::array::from_fn(|i| wy[i] * x);
+                        let mut wz = xwy;
+                        for (party, WideBeaverTriple(a, wb, wc)) in
+                            gate_beaver_triples.iter().copied()
+                        {
+                            engine.send(
+                                (
+                                    layer_idx,
+                                    gate_idx,
+                                    Mask::WideAnd(x - a, core::array::from_fn(|i| wy[i] - wb[i])),
+                                ),
+                                party,
+                            );
+                            for i in 0..wz.len() {
+                                wz[i] += wc[i] + wy[i] * x - wb[i] * a - xwy[i];
+                            }
+                            pairwise_beaver_triples.insert((layer_idx, gate_idx, party), a);
+                        }
+                        n_wise_beaver_triples.insert(
+                            (layer_idx, gate_idx),
+                            BeaverTriple::Wide(WideBeaverTriple(x, wy, wz)),
+                        );
                     }
-                    n_wise_beaver_triples.insert(
-                        (layer_idx, gate_idx),
-                        MultiPartyBeaverTriple::Wide(x, wy, wz),
-                    );
+                    _ => {}
                 }
-                _ => {}
-            }
-        });
+            },
+        );
 
     while !pairwise_beaver_triples.is_empty() {
-        let ((layer_idx, gate_idx, opening), party): ((usize, usize, Mask), _) =
+        let ((layer_idx, gate_idx, opening), party): ((usize, usize, Mask<F>), _) =
             engine.recv().await.unwrap();
         let a = pairwise_beaver_triples
             .remove(&(layer_idx, gate_idx, party))
@@ -176,11 +456,13 @@ pub async fn create_multi_party_beaver_triples(
             .get_mut(&(layer_idx, gate_idx))
             .unwrap();
         match (opening, beaver_triple) {
-            (Mask::And(xa, yb), MultiPartyBeaverTriple::Regular(_, y, z)) => {
+            (Mask::And(xa, yb), BeaverTriple::Regular(RegularBeaverTriple(_, y, z))) => {
                 *z += xa * *y + yb * a;
             }
-            (Mask::WideAnd(xa, wyb), MultiPartyBeaverTriple::Wide(_, wy, wz)) => {
-                *wz += *wy * xa + wyb * a;
+            (Mask::WideAnd(xa, wyb), BeaverTriple::Wide(WideBeaverTriple(_, wy, wz))) => {
+                for i in 0..wz.len() {
+                    wz[i] += wy[i] * xa + wyb[i] * a;
+                }
             }
             _ => panic!(),
         }
@@ -189,12 +471,17 @@ pub async fn create_multi_party_beaver_triples(
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
-pub enum Mask {
-    And(GF2, GF2),
-    WideAnd(GF2, GF128),
+pub enum Mask<F: FieldElement> {
+    And(#[serde(bound = "")] F, #[serde(bound = "")] F),
+    WideAnd(
+        #[serde(bound = "")] F,
+        #[serde(with = "BigArray")]
+        #[serde(bound = "")]
+        [F; 128],
+    ),
 }
 
-impl AddAssign for Mask {
+impl<F: FieldElement> AddAssign for Mask<F> {
     fn add_assign(&mut self, rhs: Self) {
         match (self, rhs) {
             (Mask::And(s_a, s_b), Mask::And(r_a, r_b)) => {
@@ -203,14 +490,16 @@ impl AddAssign for Mask {
             }
             (Mask::WideAnd(s_a, s_b), Mask::WideAnd(r_a, r_b)) => {
                 *s_a += r_a;
-                *s_b += r_b;
+                for i in 0..s_b.len() {
+                    s_b[i] += r_b[i];
+                }
             }
             _ => panic!(),
         }
     }
 }
-impl Add for Mask {
-    type Output = Mask;
+impl<F: FieldElement> Add for Mask<F> {
+    type Output = Mask<F>;
     fn add(self, rhs: Self) -> Self::Output {
         let mut m = self.clone();
         m += rhs;
@@ -218,48 +507,46 @@ impl Add for Mask {
     }
 }
 
-pub async fn obtain_masked_and_shared_input(
+pub async fn obtain_masked_and_shared_input<F: FieldElement>(
     engine: &mut impl MultiPartyEngine,
-    my_input: &[GF2],
-    my_input_mask: &[GF2],
-    input_mask_shares: &mut [GF2],
+    parties_input_pos_and_length: &HashMap<PartyId, (usize, usize)>,
+    my_input: &[F],
+    my_input_mask: &[F],
+    input_mask_shares: &mut [F],
     circuit: &ParsedCircuit,
-) -> Vec<GF2> {
+) -> Vec<F> {
     let my_id = engine.my_party_id();
-    let mut my_masked_input: Vec<_> = my_input
+    let my_masked_input: Vec<_> = my_input
         .iter()
         .zip(my_input_mask.iter())
         .map(|(a, b)| *a + *b)
         .collect();
     engine.broadcast(&my_masked_input);
-    let mut masked_input = Vec::with_capacity(circuit.input_wire_count);
-    let mut parties = engine.party_ids().to_vec();
-    parties.sort();
-    for p in parties {
-        if p == my_id {
-            let masking_start = masked_input.len();
-            masked_input.append(&mut my_masked_input);
-            for i in masking_start..masking_start + my_input.len() {
-                input_mask_shares[i] += masked_input[i];
-            }
-        } else {
-            let mut v: Vec<_> = engine.recv_from(p).await.unwrap();
-            masked_input.append(&mut v);
-        }
+    let mut masked_input = vec![F::zero(); circuit.input_wire_count];
+    let (my_input_start, my_input_length) = parties_input_pos_and_length.get(&my_id).unwrap();
+    for i in 0..*my_input_length {
+        masked_input[my_input_start + i] = my_masked_input[i];
+        input_mask_shares[my_input_start + i] += my_masked_input[i];
+    }
+    for i in 0..parties_input_pos_and_length.len() - 1 {
+        let (v, p): (Vec<_>, _) = engine.recv().await.unwrap();
+        let (input_start, input_length) = parties_input_pos_and_length.get(&p).unwrap().clone();
+        masked_input[input_start..input_start + input_length].copy_from_slice(&v);
     }
     masked_input
 }
 
 // We assume the input to the circuit is already additively shared between the parties.
-pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
+pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine, F: FieldElement>(
     engine: &mut E,
     circuit: &ParsedCircuit,
-    my_input: &[GF2],
-    my_input_mask: &[GF2],
-    mut input_mask_shares: Vec<GF2>,
-    multi_party_beaver_triples: &HashMap<(usize, usize), MultiPartyBeaverTriple>,
-    output_wire_masks: &Vec<GF2>,
-) -> Result<(Vec<GF2>, HashMap<(usize, usize), Mask>, Vec<GF2>), CircuitEvalError> {
+    my_input: &[F],
+    my_input_mask: &[F],
+    mut input_mask_shares: Vec<F>,
+    multi_party_beaver_triples: &HashMap<(usize, usize), BeaverTriple<F>>,
+    output_wire_masks: &Vec<F>,
+    parties_input_pos_and_length: &HashMap<PartyId, (usize, usize)>,
+) -> Result<(Vec<F>, HashMap<(usize, usize), Mask<F>>, Vec<F>), CircuitEvalError> {
     let my_id = engine.my_party_id();
     let min_id = engine
         .party_ids()
@@ -269,11 +556,12 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
     let number_of_peers = engine.party_ids().len() - 1;
     let wires_num =
         circuit.input_wire_count + circuit.internal_wire_count + circuit.output_wire_count;
-    let mut wires = vec![GF2::zero(); wires_num];
+    let mut wires = vec![F::zero(); wires_num];
 
     let timer_start = Instant::now();
     let masked_input = obtain_masked_and_shared_input(
         engine,
+        parties_input_pos_and_length,
         my_input,
         my_input_mask,
         &mut input_mask_shares,
@@ -287,8 +575,8 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
         .iter()
         .map(|layer| layer.iter().filter(|g| !g.is_linear()).count())
         .sum();
-    let mut masked_output_wires = Vec::<GF2>::with_capacity(circuit.output_wire_count);
-    let mut masked_gate_inputs = HashMap::<(usize, usize), Mask>::with_capacity(
+    let mut masked_output_wires = Vec::<F>::with_capacity(circuit.output_wire_count);
+    let mut masked_gate_inputs = HashMap::<(usize, usize), Mask<F>>::with_capacity(
         total_non_linear_gates + circuit.output_wire_count,
     );
     let max_layer_size = circuit.gates.iter().fold(0, |acc, cur| {
@@ -303,7 +591,7 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
                 ParsedGate::NotGate { input, output } => {
                     wires[*output] = wires[*input];
                     if is_first {
-                        wires[*output].flip();
+                        wires[*output] += F::one();
                     }
                 }
                 ParsedGate::XorGate { input, output } => {
@@ -315,7 +603,7 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
                         .get(&(layer_idx, gate_idx))
                         .unwrap()
                     {
-                        MultiPartyBeaverTriple::Regular(a, b, c) => (*a, *b, *c),
+                        BeaverTriple::Regular(RegularBeaverTriple(a, b, c)) => (*a, *b, *c),
                         _ => panic!(),
                     };
 
@@ -341,32 +629,31 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
                         .get(&(layer_idx, gate_idx))
                         .unwrap()
                     {
-                        MultiPartyBeaverTriple::Wide(a, wb, wc) => (*a, *wb, *wc),
+                        BeaverTriple::Wide(WideBeaverTriple(a, wb, wc)) => (*a, *wb, *wc),
                         _ => panic!(),
                     };
                     let x = wires[*input_bit];
-                    let mut wy = GF128::zero();
+                    let mut wy = [F::zero(); 128];
                     for i in 0..input.len() {
                         let input_wire = wires[input[i]];
-                        wy.set_bit(input_wire.into(), i);
+                        wy[i] = input_wire.into();
                     }
-                    let wz = wc + wy * (x - a) + (wy - wb) * a;
                     for (idx, output_wire) in output.iter().enumerate() {
-                        wires[*output_wire] = wz.get_bit(idx).into();
+                        wires[*output_wire] = wc[idx] + wy[idx] * x - wb[idx] * a;
                     }
+                    let masked_inputs = core::array::from_fn(|i| wy[i] - wb[i]);
                     let msg = EvalMessage {
-                        opening: Mask::WideAnd(x - a, wy - wb),
+                        opening: Mask::WideAnd(x - a, masked_inputs),
                         gate_idx_in_layer: gate_idx,
                     };
                     engine.broadcast(msg);
-                    let masked_inputs = wy - wb;
-                    let mask = Mask::WideAnd(x - a, wy - wb);
+                    let mask = Mask::WideAnd(x - a, masked_inputs);
                     masked_gate_inputs.insert((layer_idx, gate_idx), mask);
                 }
             }
         }
         for _ in 0..and_gates_processed * number_of_peers {
-            let (msg, _): (EvalMessage, PartyId) = engine.recv().await.unwrap();
+            let (msg, _): (EvalMessage<F>, PartyId) = engine.recv().await.unwrap();
             let gate_idx = msg.gate_idx_in_layer;
             let beaver_triple = multi_party_beaver_triples
                 .get(&(layer_idx, gate_idx))
@@ -376,7 +663,7 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
             match (msg.opening, beaver_triple, gate, mask) {
                 (
                     Mask::And(ax, by),
-                    MultiPartyBeaverTriple::Regular(a, _, _),
+                    BeaverTriple::Regular(RegularBeaverTriple(a, _, _)),
                     ParsedGate::AndGate {
                         input: input_wires,
                         output: output_wire,
@@ -390,7 +677,7 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
                 }
                 (
                     Mask::WideAnd(ax, wby),
-                    MultiPartyBeaverTriple::Wide(a, _, _),
+                    BeaverTriple::Wide(WideBeaverTriple(a, _, _)),
                     ParsedGate::WideAndGate {
                         input,
                         input_bit,
@@ -398,18 +685,19 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
                     },
                     Mask::WideAnd(mask_a, mask_wb),
                 ) => {
-                    *mask_wb += wby;
+                    for i in 0..wby.len() {
+                        mask_wb[i] += wby[i];
+                    }
                     *mask_a += ax;
                     for i in 0..output.len() {
                         let y = wires[input[i]];
-                        wires[output[i]] += y * ax + GF2::from(wby.get_bit(i)) * *a;
+                        wires[output[i]] += y * ax + wby[i] * *a;
                     }
                 }
                 _ => panic!(),
             }
         }
     }
-
     // Create a robust secret sharing of the output wires.
     for (i, (wire, mask)) in wires
         .iter()
@@ -422,7 +710,7 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
     }
 
     for _ in 0..circuit.output_wire_count * number_of_peers {
-        let ((wire_id, masked_val), _): ((usize, GF2), _) = engine.recv().await.unwrap();
+        let ((wire_id, masked_val), _): ((usize, F), _) = engine.recv().await.unwrap();
         assert!(wire_id < output_wire_masks.len());
         masked_output_wires[wire_id] += masked_val;
     }
@@ -430,11 +718,11 @@ pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine>(
     Ok((masked_input, masked_gate_inputs, masked_output_wires))
 }
 
-pub fn local_eval_circuit(circuit: &ParsedCircuit, input: &[GF2]) -> Vec<GF2> {
+pub fn local_eval_circuit<F: FieldElement>(circuit: &ParsedCircuit, input: &[F]) -> Vec<F> {
     debug_assert_eq!(input.len(), circuit.input_wire_count);
     let mut wires =
         vec![
-            GF2::zero();
+            F::zero();
             circuit.input_wire_count + circuit.output_wire_count + circuit.internal_wire_count
         ];
     wires[0..circuit.input_wire_count].copy_from_slice(input);
@@ -446,7 +734,7 @@ pub fn local_eval_circuit(circuit: &ParsedCircuit, input: &[GF2]) -> Vec<GF2> {
                 }
                 &ParsedGate::NotGate { input, output } => {
                     wires[output] = wires[input];
-                    wires[output].flip();
+                    wires[output] += F::one();
                 }
                 &ParsedGate::XorGate { input, output } => {
                     wires[output] = wires[input[0]] + wires[input[1]];
@@ -471,14 +759,13 @@ pub fn local_eval_circuit(circuit: &ParsedCircuit, input: &[GF2]) -> Vec<GF2> {
 mod tests {
     use std::{
         collections::{HashMap, HashSet},
-        f32::consts::E,
         ops::SubAssign,
         path::Path,
         sync::Arc,
     };
 
-    use futures::{future::try_join_all, FutureExt};
-    use rand::{random, thread_rng, RngCore};
+    use futures::future::try_join_all;
+    use rand::thread_rng;
     use tokio::time::Instant;
 
     use super::bristol_fashion::{parse_bristol, ParsedCircuit};
@@ -486,53 +773,21 @@ mod tests {
         circuit_eval::{
             bristol_fashion::ParsedGate,
             semi_honest::{
-                create_multi_party_beaver_triples, gate_masks_from_seed, local_eval_circuit,
-                multi_party_semi_honest_eval_circuit, Mask, MultiPartyBeaverTriple,
+                local_eval_circuit, multi_party_semi_honest_eval_circuit, BeaverTriple, Mask,
+                OfflineSemiHonestCorrelation, PcgBasedPairwiseBooleanCorrelation,
+                RegularBeaverTriple, WideBeaverTriple,
             },
         },
-        engine::{LocalRouter, MultiPartyEngine, PartyId},
+        engine::{LocalRouter, MultiPartyEngine},
         fields::{FieldElement, GF2},
-        pcg::FullPcgKey,
         uc_tags::UCTag,
     };
 
-    async fn gen_pairwise_pcg_keys<E: MultiPartyEngine>(
-        engine: &E,
-        pprf_count: usize,
-        pprf_depth: usize,
-        code_weight: usize,
-        code_seed: [u8; 16],
-    ) -> HashMap<PartyId, FullPcgKey> {
-        let my_id = engine.my_party_id();
-        let futures: Vec<_> = engine
-            .party_ids()
-            .iter()
-            .copied()
-            .filter(|i| *i != my_id)
-            .map(|peer| {
-                let tag = if peer < my_id {
-                    UCTag::new(&"PCG").derive(peer).derive(my_id)
-                } else {
-                    UCTag::new(&"PCG").derive(my_id).derive(peer)
-                };
-                let b: Box<[PartyId]> = Box::new([peer, my_id]);
-                let peer_arc = Arc::from(b);
-                FullPcgKey::new(
-                    engine.sub_protocol_with(tag, peer_arc),
-                    pprf_count,
-                    pprf_depth,
-                    code_seed,
-                    code_weight,
-                )
-                .map(move |v| v.map(move |vv| (peer, vv)))
-            })
-            .collect();
-        try_join_all(futures).await.unwrap().into_iter().collect()
-    }
-    async fn test_circuit(circuit: ParsedCircuit, input: &[GF2], party_count: usize) -> Vec<GF2> {
-        const PPRF_COUNT: usize = 44;
-        const CODE_WEIGHT: usize = 8;
-        const PPRF_DEPTH: usize = 5;
+    async fn test_boolean_circuit(
+        circuit: ParsedCircuit,
+        input: &[GF2],
+        party_count: usize,
+    ) -> Vec<GF2> {
         const CODE_SEED: [u8; 16] = [1u8; 16];
         assert_eq!(input.len(), circuit.input_wire_count);
         let mut party_ids: Vec<_> = (1..=party_count).map(|i| i as u64).collect();
@@ -541,91 +796,69 @@ mod tests {
         let (local_router, mut execs) = LocalRouter::new(UCTag::new(&"root_tag"), &party_ids_set);
         let router_handle = tokio::spawn(local_router.launch());
 
-        let pcg_keys_futures = execs.iter().map(|(pid, engine)| {
-            gen_pairwise_pcg_keys(engine, PPRF_COUNT, PPRF_DEPTH, CODE_WEIGHT, CODE_SEED)
-                .map(move |v| Result::<_, ()>::Ok((*pid, v)))
-        });
-
-        let mut pcg_keys: HashMap<_, _> = try_join_all(pcg_keys_futures)
-            .await
-            .unwrap()
-            .into_iter()
-            .collect();
-
         let first_id = party_ids[0];
-        let mut first_id_input = input.to_vec();
+        let first_id_input = input.to_vec();
         let mut rng = thread_rng();
         let addition_threshold = circuit.input_wire_count % party_count;
         let mut total_input_previous = 0;
-
-        let mut wire_masks = HashMap::<PartyId, Vec<(usize, usize, Mask)>>::new();
-        let mut output_wire_masks = HashMap::<PartyId, Vec<GF2>>::new();
-        let mut input_wire_masks_shares = HashMap::<PartyId, Vec<GF2>>::new();
-        let mut input_wire_masks = vec![GF2::zero(); circuit.input_wire_count];
-        for id in party_ids.iter().copied() {
-            let seed = core::array::from_fn(|_| (rng.next_u32() & 255) as u8);
-            let (wire_masks_for_party, outputs_masks, inputs_masks_shares) =
-                gate_masks_from_seed(&circuit, seed);
-            wire_masks.insert(id, wire_masks_for_party);
-            output_wire_masks.insert(id, outputs_masks);
-            input_wire_masks
-                .iter_mut()
-                .zip(inputs_masks_shares.iter())
-                .for_each(|(d, s)| *d += s);
-            input_wire_masks_shares.insert(id, inputs_masks_shares);
-        }
-
-        let mut party_input_masks = HashMap::with_capacity(party_count);
-        let mut inputs: HashMap<_, _> = party_ids
+        let parties_input_lengths: HashMap<_, _> = party_ids
             .iter()
             .enumerate()
             .map(|(i, pid)| {
                 let addition = (i < addition_threshold) as usize;
                 let my_input_length = circuit.input_wire_count / party_count + addition;
-                let my_input =
-                    input[total_input_previous..total_input_previous + my_input_length].to_vec();
-                let my_input_mask = input_wire_masks
-                    [total_input_previous..total_input_previous + my_input_length]
-                    .to_vec();
-                party_input_masks.insert(*pid, my_input_mask);
+                let my_input_start = total_input_previous;
                 total_input_previous += my_input_length;
-                (*pid, my_input)
+                (*pid, (my_input_start, my_input_length))
             })
             .collect();
-        let engine_futures = pcg_keys.iter_mut().map(|(&id, pcg_key)| {
-            let circuit = circuit.clone();
-            let mut engine = execs.get(&id).unwrap().sub_protocol("MULTIPARTY BEAVER");
-            let wires_mask = wire_masks.remove(&id).unwrap();
-            async move {
-                let circuit = circuit.clone();
-                Result::<_, ()>::Ok((
-                    id,
-                    create_multi_party_beaver_triples(&mut engine, &circuit, pcg_key, &wires_mask)
-                        .await,
-                ))
-            }
-        });
+        let (total_input_wires_masks, total_output_wires_masks, offline_correlations) =
+            PcgBasedPairwiseBooleanCorrelation::deal(&mut rng, &parties_input_lengths, &circuit);
+
+        let mut inputs: HashMap<_, _> = parties_input_lengths
+            .iter()
+            .map(|(&pid, &(input_start, input_len))| {
+                let my_input = input[input_start..input_start + input_len].to_vec();
+                (pid, my_input)
+            })
+            .collect();
+        let engine_futures =
+            offline_correlations
+                .into_iter()
+                .map(|(id, mut offline_correlation)| {
+                    let circuit = circuit.clone();
+                    let mut engine = execs.get(&id).unwrap().sub_protocol("MULTIPARTY BEAVER");
+                    async move {
+                        let bts = offline_correlation
+                            .get_multiparty_beaver_triples(&mut engine, &circuit)
+                            .await;
+                        Result::<_, ()>::Ok((id, bts, offline_correlation))
+                    }
+                });
+        let parties_input_lengths = Arc::new(parties_input_lengths);
         let exec_results = try_join_all(engine_futures).await.unwrap();
         let mut corr_sums = HashMap::clone(&exec_results[0].1);
-        exec_results.iter().skip(1).for_each(|(_, v)| {
+        exec_results.iter().skip(1).for_each(|(_, v, _)| {
             v.iter().for_each(|((layer_idx, gate_idx), bt)| {
                 let current = corr_sums.get_mut(&(*layer_idx, *gate_idx)).unwrap();
                 match (current, bt) {
                     (
-                        MultiPartyBeaverTriple::Regular(cur_a, cur_b, cur_c),
-                        MultiPartyBeaverTriple::Regular(bt_a, bt_b, bt_c),
+                        BeaverTriple::Regular(RegularBeaverTriple(cur_a, cur_b, cur_c)),
+                        BeaverTriple::Regular(RegularBeaverTriple(bt_a, bt_b, bt_c)),
                     ) => {
                         *cur_a += *bt_a;
                         *cur_b += *bt_b;
                         *cur_c += *bt_c;
                     }
                     (
-                        MultiPartyBeaverTriple::Wide(cur_a, cur_b, cur_c),
-                        MultiPartyBeaverTriple::Wide(bt_a, bt_b, bt_c),
+                        BeaverTriple::Wide(WideBeaverTriple(cur_a, cur_b, cur_c)),
+                        BeaverTriple::Wide(WideBeaverTriple(bt_a, bt_b, bt_c)),
                     ) => {
                         *cur_a += *bt_a;
-                        *cur_b += *bt_b;
-                        *cur_c += *bt_c;
+                        for i in 0..cur_b.len() {
+                            cur_b[i] += bt_b[i];
+                            cur_c[i] += bt_c[i];
+                        }
                     }
                     _ => panic!(),
                 }
@@ -633,46 +866,56 @@ mod tests {
         });
         for v in corr_sums.values() {
             match v {
-                MultiPartyBeaverTriple::Regular(a, b, c) => {
+                BeaverTriple::Regular(RegularBeaverTriple(a, b, c)) => {
                     assert_eq!(*a * *b, *c);
                 }
-                MultiPartyBeaverTriple::Wide(a, b, c) => {
-                    assert_eq!(*b * *a, *c);
+                BeaverTriple::Wide(WideBeaverTriple(a, b, c)) => {
+                    assert_eq!(core::array::from_fn(|i| b[i] * *a), *c);
                 }
             }
         }
 
-        let engine_futures = exec_results.into_iter().map(|(id, n_party_correlation)| {
-            let output_wire_count = circuit.output_wire_count;
-            let mut engine = execs.remove(&id).unwrap();
-            let circuit = circuit.clone();
-            let input = inputs.remove(&id).unwrap();
-            let output_wire_masks: Vec<_> = output_wire_masks.remove(&id).unwrap();
-            let input_wire_masks: Vec<_> = input_wire_masks_shares.remove(&id).unwrap();
-            let my_input_mask = party_input_masks.remove(&id).unwrap();
-            tokio::spawn(async move {
-                let n_party_correlation = n_party_correlation;
-                multi_party_semi_honest_eval_circuit(
-                    &mut engine,
-                    &circuit,
-                    &input,
-                    &my_input_mask,
-                    input_wire_masks,
-                    &n_party_correlation,
-                    &output_wire_masks,
-                )
-                .await
-                .map(|(masked_input_wires, masked_gate_inputs, masked_outputs)| {
-                    (
-                        masked_gate_inputs,
-                        masked_outputs,
-                        output_wire_masks,
-                        n_party_correlation,
-                        masked_input_wires,
-                    )
-                })
-            })
-        });
+        let engine_futures =
+            exec_results
+                .into_iter()
+                .map(|(id, n_party_correlation, offline_corerlation)| {
+                    let mut engine = execs.remove(&id).unwrap();
+                    let circuit = circuit.clone();
+                    let input = inputs.remove(&id).unwrap();
+                    let output_wire_masks: Vec<_> =
+                        offline_corerlation.get_circuit_output_wires_masks_shares(&circuit);
+                    let input_wire_masks: Vec<_> =
+                        offline_corerlation.get_circuit_input_wires_masks_shares(&circuit);
+                    let my_input_mask = offline_corerlation
+                        .get_personal_circuit_input_wires_masks()
+                        .to_vec();
+                    let parties_input_lengths = parties_input_lengths.clone();
+                    tokio::spawn(async move {
+                        let n_party_correlation = n_party_correlation;
+                        multi_party_semi_honest_eval_circuit(
+                            &mut engine,
+                            &circuit,
+                            &input,
+                            &my_input_mask,
+                            input_wire_masks,
+                            &n_party_correlation,
+                            &output_wire_masks,
+                            &parties_input_lengths,
+                        )
+                        .await
+                        .map(
+                            |(masked_input_wires, masked_gate_inputs, masked_outputs)| {
+                                (
+                                    masked_gate_inputs,
+                                    masked_outputs,
+                                    output_wire_masks,
+                                    n_party_correlation,
+                                    masked_input_wires,
+                                )
+                            },
+                        )
+                    })
+                });
 
         let timer_start = Instant::now();
         let exec_results = try_join_all(engine_futures).await.unwrap();
@@ -713,7 +956,7 @@ mod tests {
             match (gate, corr, v) {
                 (
                     ParsedGate::AndGate { input, output },
-                    MultiPartyBeaverTriple::Regular(a, b, c),
+                    BeaverTriple::Regular(RegularBeaverTriple(a, b, c)),
                     Mask::And(mask_a, mask_b),
                 ) => {
                     assert_eq!(*a + *mask_a, local_computation_wires[input[0]]);
@@ -725,16 +968,13 @@ mod tests {
                         input_bit,
                         output,
                     },
-                    MultiPartyBeaverTriple::Wide(a, wb, wc),
+                    BeaverTriple::Wide(WideBeaverTriple(a, wb, wc)),
                     Mask::WideAnd(mask_a, mask_wb),
                 ) => {
                     assert_eq!(*mask_a + *a, local_computation_wires[input_bit]);
-                    let full_b = *wb + *mask_wb;
+                    let full_b: [GF2; 128] = core::array::from_fn(|i| wb[i] + mask_wb[i]);
                     for i in 0..input.len() {
-                        assert_eq!(
-                            GF2::from(full_b.get_bit(i)),
-                            local_computation_wires[input[i]]
-                        )
+                        assert_eq!(GF2::from(full_b[i]), local_computation_wires[input[i]])
                     }
                 }
                 _ => panic!(),
@@ -785,7 +1025,7 @@ mod tests {
         );
 
         let input = vec![GF2::one(), GF2::zero()];
-        let output = test_circuit(parsed_circuit, &input, 7).await;
+        let output = test_boolean_circuit(parsed_circuit, &input, 2).await;
 
         assert_eq!(output[0], GF2::one());
     }
@@ -820,7 +1060,7 @@ mod tests {
         );
 
         let input = vec![GF2::one(); 129];
-        let output = test_circuit(parsed_circuit, &input, 7).await;
+        let output = test_boolean_circuit(parsed_circuit, &input, 7).await;
 
         assert_eq!(output, vec![GF2::one(); 128]);
     }
@@ -830,6 +1070,6 @@ mod tests {
         let parsed_circuit = super::super::circuit_from_file(path).unwrap();
 
         let input = vec![GF2::one(); parsed_circuit.input_wire_count];
-        test_circuit(parsed_circuit, &input, 2).await;
+        test_boolean_circuit(parsed_circuit, &input, 2).await;
     }
 }

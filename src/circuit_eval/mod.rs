@@ -10,7 +10,7 @@ mod verify;
 pub fn circuit_from_file(path: &Path) -> Option<ParsedCircuit> {
     let circuit_file = match File::open(path) {
         Ok(f) => f,
-        Err(_) => {
+        Err(e) => {
             return None;
         }
     };

@@ -4,12 +4,22 @@
 // use super::gates::{and, not, wide_and, xor};
 use log::error;
 
+// pub struct Circuit<T: FieldElement> {
+//     type Gate
+//     input_wires_count: usize,
+//     internal_wires_count: usize,
+//     output_wires_count: usize,
+//     gates:
+// }
+
 use std::{
     collections::{HashMap, HashSet},
     mem::MaybeUninit,
 };
 
-#[derive(Clone, Copy)]
+use crate::fields::FieldElement;
+
+#[derive(Clone, Copy, Debug)]
 pub enum ParsedGate {
     AndGate {
         input: [usize; 2],
@@ -94,6 +104,46 @@ pub struct ParsedCircuit {
     pub gates: Vec<Vec<ParsedGate>>,
 }
 
+pub struct GateIterator<'a> {
+    circuit: &'a ParsedCircuit,
+    current_layer: usize,
+    current_gate: usize,
+}
+
+impl<'a> Iterator for GateIterator<'a> {
+    type Item = (usize, usize, &'a ParsedGate);
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current_layer >= self.circuit.gates.len() {
+                return None;
+            }
+            if self.current_gate >= self.circuit.gates[self.current_layer].len() {
+                self.current_layer += 1;
+                self.current_gate = 0;
+                continue;
+            }
+            let output = (
+                self.current_layer,
+                self.current_gate,
+                &self.circuit.gates[self.current_layer][self.current_gate],
+            );
+            self.current_gate += 1;
+            return Some(output);
+        }
+    }
+}
+impl ParsedCircuit {
+    pub fn iter<'a>(&'a self) -> GateIterator<'a> {
+        GateIterator {
+            circuit: self,
+            current_layer: 0,
+            current_gate: 0,
+        }
+    }
+    pub fn total_non_linear_gates(&self) -> usize {
+        self.iter().filter(|(a, b, g)| !g.is_linear()).count()
+    }
+}
 impl TryFrom<&str> for GateOp {
     type Error = ();
     fn try_from(op_str: &str) -> Result<Self, Self::Error> {
