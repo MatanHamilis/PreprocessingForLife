@@ -13,8 +13,8 @@ use serde_big_array::BigArray;
 
 use crate::circuit_eval::bristol_fashion::ParsedGate;
 use crate::engine::{MultiPartyEngine, PartyId};
-use crate::fields::{FieldElement, GF128, GF2};
-use crate::pcg::{FullPcgKey, PackedOfflineFullPcgKey};
+use crate::fields::{FieldElement, PackedField, GF128, GF2};
+use crate::pcg::{FullPcgKey, PackedOfflineFullPcgKey, RegularBeaverTriple, WideBeaverTriple};
 
 const PPRF_COUNT: usize = 44;
 const PPRF_DEPTH: usize = 5;
@@ -25,7 +25,10 @@ pub trait OfflineSemiHonestCorrelation<CF: FieldElement>: Serialize + Deserializ
     fn get_personal_circuit_input_wires_masks(&self) -> &[CF];
     fn get_circuit_input_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<CF>;
     fn get_circuit_output_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<CF>;
-    fn get_input_wires_masks(&self, circuit: &ParsedCircuit) -> Vec<((usize, usize), Mask<CF>)>;
+    fn get_gates_input_wires_masks(
+        &self,
+        circuit: &ParsedCircuit,
+    ) -> Vec<((usize, usize), Mask<CF>)>;
     fn deal<R: CryptoRng + RngCore>(
         rng: &mut R,
         parties_input_start_and_lengths: &HashMap<PartyId, (usize, usize)>,
@@ -42,27 +45,36 @@ pub trait OfflineSemiHonestCorrelation<CF: FieldElement>: Serialize + Deserializ
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct PcgBasedPairwiseBooleanCorrelation {
-    pub input_wires_masks: Vec<GF2>,
+pub struct PcgBasedPairwiseBooleanCorrelation<const N: usize, F: PackedField<GF2, N>> {
+    #[serde(bound = "")]
+    pub input_wires_masks: Vec<F>,
     pub shares_seed: [u8; 16],
     pub pcg_keys: Vec<(PartyId, (PackedOfflineFullPcgKey, [u8; 16]))>,
-    pub expanded_pcg_keys: Option<Vec<((usize, usize), PairwiseBeaverTriple<GF2>)>>,
+    #[serde(bound = "")]
+    pub expanded_pcg_keys: Option<Vec<((usize, usize), PairwiseBeaverTriple<F>)>>,
 }
 
 #[async_trait]
-impl OfflineSemiHonestCorrelation<GF2> for PcgBasedPairwiseBooleanCorrelation {
-    fn get_personal_circuit_input_wires_masks(&self) -> &[GF2] {
+impl<const N: usize, F: PackedField<GF2, N>> OfflineSemiHonestCorrelation<F>
+    for PcgBasedPairwiseBooleanCorrelation<N, F>
+{
+    fn get_personal_circuit_input_wires_masks(&self) -> &[F] {
         &self.input_wires_masks
     }
-    fn get_circuit_input_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<GF2> {
+    fn get_circuit_input_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<F> {
         input_wires_masks_from_seed(self.shares_seed, circuit)
     }
     fn pre_online_phase_preparation(&mut self, circuit: &ParsedCircuit) {
-        let m = expand_pairwise_beaver_triples::<CODE_WEIGHT>(circuit, &mut self.pcg_keys);
+        let m = expand_pairwise_beaver_triples::<N, CODE_WEIGHT, F>(circuit, &mut self.pcg_keys);
         self.expanded_pcg_keys = Some(m);
     }
-    fn get_input_wires_masks(&self, circuit: &ParsedCircuit) -> Vec<((usize, usize), Mask<GF2>)> {
-        let m = expand_pairwise_beaver_triples::<CODE_WEIGHT>(circuit, &self.pcg_keys);
+
+    // Only called by the dealer anyway.
+    fn get_gates_input_wires_masks(
+        &self,
+        circuit: &ParsedCircuit,
+    ) -> Vec<((usize, usize), Mask<F>)> {
+        let m = expand_pairwise_beaver_triples::<N, CODE_WEIGHT, F>(circuit, &self.pcg_keys);
         // If there are only two parties...
         if self.pcg_keys.len() == 1 {
             return m
@@ -82,7 +94,7 @@ impl OfflineSemiHonestCorrelation<GF2> for PcgBasedPairwiseBooleanCorrelation {
         &mut self,
         engine: &mut impl MultiPartyEngine,
         circuit: &ParsedCircuit,
-    ) -> HashMap<(usize, usize), BeaverTriple<GF2>> {
+    ) -> HashMap<(usize, usize), BeaverTriple<F>> {
         // If the preparation has not been done earlier, do it now.
         if self.expanded_pcg_keys.is_none() {
             self.pre_online_phase_preparation(circuit);
@@ -108,14 +120,14 @@ impl OfflineSemiHonestCorrelation<GF2> for PcgBasedPairwiseBooleanCorrelation {
         create_multi_party_beaver_triples(engine, circuit, &pairwise_triples, &gate_input_masks)
             .await
     }
-    fn get_circuit_output_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<GF2> {
+    fn get_circuit_output_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<F> {
         output_wires_masks_from_seed(self.shares_seed, circuit)
     }
     fn deal<R: CryptoRng + RngCore>(
         mut rng: &mut R,
         parties_input_start_and_lengths: &HashMap<PartyId, (usize, usize)>,
         circuit: &ParsedCircuit,
-    ) -> (Vec<GF2>, Vec<GF2>, Vec<(PartyId, Self)>) {
+    ) -> (Vec<F>, Vec<F>, Vec<(PartyId, Self)>) {
         let parties_count = parties_input_start_and_lengths.len();
         let mut pcg_keys = HashMap::with_capacity(parties_count);
         for (i, i_pid) in parties_input_start_and_lengths.keys().copied().enumerate() {
@@ -134,20 +146,20 @@ impl OfflineSemiHonestCorrelation<GF2> for PcgBasedPairwiseBooleanCorrelation {
                     .push((j_pid, (rcv, pcg_code_seed)));
             }
         }
-        let mut total_input_wires_masks = vec![GF2::zero(); circuit.input_wire_count];
-        let mut total_output_wires_masks = vec![GF2::zero(); circuit.output_wire_count];
+        let mut total_input_wires_masks = vec![F::zero(); circuit.input_wire_count];
+        let mut total_output_wires_masks = vec![F::zero(); circuit.output_wire_count];
         let mut mask_seeds: HashMap<_, _> = parties_input_start_and_lengths
             .keys()
             .copied()
             .map(|p| {
                 let mut seed = [0u8; 16];
                 rng.fill_bytes(&mut seed);
-                let input_wires_masks: Vec<GF2> = input_wires_masks_from_seed(seed, circuit);
+                let input_wires_masks: Vec<F> = input_wires_masks_from_seed(seed, circuit);
                 total_input_wires_masks
                     .iter_mut()
                     .zip(input_wires_masks.iter())
                     .for_each(|(d, s)| *d += *s);
-                let output_wires_masks: Vec<GF2> = output_wires_masks_from_seed(seed, circuit);
+                let output_wires_masks: Vec<F> = output_wires_masks_from_seed(seed, circuit);
                 total_output_wires_masks
                     .iter_mut()
                     .zip(output_wires_masks.iter())
@@ -220,22 +232,6 @@ pub struct SemiHonestCircuit {
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
-pub struct RegularBeaverTriple<F: FieldElement>(
-    #[serde(bound = "")] pub F,
-    #[serde(bound = "")] pub F,
-    #[serde(bound = "")] pub F,
-);
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
-pub struct WideBeaverTriple<F: FieldElement>(
-    #[serde(bound = "")] pub F,
-    #[serde(with = "BigArray")]
-    #[serde(bound = "")]
-    pub [F; 128],
-    #[serde(with = "BigArray")]
-    #[serde(bound = "")]
-    pub [F; 128],
-);
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum BeaverTriple<F: FieldElement> {
     Regular(#[serde(bound = "")] RegularBeaverTriple<F>),
     Wide(#[serde(bound = "")] WideBeaverTriple<F>),
@@ -246,10 +242,14 @@ pub enum PairwiseBeaverTriple<F: FieldElement> {
     Regular(#[serde(bound = "")] Vec<(PartyId, RegularBeaverTriple<F>)>),
     Wide(#[serde(bound = "")] Vec<(PartyId, WideBeaverTriple<F>)>),
 }
-pub fn expand_pairwise_beaver_triples<const CODE_WIDTH: usize>(
+pub fn expand_pairwise_beaver_triples<
+    const N: usize,
+    const CODE_WIDTH: usize,
+    F: PackedField<GF2, N>,
+>(
     circuit: &ParsedCircuit,
     pcg_keys: &[(PartyId, (PackedOfflineFullPcgKey, [u8; 16]))],
-) -> Vec<((usize, usize), PairwiseBeaverTriple<GF2>)> {
+) -> Vec<((usize, usize), PairwiseBeaverTriple<F>)> {
     let mut pcg_keys: Vec<_> = pcg_keys
         .iter()
         .map(|(pid, (pk, code))| (*pid, FullPcgKey::new_from_offline(pk, *code, CODE_WIDTH)))
@@ -266,8 +266,8 @@ pub fn expand_pairwise_beaver_triples<const CODE_WIDTH: usize>(
                     let v: Vec<_> = pcg_keys
                         .iter_mut()
                         .map(|(pid, k)| {
-                            let bt = k.next_bit_beaver_triple();
-                            (*pid, RegularBeaverTriple(bt.0, bt.1, bt.2))
+                            let bt = k.next_bit_beaver_triple::<N, F>();
+                            (*pid, bt)
                         })
                         .collect();
                     PairwiseBeaverTriple::Regular(v)
@@ -280,15 +280,8 @@ pub fn expand_pairwise_beaver_triples<const CODE_WIDTH: usize>(
                     let v: Vec<_> = pcg_keys
                         .iter_mut()
                         .map(|(pid, k)| {
-                            let bt = k.next_wide_beaver_triple();
-                            (
-                                *pid,
-                                WideBeaverTriple(
-                                    bt.0,
-                                    core::array::from_fn(|i| GF2::from(bt.1.get_bit(i))),
-                                    core::array::from_fn(|i| GF2::from(bt.2.get_bit(i))),
-                                ),
-                            )
+                            let bt = k.next_wide_beaver_triple::<N, F>();
+                            (*pid, bt)
                         })
                         .collect();
                     PairwiseBeaverTriple::Wide(v)
@@ -537,7 +530,12 @@ pub async fn obtain_masked_and_shared_input<F: FieldElement>(
 }
 
 // We assume the input to the circuit is already additively shared between the parties.
-pub async fn multi_party_semi_honest_eval_circuit<E: MultiPartyEngine, F: FieldElement>(
+pub async fn multi_party_semi_honest_eval_circuit<
+    const N: usize,
+    E: MultiPartyEngine,
+    PF: FieldElement,
+    F: PackedField<PF, N>,
+>(
     engine: &mut E,
     circuit: &ParsedCircuit,
     my_input: &[F],
@@ -779,15 +777,15 @@ mod tests {
             },
         },
         engine::{LocalRouter, MultiPartyEngine},
-        fields::{FieldElement, GF2},
+        fields::{FieldElement, PackedField, PackedGF2, GF2},
         uc_tags::UCTag,
     };
 
-    async fn test_boolean_circuit(
+    async fn test_boolean_circuit<const N: usize, F: PackedField<GF2, N>>(
         circuit: ParsedCircuit,
-        input: &[GF2],
+        input: &[F],
         party_count: usize,
-    ) -> Vec<GF2> {
+    ) -> Vec<F> {
         const CODE_SEED: [u8; 16] = [1u8; 16];
         assert_eq!(input.len(), circuit.input_wire_count);
         let mut party_ids: Vec<_> = (1..=party_count).map(|i| i as u64).collect();
@@ -919,7 +917,7 @@ mod tests {
 
         let timer_start = Instant::now();
         let exec_results = try_join_all(engine_futures).await.unwrap();
-        let end = timer_start.elapsed();
+        println!("Computation took: {}", timer_start.elapsed().as_millis());
         let exec_results: Vec<_> = exec_results.into_iter().map(|e| e.unwrap()).collect();
         let local_computation_wires = local_eval_circuit(&circuit, input);
         let mut local_computation_output = local_computation_wires
@@ -972,9 +970,9 @@ mod tests {
                     Mask::WideAnd(mask_a, mask_wb),
                 ) => {
                     assert_eq!(*mask_a + *a, local_computation_wires[input_bit]);
-                    let full_b: [GF2; 128] = core::array::from_fn(|i| wb[i] + mask_wb[i]);
+                    let full_b: [F; 128] = core::array::from_fn(|i| wb[i] + mask_wb[i]);
                     for i in 0..input.len() {
-                        assert_eq!(GF2::from(full_b[i]), local_computation_wires[input[i]])
+                        assert_eq!(F::from(full_b[i]), local_computation_wires[input[i]])
                     }
                 }
                 _ => panic!(),
@@ -1024,10 +1022,10 @@ mod tests {
             GF2::zero()
         );
 
-        let input = vec![GF2::one(), GF2::zero()];
+        let input = vec![PackedGF2::one(), PackedGF2::zero()];
         let output = test_boolean_circuit(parsed_circuit, &input, 2).await;
 
-        assert_eq!(output[0], GF2::one());
+        assert_eq!(output[0], PackedGF2::one());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
@@ -1065,11 +1063,11 @@ mod tests {
         assert_eq!(output, vec![GF2::one(); 128]);
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-    async fn test_aes() {
+    async fn test_semi_honest_aes() {
         let path = Path::new("circuits/aes_128.txt");
         let parsed_circuit = super::super::circuit_from_file(path).unwrap();
 
-        let input = vec![GF2::one(); parsed_circuit.input_wire_count];
+        let input = vec![PackedGF2::one(); parsed_circuit.input_wire_count];
         test_boolean_circuit(parsed_circuit, &input, 2).await;
     }
 }

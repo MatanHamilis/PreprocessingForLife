@@ -1,6 +1,6 @@
 use crate::{
     engine::MultiPartyEngine,
-    fields::{FieldElement, GF128, GF2},
+    fields::{FieldElement, PackedField, GF128, GF2},
     pprf::{
         distributed_pprf_receiver, distributed_pprf_sender, PackedPprfReceiver, PackedPprfSender,
         PprfReceiver, PprfSender,
@@ -15,6 +15,7 @@ use futures::future::try_join_all;
 use rand::{CryptoRng, SeedableRng};
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use tokio::join;
 
 #[derive(Serialize, Deserialize)]
@@ -22,6 +23,23 @@ pub struct PackedOfflineReceiverPcgKey {
     pprfs: Vec<PackedPprfSender>,
     delta: GF128,
 }
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct RegularBeaverTriple<F: FieldElement>(
+    #[serde(bound = "")] pub F,
+    #[serde(bound = "")] pub F,
+    #[serde(bound = "")] pub F,
+);
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct WideBeaverTriple<F: FieldElement>(
+    #[serde(bound = "")] pub F,
+    #[serde(with = "BigArray")]
+    #[serde(bound = "")]
+    pub [F; 128],
+    #[serde(with = "BigArray")]
+    #[serde(bound = "")]
+    pub [F; 128],
+);
 
 impl PackedOfflineReceiverPcgKey {
     fn new(pprfs: Vec<PackedPprfSender>, delta: GF128) -> Self {
@@ -126,25 +144,43 @@ impl ReceiverPcgKey {
         (v, v + self.delta)
     }
 
-    fn next_random_ot(&mut self) -> (GF128, GF128) {
-        let (m_0, m_1) = self.next_correlated_ot();
-        (
-            correlation_robust_hash_block_field(m_0),
-            correlation_robust_hash_block_field(m_1),
-        )
+    fn next_random_ot<const N: usize, F: PackedField<GF2, N>>(&mut self) -> ([F; 128], [F; 128]) {
+        let mut m0_arr = [F::zero(); 128];
+        let mut m1_arr = [F::zero(); 128];
+        for i in 0..N {
+            let (m_0, m_1) = self.next_correlated_ot();
+            let (m_0, m_1) = (
+                correlation_robust_hash_block_field(m_0),
+                correlation_robust_hash_block_field(m_1),
+            );
+            for j in 0..128 {
+                m0_arr[j].set_bit(m_0.get_bit(j), i);
+                m1_arr[j].set_bit(m_1.get_bit(j), i);
+            }
+        }
+        (m0_arr, m1_arr)
     }
 
-    fn next_random_bit_ot(&mut self) -> (GF2, GF2) {
-        let (m_0, m_1) = self.next_random_ot();
-        (m_0.get_bit(0).into(), m_1.get_bit(0).into())
+    fn next_random_bit_ot<const N: usize, F: PackedField<GF2, N>>(&mut self) -> (F, F) {
+        let mut a = F::zero();
+        let mut b = F::zero();
+        for i in 0..N {
+            let (m_0, m_1) = self.next_random_ot::<1, GF2>();
+            let (a_0, b_0) = (m_0[0], m_1[0]);
+            a.set_element(i, &a_0);
+            b.set_element(i, &b_0);
+        }
+        (a, b)
     }
 
-    fn next_bit_beaver_triple(&mut self) -> (GF2, GF2, GF2) {
+    fn next_bit_beaver_triple<const N: usize, F: PackedField<GF2, N>>(
+        &mut self,
+    ) -> RegularBeaverTriple<F> {
         let (m_0_0, mut m_0_1) = self.next_random_bit_ot();
         let (m_1_0, mut m_1_1) = self.next_random_bit_ot();
         m_0_1 -= m_0_0;
         m_1_1 -= m_1_0;
-        (m_1_1, m_0_1, m_1_1 * m_0_1 + m_0_0 + m_1_0)
+        RegularBeaverTriple(m_1_1, m_0_1, m_1_1 * m_0_1 + m_0_0 + m_1_0)
     }
 }
 
@@ -252,20 +288,37 @@ impl SenderPcgKey {
         self.next_subfield_vole()
     }
 
-    fn next_random_ot(&mut self) -> (GF128, GF2) {
-        let (m_b, b) = self.next_correlated_ot();
-        (correlation_robust_hash_block_field(m_b), b)
+    fn next_random_ot<const N: usize, F: PackedField<GF2, N>>(&mut self) -> ([F; 128], F) {
+        let mut m_arr = [F::zero(); 128];
+        let mut c = F::zero();
+        for i in 0..N {
+            let (m_b, b) = self.next_correlated_ot();
+            let (m_b, b) = (correlation_robust_hash_block_field(m_b), b);
+            for j in 0..128 {
+                m_arr[j].set_bit(m_b.get_bit(j), i);
+            }
+            c.set_element(i, &b);
+        }
+        (m_arr, c)
     }
 
-    fn next_random_bit_ot(&mut self) -> (GF2, GF2) {
-        let (m_b, b) = self.next_random_ot();
-        (m_b.get_bit(0).into(), b)
+    fn next_random_bit_ot<const N: usize, F: PackedField<GF2, N>>(&mut self) -> (F, F) {
+        let mut wb = F::zero();
+        let mut wa = F::zero();
+        for i in 0..N {
+            let (m_b, b) = self.next_random_ot::<1, GF2>();
+            wb.set_element(i, &b);
+            wa.set_element(i, &m_b[0]);
+        }
+        (wa, wb)
     }
 
-    fn next_bit_beaver_triplet(&mut self) -> (GF2, GF2, GF2) {
+    fn next_bit_beaver_triplet<const N: usize, F: PackedField<GF2, N>>(
+        &mut self,
+    ) -> RegularBeaverTriple<F> {
         let (m_b0, b_0) = self.next_random_bit_ot();
         let (m_b1, b_1) = self.next_random_bit_ot();
-        (b_0, b_1, b_0 * b_1 + m_b0 + m_b1)
+        RegularBeaverTriple(b_0, b_1, b_0 * b_1 + m_b0 + m_b1)
     }
 }
 
@@ -388,13 +441,21 @@ impl FullPcgKey {
             is_first: my_id < peer_id,
         })
     }
-    pub fn next_wide_beaver_triple(&mut self) -> (GF2, GF128, GF128) {
+    pub fn next_wide_beaver_triple<const N: usize, F: PackedField<GF2, N>>(
+        &mut self,
+    ) -> WideBeaverTriple<F> {
         let (m_b, b) = self.sender.next_random_ot();
         let (m_0, mut m_1) = self.receiver.next_random_ot();
-        m_1 -= m_0;
-        (b, m_1, m_1 * b + m_b + m_0)
+        for i in 0..m_0.len() {
+            m_1[i] -= m_0[i];
+        }
+        let c = core::array::from_fn(|i| m_1[i] * b + m_b[i] + m_0[i]);
+        WideBeaverTriple(b, m_1, c)
+        // (b, m_1, m_1 * b + m_b + m_0)
     }
-    pub fn next_bit_beaver_triple(&mut self) -> (GF2, GF2, GF2) {
+    pub fn next_bit_beaver_triple<const N: usize, F: PackedField<GF2, N>>(
+        &mut self,
+    ) -> RegularBeaverTriple<F> {
         if self.is_first {
             self.sender.next_bit_beaver_triplet()
         } else {
@@ -416,7 +477,7 @@ mod test {
     };
     use crate::{
         engine::LocalRouter,
-        fields::{FieldElement, GF128},
+        fields::{FieldElement, GF128, GF2},
         pcg::{
             deal_sender_receiver_keys, FullPcgKey, OfflineReceiverPcgKey, OfflineSenderPcgKey,
             PackedOfflineFullPcgKey,
@@ -451,7 +512,7 @@ mod test {
         let mut online_sender = SenderPcgKey::new(snd_res, AesRng::from_seed(seed), CODE_WIDTH);
         let mut online_receiver = ReceiverPcgKey::new(rcv_res, AesRng::from_seed(seed), CODE_WIDTH);
         for _ in 0..CORRELATION_COUNT {
-            let sender_corr = online_sender.next_bit_beaver_triplet();
+            let sender_corr = online_sender.next_bit_beaver_triplet::<1, GF2>();
             let rcv_corr = online_receiver.next_bit_beaver_triple();
             assert_eq!(
                 (sender_corr.0 + rcv_corr.0) * (sender_corr.1 + rcv_corr.1),
@@ -487,12 +548,14 @@ mod test {
         let (snd_res, rcv_res) = join!(sender_h, receiver_h);
         let (mut snd_res, mut rcv_res) = (snd_res.unwrap().unwrap(), rcv_res.unwrap());
         for _ in 0..CORRELATION_COUNT {
-            let sender_corr = snd_res.next_wide_beaver_triple();
-            let rcv_corr = rcv_res.next_wide_beaver_triple();
-            assert_eq!(
-                (sender_corr.1 + rcv_corr.1) * (sender_corr.0 + rcv_corr.0),
-                sender_corr.2 + rcv_corr.2
-            );
+            let sender_corr = snd_res.next_wide_beaver_triple::<1, GF2>();
+            let rcv_corr = rcv_res.next_wide_beaver_triple::<1, GF2>();
+            for i in 0..sender_corr.1.len() {
+                assert_eq!(
+                    (sender_corr.1[i] + rcv_corr.1[i]) * (sender_corr.0 + rcv_corr.0),
+                    sender_corr.2[i] + rcv_corr.2[i]
+                );
+            }
         }
         local_handle.await.unwrap().unwrap();
     }
@@ -526,12 +589,14 @@ mod test {
         let mut full_key_2 = FullPcgKey::new_from_offline(&packed_full_key_2, seed, CODE_WIDTH);
 
         for _ in 0..CORRELATION_COUNT {
-            let sender_corr = full_key_1.next_wide_beaver_triple();
-            let rcv_corr = full_key_2.next_wide_beaver_triple();
-            assert_eq!(
-                (sender_corr.1 + rcv_corr.1) * (sender_corr.0 + rcv_corr.0),
-                sender_corr.2 + rcv_corr.2
-            );
+            let sender_corr = full_key_1.next_wide_beaver_triple::<1, GF2>();
+            let rcv_corr = full_key_2.next_wide_beaver_triple::<1, GF2>();
+            for i in 0..sender_corr.1.len() {
+                assert_eq!(
+                    (sender_corr.1[i] + rcv_corr.1[i]) * (sender_corr.0 + rcv_corr.0),
+                    sender_corr.2[i] + rcv_corr.2[i]
+                );
+            }
         }
     }
 }

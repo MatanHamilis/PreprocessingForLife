@@ -2,6 +2,7 @@
 #![feature(portable_simd, stdsimd)]
 #![feature(maybe_uninit_uninit_array)]
 #![feature(split_array)]
+#![feature(maybe_uninit_array_assume_init)]
 
 use fields::GF128;
 pub mod circuit_eval;

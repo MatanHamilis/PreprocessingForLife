@@ -1,8 +1,11 @@
-use super::FieldElement;
+use super::{FieldElement, PackedField};
+use bitvec::prelude::*;
+use rand::Rng;
 use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::Display,
+    io::Read,
     iter::Sum,
     ops::{
         Add, AddAssign, BitAnd, BitAndAssign, BitXor, BitXorAssign, Div, DivAssign, Mul, MulAssign,
@@ -195,5 +198,155 @@ impl From<GF2> for u8 {
 impl Display for GF2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.v)
+    }
+}
+
+const Packing: usize = 1 << 15;
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackedGF2 {
+    bits: BitArr!(for Packing, in usize),
+}
+
+impl FieldElement for PackedGF2 {
+    const BITS: usize = Packing;
+    fn from_bit(bit: bool) -> Self {
+        let mut b = Self::zero();
+        b.bits.fill(bit);
+        b
+    }
+    fn is_one(&self) -> bool {
+        self.bits.as_raw_slice().iter().all(|i| !i == 0)
+    }
+    fn is_zero(&self) -> bool {
+        self.bits.as_raw_slice().iter().all(|i| i == &0)
+    }
+    fn one() -> Self {
+        Self::from_bit(true)
+    }
+    fn zero() -> Self {
+        Self {
+            bits: bitarr![0 as usize;Packing],
+        }
+    }
+    fn random(mut rng: impl CryptoRng + RngCore) -> Self {
+        let mut v = Self::zero();
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(
+                v.bits.as_raw_mut_slice().as_mut_ptr() as *mut u8,
+                Packing / u8::BITS as usize,
+            )
+        };
+        rng.fill(bytes);
+        v
+    }
+    fn set_bit(&mut self, bit: bool, idx: usize) {
+        *self.bits.get_mut(idx).unwrap() = bit;
+    }
+}
+
+impl AddAssign for PackedGF2 {
+    fn add_assign(&mut self, rhs: Self) {
+        self.bits
+            .as_raw_mut_slice()
+            .iter_mut()
+            .zip(rhs.bits.as_raw_slice().iter())
+            .for_each(|(d, s)| *d ^= s);
+    }
+}
+impl Add for PackedGF2 {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self::Output {
+        let mut o = self.clone();
+        o += rhs;
+        o
+    }
+}
+impl Sum for PackedGF2 {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        let mut sum = Self::zero();
+        for i in iter {
+            sum += i;
+        }
+        sum
+    }
+}
+impl Neg for PackedGF2 {
+    type Output = Self;
+    fn neg(self) -> Self::Output {
+        self
+    }
+}
+impl Default for PackedGF2 {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+impl DivAssign for PackedGF2 {
+    fn div_assign(&mut self, rhs: Self) {
+        if !rhs.is_one() {
+            panic!();
+        }
+    }
+}
+impl Div for PackedGF2 {
+    type Output = Self;
+    fn div(self, rhs: Self) -> Self::Output {
+        let mut v = self.clone();
+        v /= rhs;
+        v
+    }
+}
+
+impl MulAssign for PackedGF2 {
+    fn mul_assign(&mut self, rhs: Self) {
+        self.bits
+            .as_raw_mut_slice()
+            .iter_mut()
+            .zip(rhs.bits.as_raw_slice().iter())
+            .for_each(|(d, s)| *d &= s);
+    }
+}
+
+impl Mul for PackedGF2 {
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self::Output {
+        let mut v = self.clone();
+        v *= rhs;
+        v
+    }
+}
+
+impl SubAssign for PackedGF2 {
+    fn sub_assign(&mut self, rhs: Self) {
+        *self += rhs
+    }
+}
+
+impl Sub for PackedGF2 {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self::Output {
+        let mut v = self.clone();
+        v -= rhs;
+        v
+    }
+}
+
+impl PackedField<GF2, 128> for PackedGF2 {
+    fn get_element(&self, i: usize) -> GF2 {
+        GF2::from(*self.bits.get(i).unwrap())
+    }
+    fn set_element(&mut self, i: usize, value: &GF2) {
+        self.bits.set(i, value.is_one())
+    }
+}
+
+impl PackedField<GF2, 1> for GF2 {
+    fn get_element(&self, i: usize) -> GF2 {
+        self.clone()
+    }
+    fn set_element(&mut self, i: usize, value: &GF2) {
+        assert_eq!(i, 0);
+        *self = *value;
     }
 }

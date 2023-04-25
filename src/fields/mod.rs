@@ -2,6 +2,7 @@ mod gf128;
 mod gf2;
 mod packed_gf2;
 pub use gf128::GF128;
+pub use gf2::PackedGF2;
 pub use gf2::GF2;
 pub use packed_gf2::PackedGF2Array;
 pub use packed_gf2::PackedGF2U64;
@@ -58,4 +59,9 @@ pub trait FieldElement:
             Self::zero()
         }
     }
+}
+
+pub trait PackedField<F: FieldElement, const PACKING: usize>: FieldElement {
+    fn get_element(&self, i: usize) -> F;
+    fn set_element(&mut self, i: usize, value: &F);
 }
