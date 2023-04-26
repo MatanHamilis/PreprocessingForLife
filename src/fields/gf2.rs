@@ -201,7 +201,7 @@ impl Display for GF2 {
     }
 }
 
-const Packing: usize = 1 << 15;
+const Packing: usize = 1 << 4;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackedGF2 {
     bits: BitArr!(for Packing, in usize),
@@ -332,7 +332,7 @@ impl Sub for PackedGF2 {
     }
 }
 
-impl PackedField<GF2, 128> for PackedGF2 {
+impl PackedField<GF2, Packing> for PackedGF2 {
     fn get_element(&self, i: usize) -> GF2 {
         GF2::from(*self.bits.get(i).unwrap())
     }

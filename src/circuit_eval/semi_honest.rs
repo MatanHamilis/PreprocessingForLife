@@ -581,7 +581,6 @@ pub async fn multi_party_semi_honest_eval_circuit<
         let non_linear_gates_in_layer = cur.iter().filter(|cur| !cur.is_linear()).count();
         usize::max(acc, non_linear_gates_in_layer)
     });
-    let timer_start = Instant::now();
     for (layer_idx, layer) in circuit.gates.iter().enumerate() {
         let mut and_gates_processed = 0;
         for (gate_idx, gate) in layer.iter().enumerate() {
@@ -707,7 +706,7 @@ pub async fn multi_party_semi_honest_eval_circuit<
         masked_output_wires.push(*wire - *mask);
     }
 
-    for _ in 0..circuit.output_wire_count * number_of_peers {
+    for i in 0..circuit.output_wire_count * number_of_peers {
         let ((wire_id, masked_val), _): ((usize, F), _) = engine.recv().await.unwrap();
         assert!(wire_id < output_wire_masks.len());
         masked_output_wires[wire_id] += masked_val;

@@ -1,8 +1,16 @@
+use std::fmt::Display;
+
 use blake3::Hash;
 use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub struct UCTag(Hash);
+
+impl Display for UCTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("{:?}", self.0.as_bytes()))
+    }
+}
 
 impl UCTag {
     pub fn new(tag: &impl Serialize) -> Self {

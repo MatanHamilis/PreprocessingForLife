@@ -40,9 +40,6 @@ aesni = []
 name = "double_prg"
 harness = false
 
-[[bench]]
-name = "sparse_vole"
-harness = false
 
 [[bench]]
 name = "mul_benchmark"
@@ -50,10 +47,6 @@ harness = false
 
 [[bench]]
 name = "circuit_eval"
-harness = false
-
-[[bench]]
-name = "codes"
 harness = false
 
 [[bench]]
@@ -66,9 +59,4 @@ harness = false
 
 [[bench]]
 name = "mem"
-harness = false
-
-
-[[bench]]
-name = "zkfliop"
 harness = false

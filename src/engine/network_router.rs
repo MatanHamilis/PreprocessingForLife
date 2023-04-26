@@ -30,7 +30,7 @@ use super::{
     DownstreamMessage, DownstreamMessageType, MultiPartyEngineImpl, PartyId, UpstreamMessage,
 };
 
-struct NetworkRouter {
+pub struct NetworkRouter {
     local_party_id: PartyId,
     upstream: HashMap<UCTag, UnboundedSender<UpstreamMessage>>,
     downstream: UnboundedReceiver<DownstreamMessage>,
@@ -251,16 +251,21 @@ impl NetworkRouter {
                 .drain()
                 .map(|(pid, recv)| recv.map_ok(move |m| (pid, m)).map_err(move |e| (pid, e))),
         );
+        let mut stop_upstream = false;
         loop {
             let upstream_before = self.upstream.len();
             select! {
+                biased;
                 v = self.downstream.recv() => { self.handle_downstream(v).await} // The await here is just for sending on the websocket.
-                v = peers_recv.next() => { self.handle_upstream(v) }
+                v = peers_recv.next(), if !stop_upstream  => { if v.is_none() {stop_upstream = true;} else { self.handle_upstream(v)} }
             }
             let upstream_after = self.upstream.len(); // We leave only if we have no more clients to serve.
             if upstream_before == 1 && upstream_after == 0 {
                 break;
             }
+        }
+        for mut peer in self.peers_send {
+            peer.1.close().await.unwrap();
         }
     }
 }
