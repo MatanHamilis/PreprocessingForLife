@@ -58,7 +58,8 @@ async fn receive_connections(
         .unwrap();
     let mut futures = Vec::with_capacity(connection_count);
     for _ in 0..connection_count {
-        let (stream, _) = listener.accept().await.unwrap();
+        let (mut stream, _) = listener.accept().await.unwrap();
+        stream.set_nodelay(true).unwrap();
         futures.push(handle_single_conn(MaybeTlsStream::Plain(stream)));
     }
     let res = try_join_all(futures).await.or(Err(()))?;
