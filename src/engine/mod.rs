@@ -1,4 +1,5 @@
 mod network_router;
+pub use network_router::NetworkRouter;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -10,7 +11,10 @@ use blake3::Hash;
 use rand::{rngs::ThreadRng, thread_rng};
 use rand_core::{CryptoRng, RngCore};
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::{
+    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    time::Instant,
+};
 
 use crate::uc_tags::UCTag;
 pub type PartyId = u64;
@@ -149,11 +153,14 @@ impl MultiPartyEngine for MultiPartyEngineImpl {
     }
     async fn recv<T: DeserializeOwned>(&mut self) -> Option<(T, PartyId)> {
         let received = if let Some(v) = self.buffer.pop_front() {
+            println!("Buffer");
             v
         } else {
             self.upstream_receiver.recv().await?
         };
+        // let start = Instant::now();
         let val = bincode::deserialize(&received.content).ok()?;
+        // println!("Deserialize took: {}", start.elapsed().as_micros());
         Some((val, received.from))
     }
     async fn recv_from<T: DeserializeOwned>(&mut self, from: PartyId) -> Option<T> {

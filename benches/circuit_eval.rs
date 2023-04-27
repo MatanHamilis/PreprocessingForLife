@@ -187,7 +187,7 @@ fn bench_boolean_circuit<const N: usize, F: PackedField<GF2, N>>(
 pub fn bench_2p_semi_honest(c: &mut Criterion) {
     let path = Path::new("circuits/aes_128.txt");
     let circuit = circuit_from_file(path).unwrap();
-    let input = vec![PackedGF2::one(); circuit.input_wire_count];
+    let input = vec![GF2::one(); circuit.input_wire_count];
     bench_boolean_circuit(c, "aes", circuit, &input, 2, 3000);
 }
 criterion_group!(benches, bench_2p_semi_honest);

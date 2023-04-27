@@ -16,10 +16,11 @@ use tokio::{
     net::{TcpListener, TcpStream},
     select,
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    time::Instant,
 };
 use tokio_tungstenite::{
     accept_async, client_async, connect_async,
-    tungstenite::{http::Request, Message},
+    tungstenite::{http::Request, stream::NoDelay, Message},
     MaybeTlsStream, WebSocketStream,
 };
 use url::Url;
@@ -89,6 +90,12 @@ async fn make_connections(
                     Ok(v) => break v,
                 }
             };
+            let v = conn.get_mut();
+            let s = match v {
+                MaybeTlsStream::Plain(s) => s,
+                _ => panic!(),
+            };
+            s.set_nodelay(true).unwrap();
             let msg = Message::Binary(bincode::serialize(&my_id).unwrap());
             conn.send(msg).await.unwrap();
             Ok((*party_id, conn))
