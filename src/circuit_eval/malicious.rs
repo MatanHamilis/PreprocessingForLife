@@ -1,6 +1,7 @@
 use std::{collections::HashMap, marker::PhantomData};
 
 use aes_prng::AesRng;
+use tokio::time::Instant;
 
 use crate::{
     commitment::OfflineCommitment,
@@ -188,10 +189,13 @@ impl<
             semi_honest_offline_correlation,
             _phantom: _,
         } = self;
+        let timer = Instant::now();
         let multi_party_beaver_triples = semi_honest_offline_correlation
             .get_multiparty_beaver_triples(engine, circuit.as_ref())
             .await;
+        println!("Getting triples took: {}", timer.elapsed().as_millis());
         let input_wire_mask_shares = input_wire_mask_shares.clone();
+        let timer = Instant::now();
         let (masked_input_wires, masked_gate_inputs, masked_outputs) =
             semi_honest::multi_party_semi_honest_eval_circuit(
                 engine,
@@ -205,10 +209,12 @@ impl<
             )
             .await
             .unwrap();
+        println!("Semi Honest took: {}", timer.elapsed().as_millis());
         let embedded_masked_input_wires: Vec<_> = masked_input_wires
             .iter()
             .map(|v| F::one().switch(v.is_one()))
             .collect();
+        let timer = Instant::now();
         if !verify::verify_parties(
             engine,
             two,
@@ -225,12 +231,15 @@ impl<
         {
             return None;
         }
+        println!("Verify took: {}", timer.elapsed().as_millis());
+        let timer = Instant::now();
         let output_wire_masks: Vec<PF> = output_wire_mask_commitments.online_decommit(engine).await;
         let outputs: Vec<_> = output_wire_masks
             .into_iter()
             .zip(masked_outputs.into_iter())
             .map(|(a, b)| a + b)
             .collect();
+        println!("Output opening took: {}", timer.elapsed().as_millis());
         Some(outputs)
     }
 }

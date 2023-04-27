@@ -3,6 +3,7 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4},
     path::Path,
     sync::Arc,
+    time::Instant,
 };
 
 use criterion::{criterion_group, criterion_main, Criterion};
@@ -10,19 +11,16 @@ use futures::future::try_join_all;
 use rand::thread_rng;
 use silent_party::{
     circuit_eval::{
-        circuit_from_file, multi_party_semi_honest_eval_circuit, OfflineSemiHonestCorrelation,
-        ParsedCircuit, PcgBasedPairwiseBooleanCorrelation,
+        circuit_from_file, multi_party_semi_honest_eval_circuit, MaliciousSecurityOffline,
+        OfflineSemiHonestCorrelation, ParsedCircuit, PcgBasedPairwiseBooleanCorrelation,
+        PreOnlineMaterial,
     },
     engine::{self, MultiPartyEngine, NetworkRouter},
-    fields::{FieldElement, PackedField, PackedGF2, GF2},
+    fields::{FieldElement, PackedField, PackedGF2, GF128, GF2},
     PartyId, UCTag,
 };
-use tokio::time::Instant;
+use tokio::join;
 
-const CIRCUIT: &str = "circuits/aes_128.txt";
-const DEALER_ID: PartyId = 1;
-const PARTY_A_ID: PartyId = 2;
-const PARTY_B_ID: PartyId = 3;
 const ROOT_TAG: &str = "ROOT_TAG";
 
 async fn set_up_routers_for_parties(
@@ -63,7 +61,7 @@ async fn set_up_routers_for_parties(
         .map(|v| ((v.0, v.1 .0), (v.0, v.1 .1)))
         .unzip()
 }
-fn bench_boolean_circuit<const N: usize, F: PackedField<GF2, N>>(
+fn bench_boolean_circuit_semi_honest<const N: usize, F: PackedField<GF2, N>>(
     c: &mut Criterion,
     id: &str,
     circuit: ParsedCircuit,
@@ -109,6 +107,7 @@ fn bench_boolean_circuit<const N: usize, F: PackedField<GF2, N>>(
                 &circuit,
             );
 
+            let parties_input_lengths = Arc::new(parties_input_lengths);
             let mut inputs: HashMap<_, _> = parties_input_lengths
                 .iter()
                 .map(|(&pid, &(input_start, input_len))| {
@@ -130,9 +129,8 @@ fn bench_boolean_circuit<const N: usize, F: PackedField<GF2, N>>(
                             Result::<_, ()>::Ok((id, bts, offline_correlation))
                         }
                     });
-            let parties_input_lengths = Arc::new(parties_input_lengths);
-            let exec_results = try_join_all(engine_futures).await.unwrap();
 
+            let exec_results = try_join_all(engine_futures).await.unwrap();
             let engine_futures =
                 exec_results
                     .into_iter()
@@ -150,7 +148,8 @@ fn bench_boolean_circuit<const N: usize, F: PackedField<GF2, N>>(
                         let parties_input_lengths = parties_input_lengths.clone();
                         tokio::spawn(async move {
                             let n_party_correlation = n_party_correlation;
-                            multi_party_semi_honest_eval_circuit(
+                            let time = Instant::now();
+                            let o = multi_party_semi_honest_eval_circuit(
                                 &mut engine,
                                 &circuit,
                                 &input,
@@ -171,24 +170,209 @@ fn bench_boolean_circuit<const N: usize, F: PackedField<GF2, N>>(
                                         masked_input_wires,
                                     )
                                 },
-                            )
+                            );
+                            let time = time.elapsed();
+                            println!("semi honest: {}", time.as_millis());
+                            (time, o)
                         })
                     });
 
-            let timer_start = Instant::now();
-            try_join_all(engine_futures).await.unwrap();
-            let output = timer_start.elapsed();
-            println!("Time: {}", output.as_millis());
+            let e = try_join_all(engine_futures).await.unwrap();
+            let output = e[0].0;
             try_join_all(router_handles).await.unwrap();
             output
+        })
+    });
+}
+
+fn bench_malicious_circuit<const PACKING: usize, PF: PackedField<GF2, PACKING>>(
+    c: &mut Criterion,
+    id: &str,
+    circuit: ParsedCircuit,
+    input: &[PF],
+    parties: usize,
+    base_port: u16,
+) {
+    let dealer_id: PartyId = (parties as PartyId + 1) as PartyId;
+
+    let mut two = GF128::zero();
+    two.set_bit(true, 1);
+    let three = two + GF128::one();
+    let four = two * two;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(16)
+        .thread_stack_size(32 * 1024 * 1024)
+        .build()
+        .unwrap();
+    let circuit = Arc::new(circuit);
+    let input = Arc::new(input);
+    c.bench_function(format!("{} semi honest online", id).as_str(), |b| {
+        b.to_async(&runtime).iter_custom(|_| {
+            let circuit = circuit.clone();
+            let input = input.clone();
+            async move {
+                // Offline
+                let dealer_id: PartyId = parties as PartyId + 1;
+                let offline_party_ids: Vec<_> = (0..=parties).map(|i| (i + 1) as PartyId).collect();
+                let offline_parties_set = HashSet::from_iter(offline_party_ids.iter().copied());
+                let default_input_length = input.len() / parties;
+                let addition_threshold = input.len() % parties;
+                let mut inputs = HashMap::with_capacity(parties);
+                let mut used_input = 0;
+                let input_lengths: HashMap<_, _> = offline_party_ids
+                    .iter()
+                    .copied()
+                    .filter(|i| i != &dealer_id)
+                    .enumerate()
+                    .map(|(idx, i)| {
+                        let my_input_len =
+                            default_input_length + (idx < addition_threshold) as usize;
+                        let my_input = input[used_input..used_input + my_input_len].to_vec();
+                        inputs.insert(i, my_input);
+                        used_input += my_input_len;
+                        (i, (used_input - my_input_len, my_input_len))
+                    })
+                    .collect();
+                let (routers, mut engines) =
+                    set_up_routers_for_parties(&offline_parties_set, base_port).await;
+                let router_handles: Vec<_> = routers
+                    .into_iter()
+                    .map(|(_, r)| tokio::spawn(r.launch()))
+                    .collect();
+                let input_lengths_arc = Arc::new(input_lengths);
+                let dealer_handle = {
+                    let circuit_arc_clone = circuit.clone();
+                    let mut dealer_engine = engines.remove(&dealer_id).unwrap();
+                    let input_lengths = input_lengths_arc.clone();
+                    async move {
+                        MaliciousSecurityOffline::<
+                            PACKING,
+                            PF,
+                            GF2,
+                            GF128,
+                            _,
+                            PcgBasedPairwiseBooleanCorrelation<PACKING, PF>,
+                        >::malicious_security_offline_dealer(
+                            &mut dealer_engine,
+                            two,
+                            three,
+                            four,
+                            circuit_arc_clone,
+                            &input_lengths,
+                        )
+                        .await;
+                    }
+                };
+
+                let parties_handles: Vec<_> = engines
+                    .into_iter()
+                    .map(|(pid, mut e)| {
+                        let circuit_clone_arc = circuit.clone();
+                        async move {
+                            let res = MaliciousSecurityOffline::<
+                                PACKING,
+                                PF,
+                                GF2,
+                                GF128,
+                                _,
+                                PcgBasedPairwiseBooleanCorrelation<PACKING, PF>,
+                            >::malicious_security_offline_party(
+                                &mut e,
+                                dealer_id,
+                                circuit_clone_arc,
+                            )
+                            .await;
+                            Result::<
+                                (
+                                    PartyId,
+                                    MaliciousSecurityOffline<PACKING, PF, GF2, GF128, _, _>,
+                                ),
+                                (),
+                            >::Ok((pid, res))
+                        }
+                    })
+                    .collect();
+
+                let parties_handles = try_join_all(parties_handles);
+                let (_, parties_offline_material, router_output) =
+                    join!(dealer_handle, parties_handles, try_join_all(router_handles));
+                router_output.unwrap();
+                let parties_offline_material = parties_offline_material.unwrap();
+
+                // Pre Online
+                let online_party_ids: Vec<_> = (0..parties).map(|i| (i + 1) as PartyId).collect();
+                let online_parties_set = HashSet::from_iter(online_party_ids.iter().copied());
+                let (routers, mut engines) =
+                    set_up_routers_for_parties(&online_parties_set, base_port).await;
+                let router_handles: Vec<_> = routers
+                    .into_iter()
+                    .map(|(_, r)| tokio::spawn(r.launch()))
+                    .collect();
+
+                let pre_online_handles = parties_offline_material.into_iter().map(
+                    |(pid, offline_material)| {
+                        let mut engine = engines.get(&pid).unwrap().sub_protocol("PRE-ONLINE");
+                        async move {
+                            let pre_online_material =
+                                offline_material.into_pre_online_material(&mut engine).await;
+                            Result::<(PartyId, PreOnlineMaterial<PACKING, PF, _, _, _, _>), ()>::Ok(
+                                (pid, pre_online_material),
+                            )
+                        }
+                    },
+                );
+
+                let pre_online_handles = try_join_all(pre_online_handles).await.unwrap();
+
+                // Online
+                let online_handles = pre_online_handles.into_iter().map(|(pid, mut pre)| {
+                    let input = inputs.remove(&pid).unwrap();
+                    let mut engine = engines.remove(&pid).unwrap();
+                    let input_lengths = input_lengths_arc.clone();
+                    tokio::spawn(async move {
+                        let start = Instant::now();
+                        let o = pre
+                            .online_malicious_computation(
+                                &mut engine,
+                                input,
+                                two,
+                                three,
+                                four,
+                                &input_lengths,
+                            )
+                            .await
+                            .ok_or(());
+                        println!("Malicious eval took: {}ms", start.elapsed().as_millis());
+                        o
+                    })
+                });
+                let start = Instant::now();
+                let mut online_outputs: Vec<_> = try_join_all(online_handles)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|v| v.unwrap())
+                    .collect();
+                let output = start.elapsed();
+                println!("Running took: {}", output.as_millis());
+                try_join_all(router_handles).await.unwrap();
+                output
+            }
         })
     });
 }
 pub fn bench_2p_semi_honest(c: &mut Criterion) {
     let path = Path::new("circuits/aes_128.txt");
     let circuit = circuit_from_file(path).unwrap();
-    let input = vec![GF2::one(); circuit.input_wire_count];
-    bench_boolean_circuit(c, "aes", circuit, &input, 2, 3000);
+    let input = vec![PackedGF2::one(); circuit.input_wire_count];
+    bench_boolean_circuit_semi_honest(c, "aes semi honest", circuit.clone(), &input, 2, 3000);
 }
-criterion_group!(benches, bench_2p_semi_honest);
+pub fn bench_2p_malicious(c: &mut Criterion) {
+    let path = Path::new("circuits/aes_128.txt");
+    let circuit = circuit_from_file(path).unwrap();
+    let input = vec![PackedGF2::one(); circuit.input_wire_count];
+    bench_malicious_circuit(c, "aes malicious", circuit.clone(), &input, 2, 3000);
+}
+criterion_group!(benches, bench_2p_malicious, bench_2p_semi_honest);
 criterion_main!(benches);

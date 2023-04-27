@@ -8,7 +8,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::{engine::MultiPartyEngine, PartyId};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 enum CommmitShare {
     Seed([u8; 16], usize),
     Value(Box<[u8]>),
@@ -23,6 +23,7 @@ impl CommmitShare {
     }
 }
 
+#[derive(Clone)]
 pub struct OfflineCommitment {
     commit_share: CommmitShare,
     commitment: Hash,

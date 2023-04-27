@@ -1,6 +1,10 @@
-use std::{collections::HashMap, mem::MaybeUninit, sync::Arc};
+use std::{collections::HashMap, mem::MaybeUninit, sync::Arc, time};
 
+use aes_prng::AesRng;
 use futures::{future::try_join_all, join};
+use rand_core::{RngCore, SeedableRng};
+use rayon::prelude::*;
+use tokio::time::Instant;
 
 use crate::{
     circuit_eval::semi_honest::{
@@ -35,7 +39,7 @@ fn compute_gammas_alphas<
     F: FieldElement,
     PF: PackedField<impl FieldElement, PACKING>,
 >(
-    alpha: &F,
+    alpha: &[u8; 16],
     circuit: &ParsedCircuit,
 ) -> (
     Vec<(usize, usize, InputWireCoefficients<PACKING, F>)>,
@@ -44,7 +48,14 @@ fn compute_gammas_alphas<
     Vec<[F; PACKING]>,
     F,
 ) {
-    let mut cur_alpha = *alpha;
+    let mut rng = AesRng::from_seed(*alpha);
+    let layer_seeds: Vec<_> = (0..circuit.gates.len())
+        .map(|_| {
+            let mut s = [0u8; 16];
+            rng.fill_bytes(&mut s);
+            s
+        })
+        .collect();
     let alpha = *alpha;
     let mut alphas = Vec::<(usize, usize, InputWireCoefficients<PACKING, F>)>::new();
     let mut gammas = Vec::<(usize, usize, GateGamma<PACKING, F>)>::new();
@@ -59,61 +70,66 @@ fn compute_gammas_alphas<
         &mut weights_per_wire[circuit.input_wire_count + circuit.internal_wire_count..];
     for v in output_wires.iter_mut() {
         for p in 0..PACKING {
-            v[p] = cur_alpha;
-            cur_alpha *= alpha;
+            v[p] = F::random(&mut rng);
         }
     }
     let output_wire_threshold = circuit.input_wire_count + circuit.internal_wire_count;
     let alphas_outputs: Vec<_> = output_wires.iter().map(|a| *a).collect();
 
     // Next, distribute alphas for the relevant gates' input wires.
-    for (layer_idx, layer) in circuit.gates.iter().enumerate() {
-        for (gate_idx, gate) in layer.iter().enumerate() {
-            let c = match gate {
-                ParsedGate::AndGate { input, output: _ } => {
-                    let mut a: [F; PACKING] =
-                        unsafe { MaybeUninit::array_assume_init(MaybeUninit::<F>::uninit_array()) };
-                    let mut b: [F; PACKING] =
-                        unsafe { MaybeUninit::array_assume_init(MaybeUninit::<F>::uninit_array()) };
-                    for i in 0..PACKING {
-                        a[i] = cur_alpha;
-                        b[i] = cur_alpha * alpha;
-                        cur_alpha = b[i] * alpha;
-                        weights_per_wire[input[0]][i] += a[i];
-                        weights_per_wire[input[1]][i] += b[i];
+    circuit
+        .gates
+        .iter()
+        .enumerate()
+        .zip(layer_seeds.into_iter())
+        .for_each(|((layer_idx, layer), alpha)| {
+            let mut rng = AesRng::from_seed(alpha);
+            for (gate_idx, gate) in layer.iter().enumerate() {
+                let c = match gate {
+                    ParsedGate::AndGate { input, output: _ } => {
+                        let mut a: [F; PACKING] = unsafe {
+                            MaybeUninit::array_assume_init(MaybeUninit::<F>::uninit_array())
+                        };
+                        let mut b: [F; PACKING] = unsafe {
+                            MaybeUninit::array_assume_init(MaybeUninit::<F>::uninit_array())
+                        };
+                        for i in 0..PACKING {
+                            a[i] = F::random(&mut rng);
+                            b[i] = F::random(&mut rng);
+                            weights_per_wire[input[0]][i] += a[i];
+                            weights_per_wire[input[1]][i] += b[i];
+                        }
+                        InputWireCoefficients::And(a, b)
                     }
-                    InputWireCoefficients::And(a, b)
-                }
-                ParsedGate::WideAndGate {
-                    input,
-                    input_bit,
-                    output: _,
-                } => {
-                    let mut bits: [F; PACKING] =
-                        unsafe { MaybeUninit::array_assume_init(MaybeUninit::<F>::uninit_array()) };
-                    let mut wides: [[F; 128]; PACKING] = unsafe {
-                        MaybeUninit::array_assume_init(MaybeUninit::<[F; 128]>::uninit_array())
-                    };
-                    for pack in 0..PACKING {
-                        let bit_coefficient = cur_alpha;
-                        bits[pack] = bit_coefficient;
-                        cur_alpha *= alpha;
-                        weights_per_wire[*input_bit][pack] += bit_coefficient;
-                        let wide_coefficents: [F; 128] = core::array::from_fn(|i| {
-                            let cur = cur_alpha;
-                            cur_alpha *= alpha;
-                            weights_per_wire[input[i]][pack] += cur;
-                            cur
-                        });
-                        wides[pack] = wide_coefficents;
+                    ParsedGate::WideAndGate {
+                        input,
+                        input_bit,
+                        output: _,
+                    } => {
+                        let mut bits: [F; PACKING] = unsafe {
+                            MaybeUninit::array_assume_init(MaybeUninit::<F>::uninit_array())
+                        };
+                        let mut wides: [[F; 128]; PACKING] = unsafe {
+                            MaybeUninit::array_assume_init(MaybeUninit::<[F; 128]>::uninit_array())
+                        };
+                        for pack in 0..PACKING {
+                            let bit_coefficient = F::random(&mut rng);
+                            bits[pack] = bit_coefficient;
+                            weights_per_wire[*input_bit][pack] += bit_coefficient;
+                            let wide_coefficents: [F; 128] = core::array::from_fn(|i| {
+                                let cur = F::random(&mut rng);
+                                weights_per_wire[input[i]][pack] += cur;
+                                cur
+                            });
+                            wides[pack] = wide_coefficents;
+                        }
+                        InputWireCoefficients::WideAnd(bits, wides)
                     }
-                    InputWireCoefficients::WideAnd(bits, wides)
-                }
-                _ => continue,
-            };
-            alphas.push((layer_idx, gate_idx, c));
-        }
-    }
+                    _ => continue,
+                };
+                alphas.push((layer_idx, gate_idx, c));
+            }
+        });
 
     let mut total_constant_addition: F = F::zero();
     // Propagate alphas to compute gammas.
@@ -420,6 +436,7 @@ fn construct_statement<
     statement
 }
 
+#[derive(Clone)]
 pub struct OfflineCircuitVerify<F: FieldElement> {
     s_i: F,
     alpha_omega_commitment: OfflineCommitment,
@@ -499,14 +516,25 @@ pub async fn verify_parties<
         prover_offline_material,
         s_commitment,
     } = offline_material;
-    let (alpha, omega_hat): (F, F) = alpha_omega_commitment.online_decommit(engine).await;
+    let timer = Instant::now();
+    let prover_offline_material = prover_offline_material.clone();
+    let (alpha, omega_hat): ([u8; 16], F) = alpha_omega_commitment.online_decommit(engine).await;
+    println!(
+        "\t\tVerify - cloning and decommit took: {}ms",
+        timer.elapsed().as_millis()
+    );
     // Length of alphas is the total number of output wires + input wires to AND gates.
     // In case of fan out > 1 impose scenarios where the same wire is fed into multiple different wires.
     // We therefore have to "change" the representation of the circuit in a deterministic way so that each wire fed into a multiplication / output wire has a different idx.
 
+    let timer = Instant::now();
     let (alphas, gammas, alphas_output_wires, gammas_input_wires, total_constant_addition) =
         compute_gammas_alphas::<PACKING, _, PF>(&alpha, circuit);
-
+    println!(
+        "\t\tVerify - compute gammas alphas took: {}ms",
+        timer.elapsed().as_millis()
+    );
+    let timer = Instant::now();
     // Compute Lambda
     let alpha_x_hat = dot_product_alpha(
         &alphas,
@@ -536,6 +564,11 @@ pub async fn verify_parties<
         masked_gamma_i_s.insert(pid, masked_gamma_i_peer);
     }
     let p_hat = lambda - masked_gamma_i_s.values().copied().sum() - masked_gamma_i + omega_hat;
+    println!(
+        "\t\tVerify - Compute and obtain gammas: {}ms",
+        timer.elapsed().as_millis()
+    );
+    let timer = Instant::now();
     let mut proof_statement = construct_statement(
         Some(masked_gamma_i),
         Some(*s_i),
@@ -552,48 +585,76 @@ pub async fn verify_parties<
         None,
         circuit,
     ));
-    let prover_futures = zkfliop::prover(
-        engine.sub_protocol(my_id),
-        &mut proof_statement,
-        prover_offline_material,
-        two,
-        three,
-        four,
+    println!(
+        "\t\tVerify - Statements Construction: {}ms",
+        timer.elapsed().as_millis()
     );
+    let sub_engine = engine.sub_protocol(my_id);
+    let prover_futures = tokio::spawn(async move {
+        let prover_offline_material = prover_offline_material;
+        let timer = Instant::now();
+        zkfliop::prover(
+            sub_engine,
+            &mut proof_statement,
+            &prover_offline_material,
+            two,
+            three,
+            four,
+        )
+        .await;
+        println!("\t\tVerify - Proving took: {}", timer.elapsed().as_millis());
+    });
 
     let verifiers_futures =
         verifiers_offline_material
             .into_iter()
             .map(|(prover_id, offline_material)| {
+                let timer = Instant::now();
+                let offline_material = offline_material.clone();
                 let verifier_engine = engine.sub_protocol(prover_id);
                 let verify_statement_arc = verify_statement.clone();
                 let masked_gamma_prover = *masked_gamma_i_s.get(&prover_id).unwrap();
-                async move {
+                let prover_id = *prover_id;
+                println!(
+                    "\t\tVerify - Making preparations to verify: {}ms",
+                    timer.elapsed().as_millis()
+                );
+                tokio::spawn(async move {
                     // We only modify the first entry (the masked Gamma_i) in the verifying statement.
                     let mut z_hat = verify_statement_arc.as_ref().clone();
                     z_hat[0] = masked_gamma_prover;
+                    let timer = Instant::now();
                     zkfliop::verifier(
                         verifier_engine,
                         &mut z_hat,
-                        *prover_id,
-                        offline_material,
+                        prover_id,
+                        &offline_material,
                         two,
                         three,
                         four,
                     )
                     .await;
+                    println!(
+                        "\t\tVerify - zkfliop verifier took: {}",
+                        timer.elapsed().as_millis()
+                    );
                     Result::<(), ()>::Ok(())
-                }
+                })
             });
     let verifiers_futures = try_join_all(verifiers_futures);
     let (_, verifiers_futures) = join!(prover_futures, verifiers_futures);
     verifiers_futures.unwrap();
+    let timer = Instant::now();
     engine.broadcast(());
     for p in peers {
         let _: () = engine.recv_from(p).await.unwrap();
     }
     let s = s_commitment.online_decommit(engine).await;
     let p = p_hat + s;
+    println!(
+        "\t\tVerify - last communication round took: {}ms",
+        timer.elapsed().as_millis()
+    );
     return p.is_zero();
 }
 
@@ -615,7 +676,8 @@ pub async fn offline_verify_dealer<
     sho: &[(PartyId, SHO)],
 ) {
     let mut rng = E::rng();
-    let alpha = F::random(&mut rng);
+    let mut alpha = [0u8; 16];
+    rng.fill_bytes(&mut alpha);
     let dealer_id = engine.my_party_id();
     let parties: Vec<PartyId> = engine
         .party_ids()

@@ -557,7 +557,6 @@ pub async fn multi_party_semi_honest_eval_circuit<
         circuit.input_wire_count + circuit.internal_wire_count + circuit.output_wire_count;
     let mut wires = vec![F::zero(); wires_num];
 
-    let timer_start = Instant::now();
     let masked_input = obtain_masked_and_shared_input(
         engine,
         parties_input_pos_and_length,
@@ -582,6 +581,7 @@ pub async fn multi_party_semi_honest_eval_circuit<
         let non_linear_gates_in_layer = cur.iter().filter(|cur| !cur.is_linear()).count();
         usize::max(acc, non_linear_gates_in_layer)
     });
+    let mut msg_vec = Vec::with_capacity(max_layer_size);
     for (layer_idx, layer) in circuit.gates.iter().enumerate() {
         let mut and_gates_processed = 0;
         for (gate_idx, gate) in layer.iter().enumerate() {
@@ -607,12 +607,14 @@ pub async fn multi_party_semi_honest_eval_circuit<
 
                     let (x, y) = (wires[input[0]], wires[input[1]]);
                     wires[*output] = c + y * (x - a) + (y - b) * a;
-                    let msg = EvalMessage {
-                        opening: Mask::And(x - a, y - b),
-                        gate_idx_in_layer: gate_idx,
-                    };
-                    engine.broadcast(msg);
+                    // let msg = EvalMessage {
+                    //     opening: Mask::And(x - a, y - b),
+                    //     gate_idx_in_layer: gate_idx,
+                    // };
+                    // engine.broadcast(msg);
+
                     let mask = Mask::And(x - a, y - b);
+                    msg_vec.push(mask);
                     assert!(masked_gate_inputs
                         .insert((layer_idx, gate_idx), mask)
                         .is_none());
@@ -640,77 +642,90 @@ pub async fn multi_party_semi_honest_eval_circuit<
                         wires[*output_wire] = wc[idx] + wy[idx] * x - wb[idx] * a;
                     }
                     let masked_inputs = core::array::from_fn(|i| wy[i] - wb[i]);
-                    let msg = EvalMessage {
-                        opening: Mask::WideAnd(x - a, masked_inputs),
-                        gate_idx_in_layer: gate_idx,
-                    };
-                    engine.broadcast(msg);
+                    // let msg = EvalMessage {
+                    //     opening: Mask::WideAnd(x - a, masked_inputs),
+                    //     gate_idx_in_layer: gate_idx,
+                    // };
+                    // engine.broadcast(msg);
                     let mask = Mask::WideAnd(x - a, masked_inputs);
+                    msg_vec.push(mask);
                     masked_gate_inputs.insert((layer_idx, gate_idx), mask);
                 }
             }
         }
-        for _ in 0..and_gates_processed * number_of_peers {
-            let (msg, _): (EvalMessage<F>, PartyId) = engine.recv().await.unwrap();
-            let gate_idx = msg.gate_idx_in_layer;
-            let beaver_triple = multi_party_beaver_triples
-                .get(&(layer_idx, gate_idx))
-                .unwrap();
-            let gate = layer[gate_idx];
-            let mask = masked_gate_inputs.get_mut(&(layer_idx, gate_idx)).unwrap();
-            match (msg.opening, beaver_triple, gate, mask) {
-                (
-                    Mask::And(ax, by),
-                    BeaverTriple::Regular(RegularBeaverTriple(a, _, _)),
-                    ParsedGate::AndGate {
-                        input: input_wires,
-                        output: output_wire,
-                    },
-                    Mask::And(mask_a, mask_b),
-                ) => {
-                    let y = wires[input_wires[1]];
-                    wires[output_wire] += y * ax + by * *a;
-                    *mask_a += ax;
-                    *mask_b += by;
-                }
-                (
-                    Mask::WideAnd(ax, wby),
-                    BeaverTriple::Wide(WideBeaverTriple(a, _, _)),
-                    ParsedGate::WideAndGate {
-                        input,
-                        input_bit,
-                        output,
-                    },
-                    Mask::WideAnd(mask_a, mask_wb),
-                ) => {
-                    for i in 0..wby.len() {
-                        mask_wb[i] += wby[i];
+        engine.broadcast(&msg_vec);
+        msg_vec.clear();
+
+        for _ in 0..number_of_peers {
+            let (recv_vec, pid): (Vec<Mask<F>>, PartyId) = engine.recv().await.unwrap();
+            // let (msg, _): (EvalMessage<F>, PartyId) = engine.recv().await.unwrap();
+            for ((gate_idx, gate), opening) in layer
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| !g.is_linear())
+                .zip(recv_vec.into_iter())
+            {
+                let beaver_triple = multi_party_beaver_triples
+                    .get(&(layer_idx, gate_idx))
+                    .unwrap();
+                let gate = layer[gate_idx];
+                let mask = masked_gate_inputs.get_mut(&(layer_idx, gate_idx)).unwrap();
+                match (opening, beaver_triple, gate, mask) {
+                    (
+                        Mask::And(ax, by),
+                        BeaverTriple::Regular(RegularBeaverTriple(a, _, _)),
+                        ParsedGate::AndGate {
+                            input: input_wires,
+                            output: output_wire,
+                        },
+                        Mask::And(mask_a, mask_b),
+                    ) => {
+                        let y = wires[input_wires[1]];
+                        wires[output_wire] += y * ax + by * *a;
+                        *mask_a += ax;
+                        *mask_b += by;
                     }
-                    *mask_a += ax;
-                    for i in 0..output.len() {
-                        let y = wires[input[i]];
-                        wires[output[i]] += y * ax + wby[i] * *a;
+                    (
+                        Mask::WideAnd(ax, wby),
+                        BeaverTriple::Wide(WideBeaverTriple(a, _, _)),
+                        ParsedGate::WideAndGate {
+                            input,
+                            input_bit,
+                            output,
+                        },
+                        Mask::WideAnd(mask_a, mask_wb),
+                    ) => {
+                        for i in 0..wby.len() {
+                            mask_wb[i] += wby[i];
+                        }
+                        *mask_a += ax;
+                        for i in 0..output.len() {
+                            let y = wires[input[i]];
+                            wires[output[i]] += y * ax + wby[i] * *a;
+                        }
                     }
+                    _ => panic!(),
                 }
-                _ => panic!(),
             }
         }
     }
     // Create a robust secret sharing of the output wires.
-    for (i, (wire, mask)) in wires
+    for (_, (wire, mask)) in wires
         .iter()
         .skip(wires.len() - circuit.output_wire_count)
         .zip(output_wire_masks)
         .enumerate()
     {
-        engine.broadcast((i, *wire - *mask));
         masked_output_wires.push(*wire - *mask);
     }
+    engine.broadcast(&masked_output_wires);
 
-    for i in 0..circuit.output_wire_count * number_of_peers {
-        let ((wire_id, masked_val), _): ((usize, F), _) = engine.recv().await.unwrap();
-        assert!(wire_id < output_wire_masks.len());
-        masked_output_wires[wire_id] += masked_val;
+    for _ in 0..number_of_peers {
+        let (v, _): (Vec<F>, _) = engine.recv().await.unwrap();
+        masked_output_wires
+            .iter_mut()
+            .zip(v.into_iter())
+            .for_each(|(d, s)| *d += s);
     }
 
     Ok((masked_input, masked_gate_inputs, masked_output_wires))
@@ -1062,12 +1077,19 @@ mod tests {
 
         assert_eq!(output, vec![GF2::one(); 128]);
     }
-    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-    async fn test_semi_honest_aes() {
-        let path = Path::new("circuits/aes_128.txt");
-        let parsed_circuit = super::super::circuit_from_file(path).unwrap();
+    #[test]
+    fn test_semi_honest_aes() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_stack_size(32 * 1024 * 1024)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let path = Path::new("circuits/aes_128.txt");
+            let parsed_circuit = super::super::circuit_from_file(path).unwrap();
 
-        let input = vec![PackedGF2::one(); parsed_circuit.input_wire_count];
-        test_boolean_circuit(parsed_circuit, &input, 2).await;
+            let input = vec![PackedGF2::one(); parsed_circuit.input_wire_count];
+            test_boolean_circuit(parsed_circuit, &input, 2).await;
+        })
     }
 }

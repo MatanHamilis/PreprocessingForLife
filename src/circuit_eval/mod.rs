@@ -1,6 +1,7 @@
 use std::{fs::File, io::BufRead, path::Path};
 
 pub use self::bristol_fashion::{parse_bristol, ParsedCircuit};
+pub use self::malicious::{MaliciousSecurityOffline, PreOnlineMaterial};
 pub use self::semi_honest::{
     multi_party_semi_honest_eval_circuit, OfflineSemiHonestCorrelation,
     PcgBasedPairwiseBooleanCorrelation,
