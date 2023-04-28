@@ -645,10 +645,6 @@ pub async fn verify_parties<
     let (_, verifiers_futures) = join!(prover_futures, verifiers_futures);
     verifiers_futures.unwrap();
     let timer = Instant::now();
-    engine.broadcast(());
-    for p in peers {
-        let _: () = engine.recv_from(p).await.unwrap();
-    }
     let s = s_commitment.online_decommit(engine).await;
     let p = p_hat + s;
     println!(

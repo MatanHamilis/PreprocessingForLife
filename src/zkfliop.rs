@@ -233,6 +233,7 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     let last_round_challenge = round_challenges.last().unwrap();
     // Init
     let (_, round_count) = compute_round_count_and_m(z.len());
+    println!("Proving: round count {}", round_count);
 
     let my_id = engine.my_party_id();
     let parties: Vec<_> = engine

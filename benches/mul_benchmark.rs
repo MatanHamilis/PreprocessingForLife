@@ -28,6 +28,25 @@ pub fn mul_benchmark_with_mem(c: &mut Criterion) {
         );
     });
 }
+pub fn mul_benchmark_with_vec(c: &mut Criterion) {
+    c.bench_function("mul_bench_with_vec", |bench| {
+        let mut rng = &mut OsRng;
+        bench.iter_batched(
+            || {
+                (
+                    vec![GF128::random(&mut rng); 1 << 20],
+                    vec![GF128::random(&mut rng); 1 << 20],
+                )
+            },
+            |(mut a, b)| {
+                a.iter_mut().zip(b.iter()).for_each(|(a, b)| {
+                    (*a *= *b);
+                })
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
 
 pub fn inv_benchmark(c: &mut Criterion) {
     c.bench_function("inv_bench", |b| {
@@ -47,6 +66,7 @@ pub fn inv_benchmark(c: &mut Criterion) {
 criterion_group!(
     benches,
     mul_benchmark_with_mem,
+    mul_benchmark_with_vec,
     mul_benchmark,
     inv_benchmark,
 );
