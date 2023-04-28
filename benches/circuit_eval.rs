@@ -126,60 +126,64 @@ fn bench_boolean_circuit_semi_honest<
                         let circuit = circuit.clone();
                         let mut engine =
                             engines.get(&id).unwrap().sub_protocol("MULTIPARTY BEAVER");
-                        async move {
+                        tokio::spawn(async move {
+                            let timer = Instant::now();
                             let bts = offline_correlation
                                 .get_multiparty_beaver_triples(&mut engine, &circuit)
                                 .await;
+                            println!(
+                                "\t\tSemi Honest - Opening Beaver triples: {}ms",
+                                timer.elapsed().as_millis()
+                            );
                             Result::<_, ()>::Ok((id, bts, offline_correlation))
-                        }
+                        })
                     });
 
             let exec_results = try_join_all(engine_futures).await.unwrap();
-            let engine_futures =
-                exec_results
-                    .into_iter()
-                    .map(|(id, n_party_correlation, offline_corerlation)| {
-                        let mut engine = engines.remove(&id).unwrap();
-                        let circuit = circuit.clone();
-                        let input = inputs.remove(&id).unwrap();
-                        let output_wire_masks: Vec<_> =
-                            offline_corerlation.get_circuit_output_wires_masks_shares(&circuit);
-                        let input_wire_masks: Vec<_> =
-                            offline_corerlation.get_circuit_input_wires_masks_shares(&circuit);
-                        let my_input_mask = offline_corerlation
-                            .get_personal_circuit_input_wires_masks()
-                            .to_vec();
-                        let parties_input_lengths = parties_input_lengths.clone();
-                        tokio::spawn(async move {
-                            let n_party_correlation = n_party_correlation;
-                            let time = Instant::now();
-                            let o = multi_party_semi_honest_eval_circuit::<N, _, _, _, FC>(
-                                &mut engine,
-                                &circuit,
-                                &input,
-                                &my_input_mask,
-                                input_wire_masks,
-                                &n_party_correlation,
-                                &output_wire_masks,
-                                &parties_input_lengths,
-                            )
-                            .await
-                            .map(
-                                |(masked_input_wires, masked_gate_inputs, masked_outputs)| {
-                                    (
-                                        masked_gate_inputs,
-                                        masked_outputs,
-                                        output_wire_masks,
-                                        n_party_correlation,
-                                        masked_input_wires,
-                                    )
-                                },
-                            );
-                            let time = time.elapsed();
-                            println!("semi honest: {}", time.as_millis());
-                            (time, o)
-                        })
-                    });
+            let engine_futures = exec_results.into_iter().map(|v| v.unwrap()).map(
+                |(id, n_party_correlation, offline_corerlation)| {
+                    let mut engine = engines.remove(&id).unwrap();
+                    let circuit = circuit.clone();
+                    let input = inputs.remove(&id).unwrap();
+                    let output_wire_masks: Vec<_> =
+                        offline_corerlation.get_circuit_output_wires_masks_shares(&circuit);
+                    let input_wire_masks: Vec<_> =
+                        offline_corerlation.get_circuit_input_wires_masks_shares(&circuit);
+                    let my_input_mask = offline_corerlation
+                        .get_personal_circuit_input_wires_masks()
+                        .to_vec();
+                    let parties_input_lengths = parties_input_lengths.clone();
+                    tokio::spawn(async move {
+                        let n_party_correlation = n_party_correlation;
+                        let time = Instant::now();
+                        let o = multi_party_semi_honest_eval_circuit::<N, _, _, _, FC>(
+                            &mut engine,
+                            &circuit,
+                            &input,
+                            &my_input_mask,
+                            input_wire_masks,
+                            &n_party_correlation,
+                            &output_wire_masks,
+                            &parties_input_lengths,
+                        )
+                        .await
+                        .map(
+                            |(masked_input_wires, masked_gate_inputs, masked_outputs)| {
+                                (
+                                    masked_gate_inputs,
+                                    masked_outputs,
+                                    output_wire_masks,
+                                    n_party_correlation,
+                                    masked_input_wires,
+                                )
+                            },
+                        );
+                        let time = time.elapsed();
+                        println!("semi honest: {}", time.as_millis());
+                        (time, o)
+                    })
+                },
+            );
 
             let e = try_join_all(engine_futures).await.unwrap();
             let output = e[0].0;
@@ -386,7 +390,17 @@ pub fn bench_2p_semi_honest(c: &mut Criterion) {
     let input = vec![PackedGF2::one(); circuit.input_wire_count];
     bench_boolean_circuit_semi_honest::<{ PackedGF2::BITS }, _, PackedGF2Container>(
         c,
-        "aes semi honest",
+        "aes semi honest packed",
+        circuit.clone(),
+        &input,
+        2,
+        3000,
+    );
+
+    let input = vec![GF2::one(); circuit.input_wire_count];
+    bench_boolean_circuit_semi_honest::<{ GF2::BITS }, _, GF2Container>(
+        c,
+        "aes semi honest bit",
         circuit.clone(),
         &input,
         2,
@@ -404,7 +418,16 @@ pub fn bench_2p_malicious(c: &mut Criterion) {
     let input = vec![PackedGF2::one(); circuit.input_wire_count];
     bench_malicious_circuit::<{ PackedGF2::BITS }, _, PackedGF2Container>(
         c,
-        "aes malicious",
+        "aes malicious packed",
+        circuit.clone(),
+        &input,
+        2,
+        3000,
+    );
+    let input = vec![GF2::one(); circuit.input_wire_count];
+    bench_malicious_circuit::<{ GF2::BITS }, _, GF2Container>(
+        c,
+        "aes malicious bit",
         circuit.clone(),
         &input,
         2,
