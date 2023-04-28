@@ -237,7 +237,7 @@ impl LocalRouter {
         };
         (output, engines)
     }
-    pub async fn launch(mut self) -> Result<(), ()> {
+    pub async fn launch(mut self) -> Result<usize, ()> {
         let mut total_bytes = 0;
         let mut pending = HashMap::<(PartyId, UCTag), Vec<UpstreamMessage>>::new();
         loop {
@@ -255,8 +255,7 @@ impl LocalRouter {
                 DownstreamMessageType::Deregister => {
                     self.upstream_senders.remove(&(from, tag));
                     if self.upstream_senders.is_empty() {
-                        println!("Router left, total bytes transferred: {}", total_bytes);
-                        return Ok(());
+                        return Ok(total_bytes);
                     }
                 }
                 DownstreamMessageType::Data(dest, content) => {

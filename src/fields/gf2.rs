@@ -204,7 +204,7 @@ impl Display for GF2 {
 const Packing: usize = 1 << 8;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackedGF2 {
-    bits: BitArr!(for Packing, in usize),
+    pub bits: BitArr!(for Packing, in usize),
 }
 
 impl FieldElement for PackedGF2 {

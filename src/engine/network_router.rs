@@ -39,6 +39,7 @@ pub struct NetworkRouter {
     peers_receive: HashMap<PartyId, SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>,
     tag: HashMap<PartyId, UCTag>,
     pending: HashMap<UCTag, Vec<UpstreamMessage>>,
+    total_bytes_sent: usize,
 }
 
 async fn handle_single_conn(
@@ -160,6 +161,7 @@ impl NetworkRouter {
                 peers_receive,
                 tag: HashMap::new(),
                 pending: HashMap::new(),
+                total_bytes_sent: 0,
             },
             engine,
         ))
@@ -186,6 +188,7 @@ impl NetworkRouter {
                         .expect("Deregistering missing tag!");
                 }
                 DownstreamMessageType::Data(dest, msg) => {
+                    self.total_bytes_sent += msg.len();
                     let snd = self
                         .peers_send
                         .get_mut(&dest)
@@ -253,7 +256,7 @@ impl NetworkRouter {
         }
     }
 
-    pub async fn launch(mut self) {
+    pub async fn launch(mut self) -> usize {
         let mut peers_recv = select_all(
             self.peers_receive
                 .drain()
@@ -275,6 +278,7 @@ impl NetworkRouter {
         for mut peer in self.peers_send {
             peer.1.close().await.unwrap();
         }
+        self.total_bytes_sent
     }
 }
 

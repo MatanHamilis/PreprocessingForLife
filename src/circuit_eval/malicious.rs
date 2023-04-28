@@ -12,7 +12,7 @@ use crate::{
 
 use super::{
     bristol_fashion::ParsedCircuit,
-    semi_honest::{self, OfflineSemiHonestCorrelation},
+    semi_honest::{self, FieldContainer, OfflineSemiHonestCorrelation},
     verify::{self, statement_length, OfflineCircuitVerify},
 };
 
@@ -170,7 +170,7 @@ impl<
         SHO: OfflineSemiHonestCorrelation<PF>,
     > PreOnlineMaterial<PACKING, PF, CF, F, C, SHO>
 {
-    pub async fn online_malicious_computation(
+    pub async fn online_malicious_computation<FC: FieldContainer<PF>>(
         &mut self,
         engine: &mut impl MultiPartyEngine,
         my_input: Vec<PF>,
@@ -197,7 +197,7 @@ impl<
         let input_wire_mask_shares = input_wire_mask_shares.clone();
         let timer = Instant::now();
         let (masked_input_wires, masked_gate_inputs, masked_outputs) =
-            semi_honest::multi_party_semi_honest_eval_circuit(
+            semi_honest::multi_party_semi_honest_eval_circuit::<PACKING, _, _, _, FC>(
                 engine,
                 circuit.as_ref(),
                 &my_input,
@@ -261,14 +261,18 @@ mod tests {
         circuit_eval::{
             bristol_fashion::{parse_bristol, ParsedCircuit},
             malicious::PreOnlineMaterial,
-            semi_honest::{self, PcgBasedPairwiseBooleanCorrelation},
+            semi_honest::{self, FieldContainer, GF2Container, PcgBasedPairwiseBooleanCorrelation},
         },
         engine::{self, LocalRouter, MultiPartyEngine, MultiPartyEngineImpl},
         fields::{FieldElement, PackedField, PackedGF2, GF128, GF2},
         PartyId, UCTag,
     };
 
-    async fn test_malicious_circuit<const PACKING: usize, PF: PackedField<GF2, PACKING>>(
+    async fn test_malicious_circuit<
+        const PACKING: usize,
+        PF: PackedField<GF2, PACKING>,
+        FC: FieldContainer<PF>,
+    >(
         circuit: ParsedCircuit,
         input: Vec<PF>,
     ) -> Vec<PF> {
@@ -397,7 +401,7 @@ mod tests {
             tokio::spawn(async move {
                 let start = Instant::now();
                 let o = pre
-                    .online_malicious_computation(
+                    .online_malicious_computation::<FC>(
                         &mut engine,
                         input,
                         two,
@@ -444,7 +448,7 @@ mod tests {
         let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
             .expect("Failed to parse");
         let input = vec![GF2::zero(), GF2::zero()];
-        test_malicious_circuit(parsed_circuit, input).await;
+        test_malicious_circuit::<1, _, GF2Container>(parsed_circuit, input).await;
     }
     #[tokio::test]
     async fn test_three_bit_and() {
@@ -452,7 +456,7 @@ mod tests {
         let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
             .expect("Failed to parse");
         let input = vec![GF2::zero(), GF2::zero(), GF2::zero()];
-        test_malicious_circuit(parsed_circuit, input).await;
+        test_malicious_circuit::<1, _, GF2Container>(parsed_circuit, input).await;
     }
     #[tokio::test]
     async fn test_three_bit_or() {
@@ -471,7 +475,7 @@ mod tests {
         let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
             .expect("Failed to parse");
         let input = vec![GF2::zero(), GF2::zero(), GF2::zero()];
-        test_malicious_circuit(parsed_circuit, input).await;
+        test_malicious_circuit::<1, _, GF2Container>(parsed_circuit, input).await;
     }
 
     #[test]
@@ -487,9 +491,9 @@ mod tests {
             let mut aes_rng = AesRng::from_random_seed();
             let mut input = Vec::with_capacity(circuit.input_wire_count);
             for _ in 0..circuit.input_wire_count {
-                input.push(PackedGF2::one())
+                input.push(GF2::one())
             }
-            test_malicious_circuit(circuit, input).await;
+            test_malicious_circuit::<1, _, GF2Container>(circuit, input).await;
         });
     }
 }

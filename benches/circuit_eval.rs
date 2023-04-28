@@ -11,9 +11,9 @@ use futures::future::try_join_all;
 use rand::thread_rng;
 use silent_party::{
     circuit_eval::{
-        circuit_from_file, multi_party_semi_honest_eval_circuit, MaliciousSecurityOffline,
-        OfflineSemiHonestCorrelation, ParsedCircuit, PcgBasedPairwiseBooleanCorrelation,
-        PreOnlineMaterial,
+        circuit_from_file, multi_party_semi_honest_eval_circuit, FieldContainer, GF2Container,
+        MaliciousSecurityOffline, OfflineSemiHonestCorrelation, PackedGF2Container, ParsedCircuit,
+        PcgBasedPairwiseBooleanCorrelation, PreOnlineMaterial,
     },
     engine::{self, MultiPartyEngine, NetworkRouter},
     fields::{FieldElement, PackedField, PackedGF2, GF128, GF2},
@@ -61,7 +61,11 @@ async fn set_up_routers_for_parties(
         .map(|v| ((v.0, v.1 .0), (v.0, v.1 .1)))
         .unzip()
 }
-fn bench_boolean_circuit_semi_honest<const N: usize, F: PackedField<GF2, N>>(
+fn bench_boolean_circuit_semi_honest<
+    const N: usize,
+    F: PackedField<GF2, N>,
+    FC: FieldContainer<F>,
+>(
     c: &mut Criterion,
     id: &str,
     circuit: ParsedCircuit,
@@ -149,7 +153,7 @@ fn bench_boolean_circuit_semi_honest<const N: usize, F: PackedField<GF2, N>>(
                         tokio::spawn(async move {
                             let n_party_correlation = n_party_correlation;
                             let time = Instant::now();
-                            let o = multi_party_semi_honest_eval_circuit(
+                            let o = multi_party_semi_honest_eval_circuit::<N, _, _, _, FC>(
                                 &mut engine,
                                 &circuit,
                                 &input,
@@ -179,13 +183,22 @@ fn bench_boolean_circuit_semi_honest<const N: usize, F: PackedField<GF2, N>>(
 
             let e = try_join_all(engine_futures).await.unwrap();
             let output = e[0].0;
-            try_join_all(router_handles).await.unwrap();
+            let v: usize = try_join_all(router_handles)
+                .await
+                .unwrap()
+                .into_iter()
+                .sum();
+            println!("Total bytes sent: {}", v);
             output
         })
     });
 }
 
-fn bench_malicious_circuit<const PACKING: usize, PF: PackedField<GF2, PACKING>>(
+fn bench_malicious_circuit<
+    const PACKING: usize,
+    PF: PackedField<GF2, PACKING>,
+    FC: FieldContainer<PF>,
+>(
     c: &mut Criterion,
     id: &str,
     circuit: ParsedCircuit,
@@ -207,7 +220,7 @@ fn bench_malicious_circuit<const PACKING: usize, PF: PackedField<GF2, PACKING>>(
         .unwrap();
     let circuit = Arc::new(circuit);
     let input = Arc::new(input);
-    c.bench_function(format!("{} semi honest online", id).as_str(), |b| {
+    c.bench_function(format!("{} semi malicious online", id).as_str(), |b| {
         b.to_async(&runtime).iter_custom(|_| {
             let circuit = circuit.clone();
             let input = input.clone();
@@ -333,7 +346,7 @@ fn bench_malicious_circuit<const PACKING: usize, PF: PackedField<GF2, PACKING>>(
                     tokio::spawn(async move {
                         let start = Instant::now();
                         let o = pre
-                            .online_malicious_computation(
+                            .online_malicious_computation::<FC>(
                                 &mut engine,
                                 input,
                                 two,
@@ -356,7 +369,12 @@ fn bench_malicious_circuit<const PACKING: usize, PF: PackedField<GF2, PACKING>>(
                     .collect();
                 let output = start.elapsed();
                 println!("Running took: {}", output.as_millis());
-                try_join_all(router_handles).await.unwrap();
+                let total_bytes: usize = try_join_all(router_handles)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .sum();
+                println!("Total bytes:{}", total_bytes);
                 output
             }
         })
@@ -366,13 +384,32 @@ pub fn bench_2p_semi_honest(c: &mut Criterion) {
     let path = Path::new("circuits/aes_128.txt");
     let circuit = circuit_from_file(path).unwrap();
     let input = vec![PackedGF2::one(); circuit.input_wire_count];
-    bench_boolean_circuit_semi_honest(c, "aes semi honest", circuit.clone(), &input, 2, 3000);
+    bench_boolean_circuit_semi_honest::<{ PackedGF2::BITS }, _, PackedGF2Container>(
+        c,
+        "aes semi honest",
+        circuit.clone(),
+        &input,
+        2,
+        3000,
+    );
 }
 pub fn bench_2p_malicious(c: &mut Criterion) {
+    let p = PackedGF2::one();
+    println!(
+        "Packed GF2 serialized size: {}",
+        bincode::serialize(&p).unwrap().len()
+    );
     let path = Path::new("circuits/aes_128.txt");
     let circuit = circuit_from_file(path).unwrap();
     let input = vec![PackedGF2::one(); circuit.input_wire_count];
-    bench_malicious_circuit(c, "aes malicious", circuit.clone(), &input, 2, 3000);
+    bench_malicious_circuit::<{ PackedGF2::BITS }, _, PackedGF2Container>(
+        c,
+        "aes malicious",
+        circuit.clone(),
+        &input,
+        2,
+        3000,
+    );
 }
 criterion_group!(benches, bench_2p_malicious, bench_2p_semi_honest);
 criterion_main!(benches);

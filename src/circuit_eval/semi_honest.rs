@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use aes_prng::AesRng;
 use async_trait::async_trait;
+use bitvec::vec::BitVec;
 use rand::{CryptoRng, RngCore, SeedableRng};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -14,13 +15,168 @@ use serde_big_array::BigArray;
 
 use crate::circuit_eval::bristol_fashion::ParsedGate;
 use crate::engine::{MultiPartyEngine, PartyId};
-use crate::fields::{FieldElement, PackedField, GF128, GF2};
+use crate::fields::{FieldElement, PackedField, PackedGF2, GF128, GF2};
 use crate::pcg::{FullPcgKey, PackedOfflineFullPcgKey, RegularBeaverTriple, WideBeaverTriple};
 
 const PPRF_COUNT: usize = 44;
 const PPRF_DEPTH: usize = 5;
 const CODE_WEIGHT: usize = 8;
 
+pub trait FieldContainer<F: FieldElement>: Serialize + DeserializeOwned + Send {
+    fn new_with_capacity(capacity: usize) -> Self;
+    fn clear(&mut self);
+    fn push(&mut self, element: Mask<F>);
+    fn to_vec(self, layer: &[ParsedGate]) -> Vec<Mask<F>>;
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct GF2Container {
+    v: BitVec,
+}
+impl FieldContainer<GF2> for GF2Container {
+    fn new_with_capacity(capacity: usize) -> Self {
+        Self {
+            v: BitVec::with_capacity(capacity),
+        }
+    }
+    fn clear(&mut self) {
+        self.v.clear();
+    }
+    fn push(&mut self, element: Mask<GF2>) {
+        match element {
+            Mask::And(a, b) => {
+                self.v.push(a.is_one());
+                self.v.push(b.is_one());
+            }
+            Mask::WideAnd(a, wb) => {
+                self.v.push(a.is_one());
+                for i in 0..wb.len() {
+                    self.v.push(wb[i].is_one());
+                }
+            }
+        }
+    }
+    fn to_vec(self, layer: &[ParsedGate]) -> Vec<Mask<GF2>> {
+        let mut v = self.v.into_iter();
+        layer
+            .iter()
+            .filter(|g| !g.is_linear())
+            .map(|g| match g {
+                ParsedGate::AndGate {
+                    input: _,
+                    output: _,
+                } => {
+                    let a = GF2::from(v.next().unwrap());
+                    let b = GF2::from(v.next().unwrap());
+                    Mask::And(a, b)
+                }
+                ParsedGate::WideAndGate {
+                    input: _,
+                    input_bit: _,
+                    output: _,
+                } => {
+                    let bit = GF2::from(v.next().unwrap());
+                    let arr = core::array::from_fn(|_| GF2::from(v.next().unwrap()));
+                    Mask::WideAnd(bit, arr)
+                }
+                _ => panic!(),
+            })
+            .collect()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PackedGF2Container {
+    v: Vec<usize>,
+}
+
+impl FieldContainer<PackedGF2> for PackedGF2Container {
+    fn clear(&mut self) {
+        self.v.clear();
+    }
+    fn new_with_capacity(capacity: usize) -> Self {
+        Self {
+            v: Vec::with_capacity(capacity),
+        }
+    }
+    fn push(&mut self, element: Mask<PackedGF2>) {
+        match element {
+            Mask::And(a, b) => {
+                a.bits
+                    .as_raw_slice()
+                    .into_iter()
+                    .copied()
+                    .for_each(|a| self.v.push(a));
+                b.bits
+                    .as_raw_slice()
+                    .into_iter()
+                    .copied()
+                    .for_each(|b| self.v.push(b));
+            }
+            Mask::WideAnd(a, wb) => {
+                a.bits
+                    .as_raw_slice()
+                    .into_iter()
+                    .copied()
+                    .for_each(|a| self.v.push(a));
+                for i in 0..wb.len() {
+                    wb[i]
+                        .bits
+                        .as_raw_slice()
+                        .into_iter()
+                        .copied()
+                        .for_each(|b| self.v.push(b));
+                }
+            }
+        }
+    }
+    fn to_vec(self, layer: &[ParsedGate]) -> Vec<Mask<PackedGF2>> {
+        let mut v = self.v.into_iter();
+        layer
+            .iter()
+            .filter(|g| !g.is_linear())
+            .map(|g| match g {
+                ParsedGate::AndGate {
+                    input: _,
+                    output: _,
+                } => {
+                    let mut a = PackedGF2::zero();
+                    a.bits
+                        .as_raw_mut_slice()
+                        .iter_mut()
+                        .for_each(|part| *part = v.next().unwrap());
+                    let mut b = PackedGF2::zero();
+                    b.bits
+                        .as_raw_mut_slice()
+                        .iter_mut()
+                        .for_each(|part| *part = v.next().unwrap());
+                    Mask::And(a, b)
+                }
+                ParsedGate::WideAndGate {
+                    input: _,
+                    input_bit: _,
+                    output: _,
+                } => {
+                    let mut bit = PackedGF2::zero();
+                    bit.bits
+                        .as_raw_mut_slice()
+                        .iter_mut()
+                        .for_each(|part| *part = v.next().unwrap());
+                    let arr = core::array::from_fn(|_| {
+                        let mut b = PackedGF2::zero();
+                        b.bits
+                            .as_raw_mut_slice()
+                            .iter_mut()
+                            .for_each(|part| *part = v.next().unwrap());
+                        b
+                    });
+                    Mask::WideAnd(bit, arr)
+                }
+                _ => panic!(),
+            })
+            .collect()
+    }
+}
 #[async_trait]
 pub trait OfflineSemiHonestCorrelation<CF: FieldElement>: Serialize + DeserializeOwned {
     fn get_personal_circuit_input_wires_masks(&self) -> &[CF];
@@ -536,6 +692,7 @@ pub async fn multi_party_semi_honest_eval_circuit<
     E: MultiPartyEngine,
     PF: FieldElement,
     F: PackedField<PF, N>,
+    FC: FieldContainer<F>,
 >(
     engine: &mut E,
     circuit: &ParsedCircuit,
@@ -557,6 +714,7 @@ pub async fn multi_party_semi_honest_eval_circuit<
         circuit.input_wire_count + circuit.internal_wire_count + circuit.output_wire_count;
     let mut wires = vec![F::zero(); wires_num];
 
+    let time = Instant::now();
     let masked_input = obtain_masked_and_shared_input(
         engine,
         parties_input_pos_and_length,
@@ -566,13 +724,22 @@ pub async fn multi_party_semi_honest_eval_circuit<
         circuit,
     )
     .await;
+    println!(
+        "\t\tSemi Honest - obtain masked and shared input: {}ms",
+        time.elapsed().as_millis()
+    );
     let pre_shared_input = input_mask_shares;
     wires[0..circuit.input_wire_count].copy_from_slice(&pre_shared_input);
+    let time = Instant::now();
     let total_non_linear_gates: usize = circuit
         .gates
         .iter()
         .map(|layer| layer.iter().filter(|g| !g.is_linear()).count())
         .sum();
+    println!(
+        "\t\tSemi Honest - count non linear gates: {}ms",
+        time.elapsed().as_millis()
+    );
     let mut masked_output_wires = Vec::<F>::with_capacity(circuit.output_wire_count);
     let mut masked_gate_inputs = HashMap::<(usize, usize), Mask<F>>::with_capacity(
         total_non_linear_gates + circuit.output_wire_count,
@@ -581,7 +748,7 @@ pub async fn multi_party_semi_honest_eval_circuit<
         let non_linear_gates_in_layer = cur.iter().filter(|cur| !cur.is_linear()).count();
         usize::max(acc, non_linear_gates_in_layer)
     });
-    let mut msg_vec = Vec::with_capacity(max_layer_size);
+    let mut msg_vec = FC::new_with_capacity(max_layer_size);
     for (layer_idx, layer) in circuit.gates.iter().enumerate() {
         let mut and_gates_processed = 0;
         for (gate_idx, gate) in layer.iter().enumerate() {
@@ -657,13 +824,14 @@ pub async fn multi_party_semi_honest_eval_circuit<
         msg_vec.clear();
 
         for _ in 0..number_of_peers {
-            let (recv_vec, pid): (Vec<Mask<F>>, PartyId) = engine.recv().await.unwrap();
+            let (recv_vec, pid): (FC, PartyId) = engine.recv().await.unwrap();
             // let (msg, _): (EvalMessage<F>, PartyId) = engine.recv().await.unwrap();
+            let gate_masks = recv_vec.to_vec(layer);
             for ((gate_idx, gate), opening) in layer
                 .iter()
                 .enumerate()
                 .filter(|(_, g)| !g.is_linear())
-                .zip(recv_vec.into_iter())
+                .zip(gate_masks)
             {
                 let beaver_triple = multi_party_beaver_triples
                     .get(&(layer_idx, gate_idx))
@@ -781,7 +949,10 @@ mod tests {
     use rand::thread_rng;
     use tokio::time::Instant;
 
-    use super::bristol_fashion::{parse_bristol, ParsedCircuit};
+    use super::{
+        bristol_fashion::{parse_bristol, ParsedCircuit},
+        FieldContainer, GF2Container, PackedGF2Container,
+    };
     use crate::{
         circuit_eval::{
             bristol_fashion::ParsedGate,
@@ -796,7 +967,7 @@ mod tests {
         uc_tags::UCTag,
     };
 
-    async fn test_boolean_circuit<const N: usize, F: PackedField<GF2, N>>(
+    async fn test_boolean_circuit<const N: usize, F: PackedField<GF2, N>, FC: FieldContainer<F>>(
         circuit: ParsedCircuit,
         input: &[F],
         party_count: usize,
@@ -905,7 +1076,7 @@ mod tests {
                     let parties_input_lengths = parties_input_lengths.clone();
                     tokio::spawn(async move {
                         let n_party_correlation = n_party_correlation;
-                        multi_party_semi_honest_eval_circuit(
+                        multi_party_semi_honest_eval_circuit::<N, _, _, _, FC>(
                             &mut engine,
                             &circuit,
                             &input,
@@ -1037,10 +1208,10 @@ mod tests {
             GF2::zero()
         );
 
-        let input = vec![PackedGF2::one(), PackedGF2::zero()];
-        let output = test_boolean_circuit(parsed_circuit, &input, 2).await;
+        let input = vec![GF2::one(), GF2::zero()];
+        let output = test_boolean_circuit::<1, GF2, GF2Container>(parsed_circuit, &input, 2).await;
 
-        assert_eq!(output[0], PackedGF2::one());
+        assert_eq!(output[0], GF2::one());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
@@ -1073,7 +1244,7 @@ mod tests {
         );
 
         let input = vec![GF2::one(); 129];
-        let output = test_boolean_circuit(parsed_circuit, &input, 7).await;
+        let output = test_boolean_circuit::<1, GF2, GF2Container>(parsed_circuit, &input, 7).await;
 
         assert_eq!(output, vec![GF2::one(); 128]);
     }
@@ -1089,7 +1260,12 @@ mod tests {
             let parsed_circuit = super::super::circuit_from_file(path).unwrap();
 
             let input = vec![PackedGF2::one(); parsed_circuit.input_wire_count];
-            test_boolean_circuit(parsed_circuit, &input, 2).await;
+            test_boolean_circuit::<{ PackedGF2::BITS }, _, PackedGF2Container>(
+                parsed_circuit,
+                &input,
+                2,
+            )
+            .await;
         })
     }
 }

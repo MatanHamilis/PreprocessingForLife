@@ -591,6 +591,6 @@ mod test {
         let v = try_join_all(verifiers_futures);
         let (_, v) = join!(prover_future, v);
         v.unwrap();
-        router_handle.await.unwrap().unwrap()
+        router_handle.await.unwrap().unwrap();
     }
 }
