@@ -18,9 +18,9 @@ use crate::engine::{MultiPartyEngine, PartyId};
 use crate::fields::{FieldElement, PackedField, PackedGF2, GF128, GF2};
 use crate::pcg::{FullPcgKey, PackedOfflineFullPcgKey, RegularBeaverTriple, WideBeaverTriple};
 
-const PPRF_COUNT: usize = 44;
-const PPRF_DEPTH: usize = 5;
-const CODE_WEIGHT: usize = 8;
+const PPRF_COUNT: usize = 50;
+const PPRF_DEPTH: usize = 20;
+const CODE_WEIGHT: usize = 7;
 
 pub trait FieldContainer<F: FieldElement>: Serialize + DeserializeOwned + Send {
     fn new_with_capacity(capacity: usize) -> Self;
@@ -728,6 +728,7 @@ pub async fn multi_party_semi_honest_eval_circuit<
         "\t\tSemi Honest - obtain masked and shared input: {}ms",
         time.elapsed().as_millis()
     );
+    let overall_timer = Instant::now();
     let pre_shared_input = input_mask_shares;
     wires[0..circuit.input_wire_count].copy_from_slice(&pre_shared_input);
     let time = Instant::now();
@@ -781,6 +782,7 @@ pub async fn multi_party_semi_honest_eval_circuit<
                     // engine.broadcast(msg);
 
                     let mask = Mask::And(x - a, y - b);
+                    and_gates_processed += 1;
                     msg_vec.push(mask);
                     assert!(masked_gate_inputs
                         .insert((layer_idx, gate_idx), mask)

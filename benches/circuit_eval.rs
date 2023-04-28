@@ -210,8 +210,6 @@ fn bench_malicious_circuit<
     parties: usize,
     base_port: u16,
 ) {
-    let dealer_id: PartyId = (parties as PartyId + 1) as PartyId;
-
     let mut two = GF128::zero();
     two.set_bit(true, 1);
     let three = two + GF128::one();

@@ -14,6 +14,13 @@ use bincode::de;
 use futures::future::try_join_all;
 use rand::{CryptoRng, SeedableRng};
 use rand_core::RngCore;
+use rayon::{
+    prelude::{
+        IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator,
+        ParallelIterator,
+    },
+    slice::{ParallelSlice, ParallelSliceMut},
+};
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 use tokio::join;
@@ -195,28 +202,59 @@ pub struct OfflineSenderPcgKey {
 
 impl From<&PackedOfflineSenderPcgKey> for OfflineSenderPcgKey {
     fn from(value: &PackedOfflineSenderPcgKey) -> Self {
-        let n = value
-            .receivers
-            .iter()
-            .map(|v| 1 << v.0.subtree_seeds.len())
-            .sum();
+        let pprf_depth = value.receivers[0].0.subtree_seeds.len();
+        for i in 0..value.receivers.len() {
+            assert_eq!(value.receivers[i].0.subtree_seeds.len(), pprf_depth);
+        }
+        let n = value.receivers.len() * (1 << pprf_depth);
         let mut evals = Vec::with_capacity(n);
+        unsafe {
+            evals.set_len(n);
+        }
         let mut acc = GF128::zero();
         let mut bin_acc = GF2::zero();
-        for (mut pprf, punctured_val) in value
+        let mut sums = vec![GF128::zero(); value.receivers.len()];
+        value
             .receivers
-            .iter()
-            .map(|v| (PprfReceiver::from(&v.0), v.1))
-        {
-            pprf.evals[pprf.punctured_index] = punctured_val;
-            for (idx, v) in pprf.evals.into_iter().enumerate() {
-                acc += v;
-                if idx == pprf.punctured_index {
-                    bin_acc.flip();
+            .par_iter()
+            .zip(evals.par_chunks_exact_mut(1 << pprf_depth))
+            .zip(sums.par_iter_mut())
+            .enumerate()
+            .for_each(|(idx, ((v, evals), sum_cell))| {
+                let (mut pprf, punctured_val) = (PprfReceiver::from(&v.0), v.1);
+                pprf.evals[pprf.punctured_index] = punctured_val;
+                let mut sum = GF128::zero();
+                let mut bit = (idx & 1) != 0;
+                for ((idx, d), v) in evals.iter_mut().enumerate().zip(pprf.evals.into_iter()) {
+                    sum += v;
+                    if idx == pprf.punctured_index {
+                        bit = !bit;
+                    }
+                    *d = (sum, GF2::from(bit));
                 }
-                evals.push((acc, bin_acc));
-            }
+                *sum_cell = sum;
+                // for (idx, v) in pprf.evals.into_iter().enumerate() {
+                //     acc += v;
+                //     if idx == pprf.punctured_index {
+                //         bin_acc.flip();
+                //     }
+                //     evals[idx] = ((acc, bin_acc));
+                // }
+            });
+        // prefix sum the sums (non inclusively)
+        let mut sum = GF128::zero();
+        for i in 0..sums.len() {
+            (sum, sums[i]) = (sum + sums[i], sum);
         }
+        // disperse the sum
+        evals
+            .par_chunks_exact_mut(1 << pprf_depth)
+            .zip(sums.par_iter())
+            .for_each(|(chunk, prefix_sum)| {
+                for c in chunk {
+                    c.0 += prefix_sum;
+                }
+            });
         OfflineSenderPcgKey { evals }
     }
 }
