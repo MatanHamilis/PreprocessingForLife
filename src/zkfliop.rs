@@ -360,6 +360,7 @@ pub async fn verifier<F: FieldElement>(
     three: F,
     four: F,
 ) {
+    let mut total_elements_sent = 0;
     // Init
     let (_, round_count) = compute_round_count_and_m(z_hat.len());
     debug_assert!(z_hat.iter().skip(2).step_by(2).all(|v| v.is_zero()));

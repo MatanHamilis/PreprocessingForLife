@@ -190,20 +190,22 @@ impl<
             _phantom: _,
         } = self;
         let timer = Instant::now();
-        let multi_party_beaver_triples = semi_honest_offline_correlation
-            .get_multiparty_beaver_triples(engine, circuit.as_ref())
-            .await;
+        let (regular_multi_party_beaver_triples, wide_multi_party_beaver_triples) =
+            semi_honest_offline_correlation
+                .get_multiparty_beaver_triples(engine, circuit.as_ref())
+                .await;
         println!("Getting triples took: {}", timer.elapsed().as_millis());
         let input_wire_mask_shares = input_wire_mask_shares.clone();
         let timer = Instant::now();
-        let (masked_input_wires, masked_gate_inputs, masked_outputs) =
+        let (masked_input_wires, masked_gate_inputs, wide_masked_gate_inputs, masked_outputs) =
             semi_honest::multi_party_semi_honest_eval_circuit::<PACKING, _, _, _, FC>(
                 engine,
                 circuit.as_ref(),
                 &my_input,
                 &my_input_mask,
                 input_wire_mask_shares,
-                &multi_party_beaver_triples,
+                &regular_multi_party_beaver_triples,
+                &wide_multi_party_beaver_triples,
                 &output_wire_mask_shares,
                 parties_input_pos_and_lengths,
             )
@@ -222,7 +224,9 @@ impl<
             four,
             &masked_input_wires,
             &masked_gate_inputs,
-            &multi_party_beaver_triples,
+            &wide_masked_gate_inputs,
+            &regular_multi_party_beaver_triples,
+            &wide_multi_party_beaver_triples,
             &masked_outputs,
             circuit.as_ref(),
             offline_verification_material,

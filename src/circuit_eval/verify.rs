@@ -1,4 +1,9 @@
-use std::{collections::HashMap, mem::MaybeUninit, sync::Arc, time};
+use std::{
+    collections::HashMap,
+    mem::{transmute, MaybeUninit},
+    sync::Arc,
+    time,
+};
 
 use aes_prng::AesRng;
 use futures::{future::try_join_all, join};
@@ -19,20 +24,35 @@ use crate::{
 
 use super::{
     bristol_fashion::{ParsedCircuit, ParsedGate},
-    semi_honest::{BeaverTriple, Mask, OfflineSemiHonestCorrelation},
+    semi_honest::{OfflineSemiHonestCorrelation, RegularMask, WideMask},
 };
 
 #[derive(Debug)]
-enum InputWireCoefficients<const PACKING: usize, F: FieldElement> {
-    And([F; PACKING], [F; PACKING]),
-    WideAnd([F; PACKING], [[F; 128]; PACKING]),
-}
+pub struct RegularInputWireCoefficient<const PACKING: usize, F: FieldElement>(
+    [F; PACKING],
+    [F; PACKING],
+);
+#[derive(Debug)]
+pub struct WideInputWireCoefficient<const PACKING: usize, F: FieldElement>(
+    [F; PACKING],
+    [[F; 128]; PACKING],
+);
+
+// #[derive(Debug)]
+// enum InputWireCoefficients<const PACKING: usize, F: FieldElement> {
+//     And([F; PACKING], [F; PACKING]),
+//     WideAnd([F; PACKING], [[F; 128]; PACKING]),
+// }
 
 #[derive(Debug)]
-enum GateGamma<const PACKING: usize, F: FieldElement> {
-    And([F; PACKING]),
-    WideAnd([[F; 128]; PACKING]),
-}
+pub struct RegularGateGamma<const PACKING: usize, F: FieldElement>([F; PACKING]);
+#[derive(Debug)]
+pub struct WideGateGamma<const PACKING: usize, F: FieldElement>([[F; 128]; PACKING]);
+// #[derive(Debug)]
+// enum GateGamma<const PACKING: usize, F: FieldElement> {
+//     And([F; PACKING]),
+//     WideAnd([[F; 128]; PACKING]),
+// }
 
 fn compute_gammas_alphas<
     const PACKING: usize,
@@ -42,8 +62,10 @@ fn compute_gammas_alphas<
     alpha: &[u8; 16],
     circuit: &ParsedCircuit,
 ) -> (
-    Vec<(usize, usize, InputWireCoefficients<PACKING, F>)>,
-    Vec<(usize, usize, GateGamma<PACKING, F>)>,
+    Vec<(usize, usize, RegularInputWireCoefficient<PACKING, F>)>,
+    Vec<(usize, usize, WideInputWireCoefficient<PACKING, F>)>,
+    Vec<(usize, usize, RegularGateGamma<PACKING, F>)>,
+    Vec<(usize, usize, WideGateGamma<PACKING, F>)>,
     Vec<[F; PACKING]>,
     Vec<[F; PACKING]>,
     F,
@@ -56,9 +78,15 @@ fn compute_gammas_alphas<
             s
         })
         .collect();
-    let alpha = *alpha;
-    let mut alphas = Vec::<(usize, usize, InputWireCoefficients<PACKING, F>)>::new();
-    let mut gammas = Vec::<(usize, usize, GateGamma<PACKING, F>)>::new();
+    let non_linear_gates = circuit.total_non_linear_gates();
+    let mut alphas = Vec::<(usize, usize, RegularInputWireCoefficient<PACKING, F>)>::with_capacity(
+        non_linear_gates,
+    );
+    let mut wide_alphas = Vec::<(usize, usize, WideInputWireCoefficient<PACKING, F>)>::new();
+    let mut gammas =
+        Vec::<(usize, usize, RegularGateGamma<PACKING, F>)>::with_capacity(non_linear_gates);
+    let mut wide_gammas =
+        Vec::<(usize, usize, WideGateGamma<PACKING, F>)>::with_capacity(non_linear_gates);
 
     let mut weights_per_wire =
         vec![
@@ -76,6 +104,7 @@ fn compute_gammas_alphas<
     let output_wire_threshold = circuit.input_wire_count + circuit.internal_wire_count;
     let alphas_outputs: Vec<_> = output_wires.iter().map(|a| *a).collect();
 
+    let time = Instant::now();
     // Next, distribute alphas for the relevant gates' input wires.
     circuit
         .gates
@@ -87,51 +116,45 @@ fn compute_gammas_alphas<
             for (gate_idx, gate) in layer.iter().enumerate() {
                 let c = match gate {
                     ParsedGate::AndGate { input, output: _ } => {
-                        let mut a: [F; PACKING] = unsafe {
-                            MaybeUninit::array_assume_init(MaybeUninit::<F>::uninit_array())
-                        };
-                        let mut b: [F; PACKING] = unsafe {
-                            MaybeUninit::array_assume_init(MaybeUninit::<F>::uninit_array())
-                        };
+                        let a = core::array::from_fn(|_| F::random(&mut rng));
+                        let b = core::array::from_fn(|_| F::random(&mut rng));
                         for i in 0..PACKING {
-                            a[i] = F::random(&mut rng);
-                            b[i] = F::random(&mut rng);
                             weights_per_wire[input[0]][i] += a[i];
                             weights_per_wire[input[1]][i] += b[i];
                         }
-                        InputWireCoefficients::And(a, b)
+                        alphas.push((layer_idx, gate_idx, RegularInputWireCoefficient(a, b)));
                     }
                     ParsedGate::WideAndGate {
                         input,
                         input_bit,
                         output: _,
                     } => {
-                        let mut bits: [F; PACKING] = unsafe {
-                            MaybeUninit::array_assume_init(MaybeUninit::<F>::uninit_array())
-                        };
-                        let mut wides: [[F; 128]; PACKING] = unsafe {
-                            MaybeUninit::array_assume_init(MaybeUninit::<[F; 128]>::uninit_array())
-                        };
+                        let mut bits: [F; PACKING] = core::array::from_fn(|_| F::random(&mut rng));
+                        let mut wides: [[F; 128]; PACKING] =
+                            core::array::from_fn(|_| core::array::from_fn(|_| F::random(&mut rng)));
                         for pack in 0..PACKING {
-                            let bit_coefficient = F::random(&mut rng);
-                            bits[pack] = bit_coefficient;
-                            weights_per_wire[*input_bit][pack] += bit_coefficient;
-                            let wide_coefficents: [F; 128] = core::array::from_fn(|i| {
-                                let cur = F::random(&mut rng);
-                                weights_per_wire[input[i]][pack] += cur;
-                                cur
-                            });
-                            wides[pack] = wide_coefficents;
+                            weights_per_wire[*input_bit][pack] += bits[pack];
+                            for i in 0..128 {
+                                weights_per_wire[input[i]][pack] += wides[pack][i];
+                            }
                         }
-                        InputWireCoefficients::WideAnd(bits, wides)
+                        wide_alphas.push((
+                            layer_idx,
+                            gate_idx,
+                            WideInputWireCoefficient(bits, wides),
+                        ));
                     }
                     _ => continue,
                 };
-                alphas.push((layer_idx, gate_idx, c));
             }
         });
+    println!(
+        "\t\tVerify - Alphas initialization: {}ms",
+        time.elapsed().as_millis()
+    );
 
     let mut total_constant_addition: F = F::zero();
+    let time = Instant::now();
     // Propagate alphas to compute gammas.
     for (layer_idx, layer) in circuit.gates.iter().enumerate().rev() {
         for (gate_idx, gate) in layer.iter().enumerate().rev() {
@@ -158,7 +181,7 @@ fn compute_gammas_alphas<
                     gammas.push((
                         layer_idx,
                         gate_idx,
-                        GateGamma::And(weights_per_wire[*output]),
+                        RegularGateGamma(weights_per_wire[*output]),
                     ));
                 }
                 ParsedGate::WideAndGate {
@@ -166,18 +189,24 @@ fn compute_gammas_alphas<
                     input_bit: _,
                     output,
                 } => {
-                    let g = GateGamma::WideAnd(core::array::from_fn(|pack| {
+                    let g = WideGateGamma(core::array::from_fn(|pack| {
                         core::array::from_fn(|i| weights_per_wire[output[i]][pack])
                     }));
-                    gammas.push((layer_idx, gate_idx, g));
+                    wide_gammas.push((layer_idx, gate_idx, g));
                 }
             }
         }
     }
+    println!(
+        "\t\tVerify: Propagation took: {}ms",
+        time.elapsed().as_millis()
+    );
     let gammas_inputs_wires = weights_per_wire[..circuit.input_wire_count].to_vec();
     (
         alphas,
+        wide_alphas,
         gammas,
+        wide_gammas,
         alphas_outputs,
         gammas_inputs_wires,
         total_constant_addition,
@@ -189,31 +218,36 @@ fn compute_gamma_i<
     CF: FieldElement,
     F: FieldElement + From<CF>,
 >(
-    gammas: &[(usize, usize, GateGamma<PACKING, F>)],
-    mask_shares: &HashMap<(usize, usize), BeaverTriple<PF>>,
-    masked_values: &HashMap<(usize, usize), Mask<PF>>,
+    gammas: &[(usize, usize, RegularGateGamma<PACKING, F>)],
+    wide_gammas: &[(usize, usize, WideGateGamma<PACKING, F>)],
+    mask_shares: &HashMap<(usize, usize), RegularBeaverTriple<PF>>,
+    wide_mask_shares: &HashMap<(usize, usize), WideBeaverTriple<PF>>,
+    masked_values: &HashMap<(usize, usize), RegularMask<PF>>,
+    wide_masked_values: &HashMap<(usize, usize), WideMask<PF>>,
 ) -> F {
-    gammas
+    let regular: F = gammas
         .iter()
         .map(|(layer_idx, gate_idx, gamma)| {
             let mask = mask_shares.get(&(*layer_idx, *gate_idx)).unwrap();
             let masked_values = masked_values.get(&(*layer_idx, *gate_idx)).unwrap();
             match (gamma, mask, masked_values) {
-                (
-                    GateGamma::And(g),
-                    BeaverTriple::Regular(RegularBeaverTriple(m_a, m_b, _)),
-                    Mask::And(v_a, v_b),
-                ) => {
+                (RegularGateGamma(g), RegularBeaverTriple(m_a, m_b, _), RegularMask(v_a, v_b)) => {
                     let bit = *m_a * *v_b + *v_a * *m_b;
                     (0..PACKING)
                         .map(|pack| g[pack] * F::from(bit.get_element(pack)))
                         .sum()
                 }
-                (
-                    GateGamma::WideAnd(g),
-                    BeaverTriple::Wide(WideBeaverTriple(m_a, m_wb, _)),
-                    Mask::WideAnd(v_a, v_wb),
-                ) => {
+                _ => panic!(),
+            }
+        })
+        .sum();
+    let wide: F = wide_gammas
+        .iter()
+        .map(|(layer_idx, gate_idx, gamma)| {
+            let mask = wide_mask_shares.get(&(*layer_idx, *gate_idx)).unwrap();
+            let masked_values = wide_masked_values.get(&(*layer_idx, *gate_idx)).unwrap();
+            match (gamma, mask, masked_values) {
+                (WideGateGamma(g), WideBeaverTriple(m_a, m_wb, _), WideMask(v_a, v_wb)) => {
                     let mut sum = F::zero();
                     for pack in 0..PACKING {
                         for i in 0..g.len() {
@@ -230,7 +264,8 @@ fn compute_gamma_i<
                 _ => panic!(),
             }
         })
-        .sum()
+        .sum();
+    regular + wide
 }
 fn dot_product_gamma<
     const PACKING: usize,
@@ -238,8 +273,10 @@ fn dot_product_gamma<
     CF: FieldElement,
     F: FieldElement + From<CF>,
 >(
-    gammas: &[(usize, usize, GateGamma<PACKING, F>)],
-    masks_gates: &HashMap<(usize, usize), Mask<PF>>,
+    gammas: &[(usize, usize, RegularGateGamma<PACKING, F>)],
+    wide_gammas: &[(usize, usize, WideGateGamma<PACKING, F>)],
+    masks_gates: &HashMap<(usize, usize), RegularMask<PF>>,
+    wide_masks_gates: &HashMap<(usize, usize), WideMask<PF>>,
     input_wires_gammas: &[[F; PACKING]],
     input_wires_masks: &[PF],
 ) -> F {
@@ -252,18 +289,27 @@ fn dot_product_gamma<
                 .sum()
         })
         .sum();
-    let gates_dp = gammas
+    let regular_gates_dp = gammas
         .iter()
         .map(|(layer_idx, gate_idx, gamma)| {
             let mask = masks_gates.get(&(*layer_idx, *gate_idx)).unwrap();
             match (gamma, mask) {
-                (GateGamma::And(g), Mask::And(m_a, m_b)) => {
+                (RegularGateGamma(g), RegularMask(m_a, m_b)) => {
                     let m_a_m_b = *m_a * *m_b;
                     (0..PACKING)
                         .map(|pack| g[pack] * F::from(m_a_m_b.get_element(pack)))
                         .sum()
                 }
-                (GateGamma::WideAnd(g), Mask::WideAnd(m_a, m_wb)) => {
+                _ => panic!(),
+            }
+        })
+        .sum();
+    let wides_gates_dp = wide_gammas
+        .iter()
+        .map(|(layer_idx, gate_idx, gamma)| {
+            let mask = wide_masks_gates.get(&(*layer_idx, *gate_idx)).unwrap();
+            match (gamma, mask) {
+                (WideGateGamma(g), WideMask(m_a, m_wb)) => {
                     let mut sum = F::zero();
                     for i in 0..g.len() {
                         let m_a_m_b = m_wb[i] * *m_a;
@@ -278,7 +324,7 @@ fn dot_product_gamma<
             }
         })
         .sum();
-    input_dp + gates_dp
+    input_dp + regular_gates_dp + wides_gates_dp
 }
 fn dot_product_alpha<
     const N: usize,
@@ -286,18 +332,20 @@ fn dot_product_alpha<
     F: FieldElement + From<CF>,
     PF: PackedField<CF, N>,
 >(
-    alphas_gate: &[(usize, usize, InputWireCoefficients<N, F>)],
+    alphas_gate: &[(usize, usize, (RegularInputWireCoefficient<N, F>))],
+    wide_alphas_gate: &[(usize, usize, WideInputWireCoefficient<N, F>)],
     alphas_outputs: &[[F; N]],
-    masks_gates: &HashMap<(usize, usize), Mask<PF>>,
+    regular_masks_gates: &HashMap<(usize, usize), RegularMask<PF>>,
+    wide_masks_gates: &HashMap<(usize, usize), WideMask<PF>>,
     masks_outputs: &[PF],
 ) -> F {
     // Sigma alpha_w r_w
-    let sigma_alpha_w_r_w_gates: F = alphas_gate
+    let regular_sigma_alpha_w_r_w_gates: F = alphas_gate
         .iter()
         .map(|(layer_id, gate_id, input_wire_coefficients)| {
-            let mask = masks_gates.get(&(*layer_id, *gate_id)).unwrap();
+            let mask = regular_masks_gates.get(&(*layer_id, *gate_id)).unwrap();
             match (mask, input_wire_coefficients) {
-                (Mask::And(a, b), InputWireCoefficients::And(c_a, c_b)) => {
+                (RegularMask(a, b), RegularInputWireCoefficient(c_a, c_b)) => {
                     (0..N)
                         .map(|i| {
                             c_a[i] * F::from(a.get_element(i)) + c_b[i] * F::from(b.get_element(i))
@@ -305,7 +353,16 @@ fn dot_product_alpha<
                         .sum()
                     // * c_a * F::from(*a) + *c_b * F::from(*b)
                 }
-                (Mask::WideAnd(a, wb), InputWireCoefficients::WideAnd(c_a, c_wb)) => {
+                _ => panic!(),
+            }
+        })
+        .sum();
+    let wide_sigma_alpha_w_r_w_gates: F = wide_alphas_gate
+        .iter()
+        .map(|(layer_id, gate_id, input_wire_coefficients)| {
+            let mask = wide_masks_gates.get(&(*layer_id, *gate_id)).unwrap();
+            match (mask, input_wire_coefficients) {
+                (WideMask(a, wb), WideInputWireCoefficient(c_a, c_wb)) => {
                     let mut sum = F::zero();
                     for pack in 0..N {
                         sum += c_a[pack] * F::from(a.get_element(pack));
@@ -328,7 +385,7 @@ fn dot_product_alpha<
                 .sum()
         })
         .sum();
-    sigma_alpha_w_r_w_gates + sigma_alpha_w_r_w_outputs
+    wide_sigma_alpha_w_r_w_gates + regular_sigma_alpha_w_r_w_gates + sigma_alpha_w_r_w_outputs
 }
 pub fn statement_length<const PACK: usize>(circuit: &ParsedCircuit) -> usize {
     let mut statement_length: usize = circuit
@@ -360,9 +417,12 @@ fn construct_statement<
 >(
     masked_gamma_i: Option<F>,
     gamma_i_mask: Option<F>,
-    gate_gammas: &[(usize, usize, GateGamma<N, F>)],
-    masked_inputs: Option<&HashMap<(usize, usize), Mask<PF>>>,
-    mask_shares: Option<&HashMap<(usize, usize), BeaverTriple<PF>>>,
+    regular_gate_gammas: &[(usize, usize, RegularGateGamma<N, F>)],
+    wide_gate_gammas: &[(usize, usize, WideGateGamma<N, F>)],
+    regular_masked_inputs: Option<&HashMap<(usize, usize), RegularMask<PF>>>,
+    wide_masked_inputs: Option<&HashMap<(usize, usize), WideMask<PF>>>,
+    regular_mask_shares: Option<&HashMap<(usize, usize), RegularBeaverTriple<PF>>>,
+    wide_mask_shares: Option<&HashMap<(usize, usize), WideBeaverTriple<PF>>>,
     circuit: &ParsedCircuit,
 ) -> Vec<F> {
     let statement_length: usize = statement_length::<N>(circuit);
@@ -375,20 +435,26 @@ fn construct_statement<
     let mut iter_masks = statement.iter_mut().skip(2).step_by(2);
 
     // Initialize mask shares
-    if mask_shares.is_none() {
+    if regular_mask_shares.is_none() {
         iter_masks.for_each(|v| *v = F::zero());
     } else {
-        let gate_masks = mask_shares.unwrap();
-        for (layer_idx, gate_idx, _) in gate_gammas {
+        let gate_masks = regular_mask_shares.unwrap();
+        for (layer_idx, gate_idx, _) in regular_gate_gammas {
             let gate_mask = gate_masks.get(&(*layer_idx, *gate_idx)).unwrap();
             match gate_mask {
-                BeaverTriple::Regular(RegularBeaverTriple(m_a, m_b, _)) => {
+                RegularBeaverTriple(m_a, m_b, _) => {
                     for i in 0..N {
                         *iter_masks.next().unwrap() = F::from(m_b.get_element(i));
                         *iter_masks.next().unwrap() = F::from(m_a.get_element(i));
                     }
                 }
-                BeaverTriple::Wide(WideBeaverTriple(m_a, m_wb, _)) => {
+            }
+        }
+        let gate_masks = wide_mask_shares.unwrap();
+        for (layer_idx, gate_idx, _) in wide_gate_gammas {
+            let gate_mask = gate_masks.get(&(*layer_idx, *gate_idx)).unwrap();
+            match gate_mask {
+                WideBeaverTriple(m_a, m_wb, _) => {
                     for pack in 0..N {
                         let v_a = F::from(m_a.get_element(pack));
                         for i in 0..128 {
@@ -403,14 +469,14 @@ fn construct_statement<
 
     // Initialize masked values.
     let mut iter_masked_values = statement.iter_mut().skip(1).step_by(2);
-    if masked_inputs.is_none() {
+    if regular_masked_inputs.is_none() {
         iter_masked_values.for_each(|v| *v = F::zero());
     } else {
-        let gate_masked_inputs = masked_inputs.unwrap();
-        for (layer_idx, gate_idx, gate_gamma) in gate_gammas {
+        let gate_masked_inputs = regular_masked_inputs.unwrap();
+        for (layer_idx, gate_idx, gate_gamma) in regular_gate_gammas {
             let gate_mask_input = gate_masked_inputs.get(&(*layer_idx, *gate_idx)).unwrap();
             match (gate_mask_input, gate_gamma) {
-                (Mask::And(m_a, m_b), GateGamma::And(g)) => {
+                (RegularMask(m_a, m_b), RegularGateGamma(g)) => {
                     for pack in 0..N {
                         *iter_masked_values.next().unwrap() =
                             g[pack] * F::from(m_a.get_element(pack));
@@ -418,7 +484,14 @@ fn construct_statement<
                             g[pack] * F::from(m_b.get_element(pack));
                     }
                 }
-                (Mask::WideAnd(m_a, m_wb), GateGamma::WideAnd(gs)) => {
+                _ => panic!(),
+            }
+        }
+        let gate_masked_inputs = wide_masked_inputs.unwrap();
+        for (layer_idx, gate_idx, gate_gamma) in wide_gate_gammas {
+            let gate_mask_input = gate_masked_inputs.get(&(*layer_idx, *gate_idx)).unwrap();
+            match (gate_mask_input, gate_gamma) {
+                (WideMask(m_a, m_wb), WideGateGamma(gs)) => {
                     for pack in 0..N {
                         let v_a = F::from(m_a.get_element(pack));
                         for i in 0..gs.len() {
@@ -496,8 +569,10 @@ pub async fn verify_parties<
     three: F,
     four: F,
     input_wire_masked_values: &[PF],
-    masked_values: &HashMap<(usize, usize), Mask<PF>>,
-    masks_shares: &HashMap<(usize, usize), BeaverTriple<PF>>,
+    regular_masked_values: &HashMap<(usize, usize), RegularMask<PF>>,
+    wide_masked_values: &HashMap<(usize, usize), WideMask<PF>>,
+    regular_masks_shares: &HashMap<(usize, usize), RegularBeaverTriple<PF>>,
+    wide_masks_shares: &HashMap<(usize, usize), WideBeaverTriple<PF>>,
     output_wire_masked_values: &[PF],
     circuit: &ParsedCircuit,
     offline_material: &OfflineCircuitVerify<F>,
@@ -528,8 +603,15 @@ pub async fn verify_parties<
     // We therefore have to "change" the representation of the circuit in a deterministic way so that each wire fed into a multiplication / output wire has a different idx.
 
     let timer = Instant::now();
-    let (alphas, gammas, alphas_output_wires, gammas_input_wires, total_constant_addition) =
-        compute_gammas_alphas::<PACKING, _, PF>(&alpha, circuit);
+    let (
+        alphas,
+        wide_alphas,
+        gammas,
+        wide_gammas,
+        alphas_output_wires,
+        gammas_input_wires,
+        total_constant_addition,
+    ) = compute_gammas_alphas::<PACKING, _, PF>(&alpha, circuit);
     println!(
         "\t\tVerify - compute gammas alphas took: {}ms",
         timer.elapsed().as_millis()
@@ -538,13 +620,17 @@ pub async fn verify_parties<
     // Compute Lambda
     let alpha_x_hat = dot_product_alpha(
         &alphas,
+        &wide_alphas,
         &alphas_output_wires,
-        masked_values,
+        regular_masked_values,
+        wide_masked_values,
         output_wire_masked_values,
     );
     let gamma_x_hat = dot_product_gamma(
         &gammas,
-        &masked_values,
+        &wide_gammas,
+        &regular_masked_values,
+        &wide_masked_values,
         &gammas_input_wires,
         input_wire_masked_values,
     );
@@ -552,7 +638,14 @@ pub async fn verify_parties<
     let lambda = alpha_x_hat - gamma_x_hat - total_constant_addition;
 
     // Compute Gamma_i
-    let gamma_i = compute_gamma_i(&gammas, &masks_shares, &masked_values);
+    let gamma_i = compute_gamma_i(
+        &gammas,
+        &wide_gammas,
+        &regular_masks_shares,
+        &wide_masks_shares,
+        &regular_masked_values,
+        &wide_masked_values,
+    );
     let masked_gamma_i = gamma_i - *s_i;
     // Send Gamma_i
     engine.broadcast(masked_gamma_i);
@@ -573,15 +666,21 @@ pub async fn verify_parties<
         Some(masked_gamma_i),
         Some(*s_i),
         &gammas,
-        Some(&masked_values),
-        Some(&masks_shares),
+        &wide_gammas,
+        Some(&regular_masked_values),
+        Some(&wide_masked_values),
+        Some(&regular_masks_shares),
+        Some(&wide_masks_shares),
         circuit,
     );
     let verify_statement = Arc::new(construct_statement(
         None,
         None,
         &gammas,
-        Some(&masked_values),
+        &wide_gammas,
+        Some(&regular_masked_values),
+        Some(&wide_masked_values),
+        None,
         None,
         circuit,
     ));
@@ -699,6 +798,7 @@ pub async fn offline_verify_dealer<
         .map(|layer| layer.iter().filter(|gate| !gate.is_linear()).count())
         .sum();
     let mut total_gate_input_masks = Vec::with_capacity(total_gates);
+    let mut wide_total_gate_input_masks = Vec::new();
     circuit
         .gates
         .iter()
@@ -709,34 +809,47 @@ pub async fn offline_verify_dealer<
                     ParsedGate::AndGate {
                         input: _,
                         output: _,
-                    } => Mask::And(PF::zero(), PF::zero()),
+                    } => total_gate_input_masks
+                        .push(((layer_idx, gate_idx), RegularMask(PF::zero(), PF::zero()))),
                     ParsedGate::WideAndGate {
                         input: _,
                         input_bit: _,
                         output: _,
-                    } => Mask::WideAnd(PF::zero(), [PF::zero(); 128]),
+                    } => wide_total_gate_input_masks.push((
+                        (layer_idx, gate_idx),
+                        WideMask(PF::zero(), [PF::zero(); 128]),
+                    )),
                     _ => return,
                 };
-                total_gate_input_masks.push(((layer_idx, gate_idx), zero_mask));
             })
         });
     for (pid, sho) in sho {
-        let gate_input_masks = sho.get_gates_input_wires_masks(circuit);
-        debug_assert_eq!(gate_input_masks.len(), total_gate_input_masks.len());
+        let (regular_gate_input_masks, wide_gate_input_masks) =
+            sho.get_gates_input_wires_masks(circuit);
+        debug_assert_eq!(regular_gate_input_masks.len(), total_gate_input_masks.len());
         total_gate_input_masks
             .iter_mut()
-            .zip(gate_input_masks.iter())
+            .zip(regular_gate_input_masks.iter())
             .for_each(|(a, b)| {
                 debug_assert_eq!(a.0, b.0);
                 match (a, b) {
-                    ((_, Mask::And(total_a, total_b)), (_, Mask::And(current_a, current_b))) => {
+                    (
+                        (_, RegularMask(total_a, total_b)),
+                        (_, RegularMask(current_a, current_b)),
+                    ) => {
                         *total_a += *current_a;
                         *total_b += *current_b;
                     }
-                    (
-                        (_, Mask::WideAnd(total_a, total_wb)),
-                        (_, Mask::WideAnd(current_a, current_wb)),
-                    ) => {
+                    _ => panic!(),
+                }
+            });
+        wide_total_gate_input_masks
+            .iter_mut()
+            .zip(wide_gate_input_masks.iter())
+            .for_each(|(a, b)| {
+                debug_assert_eq!(a.0, b.0);
+                match (a, b) {
+                    ((_, WideMask(total_a, total_wb)), (_, WideMask(current_a, current_wb))) => {
                         *total_a += *current_a;
                         for i in 0..total_wb.len() {
                             total_wb[i] += current_wb[i];
@@ -745,32 +858,48 @@ pub async fn offline_verify_dealer<
                     _ => panic!(),
                 }
             });
-        per_party_gate_input_wires_masks.insert(pid, gate_input_masks);
+        per_party_gate_input_wires_masks
+            .insert(pid, (regular_gate_input_masks, wide_gate_input_masks));
         // per_party_input_and_output_wires_masks.insert(pid, (input_wires_masks, output_wires_masks));
     }
 
-    let (alphas, gammas, alphas_output_wires, gammas_inputs, total_constant_addition) =
-        compute_gammas_alphas::<PACKING, _, PF>(&alpha, circuit);
+    let (
+        alphas,
+        wide_alphas,
+        gammas,
+        wide_gammas,
+        alphas_output_wires,
+        gammas_inputs,
+        total_constant_addition,
+    ) = compute_gammas_alphas::<PACKING, _, PF>(&alpha, circuit);
 
     // Compute Omega
-    let gates_input_wire_masks: HashMap<_, _> = total_gate_input_masks.iter().copied().collect();
+    let regular_gates_input_wire_masks: HashMap<_, _> =
+        total_gate_input_masks.iter().copied().collect();
+    let wide_gates_input_wire_masks: HashMap<_, _> =
+        wide_total_gate_input_masks.iter().copied().collect();
     let mu = F::random(&mut rng);
     let alpha_r = dot_product_alpha::<PACKING, _, _, PF>(
         &alphas,
+        &wide_alphas,
         &alphas_output_wires,
-        &gates_input_wire_masks,
+        &regular_gates_input_wire_masks,
+        &wide_gates_input_wire_masks,
         total_output_wires_masks,
     );
 
     let sigma_gamma_l_r_l = dot_product_gamma(
         &gammas,
-        &gates_input_wire_masks,
+        &wide_gammas,
+        &regular_gates_input_wire_masks,
+        &wide_gates_input_wire_masks,
         &gammas_inputs,
         &total_input_wires_masks,
     );
     let omega = alpha_r + sigma_gamma_l_r_l;
     let omega_hat = omega - mu;
-    let gammas_rc = Arc::new(gammas);
+    let regular_gammas_rc = Arc::new(gammas);
+    let wide_gammas_rc = Arc::new(wide_gammas);
 
     OfflineCommitment::offline_commit(&mut engine, &(alpha, omega_hat)).await;
     let s = mu - si_s.values().copied().sum();
@@ -778,28 +907,44 @@ pub async fn offline_verify_dealer<
     let dealer_offline_futures: Vec<_> = parties
         .into_iter()
         .map(|prover_id| {
-            let gate_masks = per_party_gate_input_wires_masks.remove(&prover_id).unwrap();
+            let (regular_gate_masks, wide_gate_masks) =
+                per_party_gate_input_wires_masks.remove(&prover_id).unwrap();
             let si = *si_s.get(&prover_id).unwrap();
-            let gamma_rc = gammas_rc.clone();
+            let regular_gamma_rc = regular_gammas_rc.clone();
+            let wide_gammas_rc = wide_gammas_rc.clone();
             let engine = engine.sub_protocol(prover_id);
             async move {
-                let gammas = gamma_rc.as_ref();
-                let mask_shares: HashMap<_, _> = gate_masks
+                let regular_gammas = regular_gamma_rc.as_ref();
+                let wide_gammas = wide_gammas_rc.as_ref();
+                let regular_mask_shares: HashMap<_, _> = regular_gate_masks
                     .into_iter()
                     .map(|((l, g), m)| {
                         let m = match m {
-                            Mask::And(a, b) => {
-                                BeaverTriple::Regular(RegularBeaverTriple(a, b, PF::zero()))
-                            }
-                            Mask::WideAnd(a, wb) => {
-                                BeaverTriple::Wide(WideBeaverTriple(a, wb, [PF::zero(); 128]))
-                            }
+                            RegularMask(a, b) => RegularBeaverTriple(a, b, PF::zero()),
                         };
                         ((l, g), m)
                     })
                     .collect();
-                let mut z_tilde =
-                    construct_statement(None, Some(si), &gammas, None, Some(&mask_shares), circuit);
+                let wide_mask_shares: HashMap<_, _> = wide_gate_masks
+                    .into_iter()
+                    .map(|((l, g), m)| {
+                        let m = match m {
+                            WideMask(a, wb) => WideBeaverTriple(a, wb, [PF::zero(); 128]),
+                        };
+                        ((l, g), m)
+                    })
+                    .collect();
+                let mut z_tilde = construct_statement(
+                    None,
+                    Some(si),
+                    &regular_gammas,
+                    &wide_gammas,
+                    None,
+                    None,
+                    Some(&regular_mask_shares),
+                    Some(&wide_mask_shares),
+                    circuit,
+                );
                 dealer(engine, &mut z_tilde, prover_id, two, three, four).await;
                 Result::<(), ()>::Ok(())
             }

@@ -201,7 +201,7 @@ impl Display for GF2 {
     }
 }
 
-const Packing: usize = 1 << 9;
+const Packing: usize = 1 << 10;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackedGF2 {
     pub bits: BitArr!(for Packing, in usize),

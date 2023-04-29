@@ -154,7 +154,7 @@ fn bench_boolean_circuit_semi_honest<
                         .to_vec();
                     let parties_input_lengths = parties_input_lengths.clone();
                     tokio::spawn(async move {
-                        let n_party_correlation = n_party_correlation;
+                        let (n_party_correlation, wide_n_party_correlation) = n_party_correlation;
                         let time = Instant::now();
                         let o = multi_party_semi_honest_eval_circuit::<N, _, _, _, FC>(
                             &mut engine,
@@ -163,14 +163,21 @@ fn bench_boolean_circuit_semi_honest<
                             &my_input_mask,
                             input_wire_masks,
                             &n_party_correlation,
+                            &wide_n_party_correlation,
                             &output_wire_masks,
                             &parties_input_lengths,
                         )
                         .await
                         .map(
-                            |(masked_input_wires, masked_gate_inputs, masked_outputs)| {
+                            |(
+                                masked_input_wires,
+                                masked_gate_inputs,
+                                wide_masked_gate_inputs,
+                                masked_outputs,
+                            )| {
                                 (
                                     masked_gate_inputs,
+                                    wide_masked_gate_inputs,
                                     masked_outputs,
                                     output_wire_masks,
                                     n_party_correlation,
@@ -261,6 +268,7 @@ fn bench_malicious_circuit<
                     let mut dealer_engine = engines.remove(&dealer_id).unwrap();
                     let input_lengths = input_lengths_arc.clone();
                     async move {
+                        let time = Instant::now();
                         MaliciousSecurityOffline::<
                             PACKING,
                             PF,
@@ -277,6 +285,7 @@ fn bench_malicious_circuit<
                             &input_lengths,
                         )
                         .await;
+                        println!("Dealer:\t took: {}ms", time.elapsed().as_millis());
                     }
                 };
 
