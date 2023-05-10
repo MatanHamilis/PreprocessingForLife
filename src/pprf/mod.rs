@@ -1,10 +1,8 @@
-use std::mem::MaybeUninit;
-
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    engine::{MultiPartyEngine, PartyId},
+    engine::MultiPartyEngine,
     fields::{FieldElement, GF128},
     ot::{ChosenMessageOTReceiver, ChosenMessageOTSender},
     pseudorandom::prg::{double_prg_field, double_prg_many_inplace, fill_prg},
@@ -161,7 +159,7 @@ pub struct PprfReceiver {
     pub evals: Vec<GF128>,
 }
 pub async fn distributed_pprf_receiver<T: MultiPartyEngine>(
-    mut engine: T,
+    engine: T,
     depth: usize,
 ) -> Result<PprfReceiver, ()> {
     let ot_receiver =

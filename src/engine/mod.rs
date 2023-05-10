@@ -7,14 +7,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use blake3::Hash;
 use rand::{rngs::ThreadRng, thread_rng};
 use rand_core::{CryptoRng, RngCore};
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::{
-    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    time::Instant,
-};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::uc_tags::UCTag;
 pub type PartyId = u64;
@@ -208,7 +204,6 @@ impl Drop for MultiPartyEngineImpl {
 pub struct LocalRouter {
     downstream_receiver: UnboundedReceiver<DownstreamMessage>,
     upstream_senders: HashMap<(PartyId, UCTag), UnboundedSender<UpstreamMessage>>,
-    root_tag: UCTag,
 }
 
 impl LocalRouter {
@@ -233,7 +228,6 @@ impl LocalRouter {
         let output = Self {
             downstream_receiver,
             upstream_senders,
-            root_tag,
         };
         (output, engines)
     }

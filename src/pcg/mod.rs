@@ -20,7 +20,6 @@ use rayon::{
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_big_array::BigArray;
-use tokio::{join, time::Instant};
 
 pub trait PackedSenderCorrelationGenerator: Serialize + DeserializeOwned + Send + Sync {
     type Offline: OfflineSenderCorrelationGenerator;
@@ -160,9 +159,6 @@ pub struct WideBeaverTriple<F: FieldElement>(
 );
 
 impl PackedOfflineReceiverPcgKey {
-    fn new(pprfs: Vec<PackedPprfSender>, delta: GF128) -> Self {
-        Self { pprfs, delta }
-    }
     fn random(pprf_count: usize, pprf_depth: usize, mut rng: impl RngCore + CryptoRng) -> Self {
         let pprfs: Vec<_> = (0..pprf_count)
             .map(|_| PackedPprfSender::new(pprf_depth, GF128::random(&mut rng)))
@@ -343,8 +339,6 @@ impl From<&PackedOfflineSenderPcgKey> for OfflineSenderPcgKey {
         unsafe {
             evals.set_len(n);
         }
-        let mut acc = GF128::zero();
-        let mut bin_acc = GF2::zero();
         let mut sums = vec![GF128::zero(); value.receivers.len()];
         value
             .receivers
@@ -515,7 +509,6 @@ impl<PS: PackedSenderCorrelationGenerator> FullPcgKey<PS> {
     pub fn new_from_offline(
         offline_key: &PackedOfflineFullPcgKey<PS, PS::Receiver>,
         code_seed: [u8; 16],
-        code_width: usize,
         both: bool,
     ) -> Self {
         let sender = if both || offline_key.is_first {
@@ -575,11 +568,11 @@ mod test {
     };
     use crate::{
         engine::LocalRouter,
-        fields::{FieldElement, GF2},
+        fields::GF2,
         pcg::{
-            FullPcgKey, OfflineSenderPcgKey, OnlineReceiverCorrelationGenerator,
-            OnlineSenderCorrelationGenerator, PackedKeysDealer, PackedOfflineFullPcgKey,
-            PackedReceiverCorrelationGenerator, PackedSenderCorrelationGenerator, StandardDealer,
+            FullPcgKey, OnlineReceiverCorrelationGenerator, OnlineSenderCorrelationGenerator,
+            PackedKeysDealer, PackedOfflineFullPcgKey, PackedReceiverCorrelationGenerator,
+            PackedSenderCorrelationGenerator, StandardDealer,
         },
         uc_tags::UCTag,
     };
@@ -623,9 +616,6 @@ mod test {
     fn test_deal() {
         const PPRF_COUNT: usize = 1;
         const PPRF_DEPTH: usize = 2;
-        const CODE_WIDTH: usize = 8;
-        const CORRELATION_COUNT: usize = 10_000;
-        let seed = [0u8; 16];
         let dealer = StandardDealer::new(PPRF_COUNT, PPRF_DEPTH);
         let (sender, receiver) = dealer.deal(&mut thread_rng());
         let offline_sender = sender.unpack();
@@ -641,16 +631,13 @@ mod test {
     fn test_deal_full() {
         const PPRF_COUNT: usize = 10;
         const PPRF_DEPTH: usize = 13;
-        const CODE_WIDTH: usize = 8;
         const CORRELATION_COUNT: usize = 10_000;
         let seed = [0u8; 16];
         let dealer = StandardDealer::new(PPRF_COUNT, PPRF_DEPTH);
         let (packed_full_key_1, packed_full_key_2) =
             PackedOfflineFullPcgKey::deal(&dealer, &mut thread_rng());
-        let mut full_key_1 =
-            FullPcgKey::new_from_offline(&packed_full_key_1, seed, CODE_WIDTH, true);
-        let mut full_key_2 =
-            FullPcgKey::new_from_offline(&packed_full_key_2, seed, CODE_WIDTH, true);
+        let mut full_key_1 = FullPcgKey::new_from_offline(&packed_full_key_1, seed, true);
+        let mut full_key_2 = FullPcgKey::new_from_offline(&packed_full_key_2, seed, true);
 
         for _ in 0..CORRELATION_COUNT {
             let sender_corr = full_key_1.next_wide_beaver_triple::<1, GF2>();

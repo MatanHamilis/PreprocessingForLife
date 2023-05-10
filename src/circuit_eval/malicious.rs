@@ -16,10 +16,6 @@ use super::{
     verify::{self, statement_length, OfflineCircuitVerify},
 };
 
-const PPRF_COUNT: usize = 50;
-const PPRF_DEPTH: usize = 10;
-const CODE_WIDTH: usize = 7;
-
 pub struct MaliciousSecurityOffline<
     const PACKING: usize,
     PF: PackedField<CF, PACKING>,
@@ -110,7 +106,7 @@ impl<
     }
     pub async fn into_pre_online_material<E: MultiPartyEngine>(
         self,
-        engine: &mut E,
+        _: &mut E,
     ) -> PreOnlineMaterial<PACKING, PF, CF, F, C, SHO> {
         // In this phase we expand the compressed correlations, right before the online phase.
         let Self {
@@ -213,10 +209,6 @@ impl<
             .await
             .unwrap();
         println!("Semi Honest took: {}", timer.elapsed().as_millis());
-        let embedded_masked_input_wires: Vec<_> = masked_input_wires
-            .iter()
-            .map(|v| F::one().switch(v.is_one()))
-            .collect();
         let timer = Instant::now();
         if !verify::verify_parties(
             engine,
@@ -253,12 +245,11 @@ impl<
 mod tests {
     use std::{
         collections::{HashMap, HashSet},
-        path::{Path, PathBuf},
+        path::Path,
         sync::Arc,
     };
 
-    use aes_prng::AesRng;
-    use futures::{future::try_join_all, FutureExt};
+    use futures::future::try_join_all;
     use tokio::{join, runtime, time::Instant};
 
     use super::MaliciousSecurityOffline;
@@ -268,12 +259,9 @@ mod tests {
             malicious::PreOnlineMaterial,
             semi_honest::{self, FieldContainer, GF2Container, PcgBasedPairwiseBooleanCorrelation},
         },
-        engine::{self, LocalRouter, MultiPartyEngine, MultiPartyEngineImpl},
-        fields::{FieldElement, PackedField, PackedGF2, GF128, GF2},
-        pcg::{
-            PackedKeysDealer, PackedOfflineReceiverPcgKey, PackedSenderCorrelationGenerator,
-            StandardDealer,
-        },
+        engine::{LocalRouter, MultiPartyEngine},
+        fields::{FieldElement, PackedField, GF128, GF2},
+        pcg::{PackedKeysDealer, PackedSenderCorrelationGenerator, StandardDealer},
         PartyId, UCTag,
     };
 
@@ -509,7 +497,6 @@ mod tests {
         rt.block_on(async {
             let path = Path::new("circuits/aes_128.txt");
             let circuit = super::super::circuit_from_file(path).unwrap();
-            let mut aes_rng = AesRng::from_random_seed();
             let mut input = Vec::with_capacity(circuit.input_wire_count);
             for _ in 0..circuit.input_wire_count {
                 input.push(GF2::one())

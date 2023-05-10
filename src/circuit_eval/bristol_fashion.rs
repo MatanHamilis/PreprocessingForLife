@@ -1,23 +1,12 @@
 //! # Bristol Fashion Circuits Parser
 //! Based on [Bristol Fashion documentation](https://homes.esat.kuleuven.be/~nsmart/MPC/).
 
-// use super::gates::{and, not, wide_and, xor};
 use log::error;
-
-// pub struct Circuit<T: FieldElement> {
-//     type Gate
-//     input_wires_count: usize,
-//     internal_wires_count: usize,
-//     output_wires_count: usize,
-//     gates:
-// }
 
 use std::{
     collections::{HashMap, HashSet},
     mem::MaybeUninit,
 };
-
-use crate::fields::FieldElement;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ParsedGate {
@@ -141,7 +130,7 @@ impl ParsedCircuit {
         }
     }
     pub fn total_non_linear_gates(&self) -> usize {
-        self.iter().filter(|(a, b, g)| !g.is_linear()).count()
+        self.iter().filter(|(_, _, g)| !g.is_linear()).count()
     }
 }
 impl TryFrom<&str> for GateOp {
@@ -170,10 +159,10 @@ impl<'a, T: Iterator<Item = &'a str>> ParserIterator<'a, T> {
         self.iter.next()?.parse().ok()
     }
 
-    pub fn next_gateop(&mut self) -> Option<GateOp> {
-        let op_str = self.iter.next()?;
-        op_str.try_into().ok()
-    }
+    // pub fn next_gateop(&mut self) -> Option<GateOp> {
+    //     let op_str = self.iter.next()?;
+    //     op_str.try_into().ok()
+    // }
 
     pub fn next_str(&mut self) -> Option<&'a str> {
         self.iter.next()

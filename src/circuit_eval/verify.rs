@@ -1,21 +1,10 @@
-use std::{
-    collections::HashMap,
-    mem::{transmute, MaybeUninit},
-    ops::Mul,
-    sync::Arc,
-    time,
-};
+use std::{collections::HashMap, ops::Mul, sync::Arc};
 
-use aes_prng::AesRng;
 use futures::{future::try_join_all, join};
-use rand_core::{RngCore, SeedableRng};
 use rayon::prelude::*;
 use tokio::time::Instant;
 
 use crate::{
-    circuit_eval::semi_honest::{
-        gate_masks_from_seed, input_wires_masks_from_seed, output_wires_masks_from_seed,
-    },
     commitment::OfflineCommitment,
     engine::{MultiPartyEngine, PartyId},
     fields::{FieldElement, PackedField},
@@ -114,7 +103,6 @@ fn compute_gammas_alphas<
             v[p] = rng.next().unwrap();
         }
     }
-    let output_wire_threshold = circuit.input_wire_count + circuit.internal_wire_count;
     let alphas_outputs: Vec<_> = output_wires.iter().map(|a| *a).collect();
 
     let time = Instant::now();
@@ -125,7 +113,7 @@ fn compute_gammas_alphas<
         .enumerate()
         .for_each(|(layer_idx, layer)| {
             for (gate_idx, gate) in layer.iter().enumerate() {
-                let c = match gate {
+                match gate {
                     ParsedGate::AndGate { input, output: _ } => {
                         let a = core::array::from_fn(|_| rng.next().unwrap());
                         let b = core::array::from_fn(|_| rng.next().unwrap());
@@ -140,8 +128,8 @@ fn compute_gammas_alphas<
                         input_bit,
                         output: _,
                     } => {
-                        let mut bits: [F; PACKING] = core::array::from_fn(|_| rng.next().unwrap());
-                        let mut wides: [[F; 128]; PACKING] =
+                        let bits: [F; PACKING] = core::array::from_fn(|_| rng.next().unwrap());
+                        let wides: [[F; 128]; PACKING] =
                             core::array::from_fn(|_| core::array::from_fn(|_| rng.next().unwrap()));
                         for pack in 0..PACKING {
                             weights_per_wire[*input_bit][pack] += bits[pack];
@@ -248,7 +236,6 @@ fn compute_gamma_i<
                         .map(|pack| bit.get_element(pack) * g[pack])
                         .sum()
                 }
-                _ => panic!(),
             }
         })
         .sum();
@@ -270,7 +257,6 @@ fn compute_gamma_i<
                     }
                     sum
                 }
-                _ => panic!(),
             }
         })
         .sum();
@@ -305,7 +291,6 @@ fn dot_product_gamma<
                         .map(|pack| m_a_m_b.get_element(pack) * g[pack])
                         .sum()
                 }
-                _ => panic!(),
             }
         })
         .sum();
@@ -325,7 +310,6 @@ fn dot_product_gamma<
                     }
                     sum
                 }
-                _ => panic!(),
             }
         })
         .sum();
@@ -356,7 +340,6 @@ fn dot_product_alpha<
                         .sum()
                     // * c_a * F::from(*a) + *c_b * F::from(*b)
                 }
-                _ => panic!(),
             }
         })
         .sum();
@@ -375,7 +358,6 @@ fn dot_product_alpha<
                     }
                     sum
                 }
-                _ => panic!(),
             }
         })
         .sum();
@@ -481,7 +463,6 @@ fn construct_statement<
                         *iter_masked_values.next().unwrap() = m_b.get_element(pack) * g[pack];
                     }
                 }
-                _ => panic!(),
             }
         }
         let gate_masked_inputs = wide_masked_inputs.unwrap();
@@ -498,7 +479,6 @@ fn construct_statement<
                         }
                     }
                 }
-                _ => panic!(),
             }
         }
     }
@@ -801,7 +781,7 @@ pub async fn offline_verify_dealer<
         .enumerate()
         .for_each(|(layer_idx, layer)| {
             layer.iter().enumerate().for_each(|(gate_idx, gate)| {
-                let zero_mask = match gate {
+                match gate {
                     ParsedGate::AndGate {
                         input: _,
                         output: _,
@@ -836,7 +816,6 @@ pub async fn offline_verify_dealer<
                         *total_a += *current_a;
                         *total_b += *current_b;
                     }
-                    _ => panic!(),
                 }
             });
         wide_total_gate_input_masks
@@ -851,7 +830,6 @@ pub async fn offline_verify_dealer<
                             total_wb[i] += current_wb[i];
                         }
                     }
-                    _ => panic!(),
                 }
             });
         per_party_gate_input_wires_masks
@@ -859,15 +837,8 @@ pub async fn offline_verify_dealer<
         // per_party_input_and_output_wires_masks.insert(pid, (input_wires_masks, output_wires_masks));
     }
 
-    let (
-        alphas,
-        wide_alphas,
-        gammas,
-        wide_gammas,
-        alphas_output_wires,
-        gammas_inputs,
-        total_constant_addition,
-    ) = compute_gammas_alphas::<PACKING, _, PF>(&alpha, circuit);
+    let (alphas, wide_alphas, gammas, wide_gammas, alphas_output_wires, gammas_inputs, _) =
+        compute_gammas_alphas::<PACKING, _, PF>(&alpha, circuit);
 
     // Compute Omega
     let regular_gates_input_wire_masks: HashMap<_, _> =

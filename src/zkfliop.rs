@@ -233,14 +233,6 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     let (_, round_count) = compute_round_count_and_m(z.len());
     println!("Proving: round count {}", round_count);
 
-    let my_id = engine.my_party_id();
-    let parties: Vec<_> = engine
-        .party_ids()
-        .iter()
-        .copied()
-        .filter(|id| id != &my_id)
-        .collect();
-
     let inv_two_minus_one = F::one() / (two - F::one());
     let mut q_3_container_uninit = vec![MaybeUninit::<F>::uninit(); z.len() / 2];
     let mut q_3_container = unsafe {
@@ -343,7 +335,7 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
         q[4] - proof_masks_last_round[4],
     ];
     engine.broadcast(last_round_proof);
-    let r: F = last_round_challenge.online_decommit(&mut engine).await;
+    let _: F = last_round_challenge.online_decommit(&mut engine).await;
 
     // Decision
     let _: (Vec<F>, F, F, F, F) = final_msg.online_decommit(&mut engine).await;
@@ -358,7 +350,6 @@ pub async fn verifier<F: FieldElement>(
     three: F,
     four: F,
 ) {
-    let mut total_elements_sent = 0;
     // Init
     let (_, round_count) = compute_round_count_and_m(z_hat.len());
     debug_assert!(z_hat.iter().skip(2).step_by(2).all(|v| v.is_zero()));
@@ -380,7 +371,7 @@ pub async fn verifier<F: FieldElement>(
         )
     };
     std::mem::forget(slope_container_uninit);
-    for (round_id, round_challenge) in round_challenges
+    for (_, round_challenge) in round_challenges
         .into_iter()
         .take(round_challenges.len() - 1)
         .enumerate()
@@ -459,12 +450,10 @@ pub async fn verifier<F: FieldElement>(
 
 #[cfg(test)]
 mod test {
-    use std::collections::hash_map::RandomState;
     use std::collections::HashSet;
 
     use futures::future::join_all;
     use futures::future::try_join_all;
-    use futures::FutureExt;
     use rand::thread_rng;
     use tokio::join;
 
@@ -520,7 +509,7 @@ mod test {
             prover_offline::<GF128>(engines.remove(&prover_id).unwrap(), round_count, dealer_id);
         let verifiers_handle: Vec<_> = engines
             .into_iter()
-            .map(|(pid, mut e)| async move {
+            .map(|(pid, e)| async move {
                 Result::<(u64, OfflineVerifier), ()>::Ok((
                     pid,
                     verifier_offline(e, round_count, dealer_id).await,

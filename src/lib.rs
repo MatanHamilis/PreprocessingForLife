@@ -4,7 +4,6 @@
 #![feature(split_array)]
 #![feature(maybe_uninit_array_assume_init)]
 
-use fields::GF128;
 pub mod circuit_eval;
 pub mod commitment;
 pub mod engine;

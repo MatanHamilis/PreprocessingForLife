@@ -1,12 +1,7 @@
-// use crate::pprf::bits_to_usize;
-// use crate::pprf::usize_to_bits;
-
-use crate::fields::GF128;
-
-use super::double_prg;
 use super::double_prg_many;
 use super::prg::double_prg_field;
 use super::prg::PrgValue;
+use crate::fields::GF128;
 #[cfg(feature = "aesni")]
 use aes::Block;
 use serde::Deserialize;

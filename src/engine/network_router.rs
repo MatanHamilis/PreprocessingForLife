@@ -16,12 +16,9 @@ use tokio::{
     net::{TcpListener, TcpStream},
     select,
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    time::Instant,
 };
 use tokio_tungstenite::{
-    accept_async, client_async, connect_async,
-    tungstenite::{http::Request, stream::NoDelay, Message},
-    MaybeTlsStream, WebSocketStream,
+    accept_async, connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream,
 };
 use url::Url;
 
@@ -59,7 +56,7 @@ async fn receive_connections(
         .unwrap();
     let mut futures = Vec::with_capacity(connection_count);
     for _ in 0..connection_count {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
         stream.set_nodelay(true).unwrap();
         futures.push(handle_single_conn(MaybeTlsStream::Plain(stream)));
     }
@@ -227,7 +224,8 @@ impl NetworkRouter {
                         panic!()
                     }
                     Message::Close(_) => {
-                        self.peers_send
+                        let _ = self
+                            .peers_send
                             .remove(&pid)
                             .expect("Receive Close message for nonexistant peer!");
                     }

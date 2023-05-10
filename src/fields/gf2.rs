@@ -5,7 +5,6 @@ use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::Display,
-    io::Read,
     iter::Sum,
     ops::{
         Add, AddAssign, BitAnd, BitAndAssign, BitXor, BitXorAssign, Div, DivAssign, Mul, MulAssign,
@@ -222,13 +221,13 @@ impl Display for GF2 {
     }
 }
 
-const Packing: usize = 1 << 10;
+const PACKING: usize = 1 << 10;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackedGF2 {
-    pub bits: BitArr!(for Packing, in usize),
+    pub bits: BitArr!(for PACKING, in usize),
 }
 impl FieldElement for PackedGF2 {
-    const BITS: usize = Packing;
+    const BITS: usize = PACKING;
     fn from_bit(bit: bool) -> Self {
         let mut b = Self::zero();
         b.bits.fill(bit);
@@ -245,7 +244,7 @@ impl FieldElement for PackedGF2 {
     }
     fn zero() -> Self {
         Self {
-            bits: bitarr![0 as usize;Packing],
+            bits: bitarr![0 as usize;PACKING],
         }
     }
     fn random(mut rng: impl CryptoRng + RngCore) -> Self {
@@ -253,7 +252,7 @@ impl FieldElement for PackedGF2 {
         let bytes = unsafe {
             std::slice::from_raw_parts_mut(
                 v.bits.as_raw_mut_slice().as_mut_ptr() as *mut u8,
-                Packing / u8::BITS as usize,
+                PACKING / u8::BITS as usize,
             )
         };
         rng.fill(bytes);
@@ -352,7 +351,7 @@ impl Sub for PackedGF2 {
     }
 }
 
-impl PackedField<GF2, Packing> for PackedGF2 {
+impl PackedField<GF2, PACKING> for PackedGF2 {
     fn get_element(&self, i: usize) -> GF2 {
         GF2::from(*self.bits.get(i).unwrap())
     }
@@ -362,7 +361,7 @@ impl PackedField<GF2, Packing> for PackedGF2 {
 }
 
 impl PackedField<GF2, 1> for GF2 {
-    fn get_element(&self, i: usize) -> GF2 {
+    fn get_element(&self, _: usize) -> GF2 {
         self.clone()
     }
     fn set_element(&mut self, i: usize, value: &GF2) {
