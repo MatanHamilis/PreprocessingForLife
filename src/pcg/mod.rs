@@ -3,14 +3,11 @@ use crate::{
     fields::{FieldElement, PackedField, GF128, GF2},
     pprf::{
         distributed_pprf_receiver, distributed_pprf_sender, PackedPprfReceiver, PackedPprfSender,
-        PprfReceiver, PprfSender,
+        PprfReceiver,
     },
-    pseudorandom::{
-        hash::correlation_robust_hash_block_field, prf::prf_eval, prg::double_prg_field,
-    },
+    pseudorandom::{hash::correlation_robust_hash_block_field, prf::prf_eval},
 };
 use aes_prng::AesRng;
-use bincode::de;
 use futures::future::try_join_all;
 use rand::{CryptoRng, SeedableRng};
 use rand_core::RngCore;
@@ -19,16 +16,130 @@ use rayon::{
         IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator,
         ParallelIterator,
     },
-    slice::{ParallelSlice, ParallelSliceMut},
+    slice::ParallelSliceMut,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_big_array::BigArray;
-use tokio::join;
+use tokio::{join, time::Instant};
 
+pub trait PackedSenderCorrelationGenerator: Serialize + DeserializeOwned + Send + Sync {
+    type Offline: OfflineSenderCorrelationGenerator;
+    type Receiver: PackedReceiverCorrelationGenerator;
+    fn unpack(&self) -> Self::Offline;
+}
+pub trait PackedReceiverCorrelationGenerator: Serialize + DeserializeOwned + Send + Sync {
+    type Offline: OfflineReceiverCorrelationGenerator;
+    type Sender: PackedSenderCorrelationGenerator;
+    fn unpack(&self) -> Self::Offline;
+}
+pub trait PackedKeysDealer<S: PackedSenderCorrelationGenerator>: Send + Sync {
+    fn deal<R: CryptoRng + RngCore>(&self, rng: &mut R) -> (S, S::Receiver);
+}
+pub trait OfflineSenderCorrelationGenerator {
+    type Online: OnlineSenderCorrelationGenerator;
+    fn into_online(self, code: [u8; 16]) -> Self::Online;
+}
+pub trait OfflineReceiverCorrelationGenerator {
+    type Online: OnlineReceiverCorrelationGenerator;
+    fn into_online(self, code: [u8; 16]) -> Self::Online;
+}
+pub trait OnlineReceiverCorrelationGenerator {
+    type Sender: OnlineSenderCorrelationGenerator;
+    fn next_random_ot<const O: usize, const N: usize, F: PackedField<GF2, N>>(
+        &mut self,
+    ) -> ([F; O], F);
+    fn next_random_bit_ot<const N: usize, F: PackedField<GF2, N>>(&mut self) -> (F, F) {
+        let mut wb = F::zero();
+        let mut wa = F::zero();
+        for i in 0..N {
+            let (m_b, b) = self.next_random_ot::<1, 1, GF2>();
+            wb.set_element(i, &b);
+            wa.set_element(i, &m_b[0]);
+        }
+        (wa, wb)
+    }
+    fn next_bit_beaver_triple<const N: usize, F: PackedField<GF2, N>>(
+        &mut self,
+    ) -> RegularBeaverTriple<F> {
+        let (m_b0, b_0) = self.next_random_bit_ot();
+        let (m_b1, b_1) = self.next_random_bit_ot();
+        RegularBeaverTriple(b_0, b_1, b_0 * b_1 + m_b0 + m_b1)
+    }
+}
+pub trait OnlineSenderCorrelationGenerator {
+    type Receiver: OnlineReceiverCorrelationGenerator;
+    fn next_random_ot<const O: usize, const N: usize, F: PackedField<GF2, N>>(
+        &mut self,
+    ) -> ([F; O], [F; O]);
+    fn next_random_bit_ot<const N: usize, F: PackedField<GF2, N>>(&mut self) -> (F, F) {
+        let mut a = F::zero();
+        let mut b = F::zero();
+        for i in 0..N {
+            let (m_0, m_1) = self.next_random_ot::<1, 1, GF2>();
+            let (a_0, b_0) = (m_0[0], m_1[0]);
+            a.set_element(i, &a_0);
+            b.set_element(i, &b_0);
+        }
+        (a, b)
+    }
+
+    fn next_bit_beaver_triple<const N: usize, F: PackedField<GF2, N>>(
+        &mut self,
+    ) -> RegularBeaverTriple<F> {
+        let (m_0_0, mut m_0_1) = self.next_random_bit_ot();
+        let (m_1_0, mut m_1_1) = self.next_random_bit_ot();
+        m_0_1 -= m_0_0;
+        m_1_1 -= m_1_0;
+        RegularBeaverTriple(m_1_1, m_0_1, m_1_1 * m_0_1 + m_0_0 + m_1_0)
+    }
+}
+
+pub struct StandardDealer {
+    pprf_count: usize,
+    pprf_depth: usize,
+}
+impl StandardDealer {
+    pub fn new(pprf_count: usize, pprf_depth: usize) -> Self {
+        Self {
+            pprf_count,
+            pprf_depth,
+        }
+    }
+}
+impl PackedKeysDealer<PackedOfflineReceiverPcgKey> for StandardDealer {
+    fn deal<R: CryptoRng + RngCore>(
+        &self,
+        mut rng: &mut R,
+    ) -> (
+        PackedOfflineReceiverPcgKey,
+        <PackedOfflineReceiverPcgKey as PackedSenderCorrelationGenerator>::Receiver,
+    ) {
+        let receiver =
+            PackedOfflineReceiverPcgKey::random(self.pprf_count, self.pprf_depth, &mut rng);
+        let receivers = receiver
+            .pprfs
+            .iter()
+            .map(|v| {
+                let punctured_index = (rng.next_u64() % (1 << v.depth)) as usize;
+                let leaf_val = prf_eval(&v.seed, v.depth, punctured_index);
+                (v.puncture(punctured_index), leaf_val + receiver.delta)
+            })
+            .collect();
+        let sender = PackedOfflineSenderPcgKey { receivers };
+        (receiver, sender)
+    }
+}
 #[derive(Serialize, Deserialize)]
 pub struct PackedOfflineReceiverPcgKey {
     pprfs: Vec<PackedPprfSender>,
     delta: GF128,
+}
+impl PackedSenderCorrelationGenerator for PackedOfflineReceiverPcgKey {
+    type Offline = OfflineReceiverPcgKey;
+    type Receiver = PackedOfflineSenderPcgKey;
+    fn unpack(&self) -> OfflineReceiverPcgKey {
+        self.unpack_internal(true).0
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
@@ -62,19 +173,33 @@ impl PackedOfflineReceiverPcgKey {
         }
     }
 
-    fn unpack(&self) -> (OfflineReceiverPcgKey, Vec<Vec<(GF128, GF128)>>) {
+    fn unpack_internal(
+        &self,
+        is_deal: bool,
+    ) -> (OfflineReceiverPcgKey, Option<Vec<Vec<(GF128, GF128)>>>) {
         let n = self.pprfs.iter().map(|v| 1 << v.depth).sum();
-        let delta = self.delta;
         let mut evals = Vec::with_capacity(n);
-        let (left_right_sums, evals_vecs): (Vec<_>, Vec<_>) = self
+        let mut left_right_sums = if is_deal {
+            None
+        } else {
+            Some(Vec::with_capacity(self.pprfs.len()))
+        };
+        let evals_vecs: Vec<_> = self
             .pprfs
             .iter()
             .enumerate()
-            .map(|(idx, v)| {
-                let sender = PprfSender::from(v);
-                (sender.left_right_sums, sender.evals)
+            .map(|(_, v)| {
+                let sender = if is_deal {
+                    v.inflate_with_deal()
+                } else {
+                    let sums = left_right_sums.as_mut().unwrap();
+                    let t = v.inflate_distributed();
+                    sums.push(t.left_right_sums);
+                    t.evals
+                };
+                sender
             })
-            .unzip();
+            .collect();
         let mut acc = GF128::zero();
         evals_vecs.iter().for_each(|v| {
             v.iter().for_each(|o| {
@@ -90,11 +215,21 @@ impl PackedOfflineReceiverPcgKey {
             left_right_sums,
         )
     }
+    fn unpack_distributed(&self) -> (OfflineReceiverPcgKey, Vec<Vec<(GF128, GF128)>>) {
+        let (a, b) = self.unpack_internal(false);
+        (a, b.unwrap())
+    }
 }
 
 pub struct OfflineReceiverPcgKey {
     evals: Vec<GF128>,
     delta: GF128,
+}
+impl OfflineSenderCorrelationGenerator for OfflineReceiverPcgKey {
+    type Online = ReceiverPcgKey;
+    fn into_online(self, code: [u8; 16]) -> Self::Online {
+        ReceiverPcgKey::new(self, AesRng::from_seed(code), 7)
+    }
 }
 
 pub struct ReceiverPcgKey {
@@ -103,11 +238,33 @@ pub struct ReceiverPcgKey {
     code_width: usize,
     delta: GF128,
 }
+
+impl OnlineSenderCorrelationGenerator for ReceiverPcgKey {
+    type Receiver = SenderPcgKey;
+    fn next_random_ot<const O: usize, const N: usize, F: PackedField<GF2, N>>(
+        &mut self,
+    ) -> ([F; O], [F; O]) {
+        let mut m0_arr = [F::zero(); O];
+        let mut m1_arr = [F::zero(); O];
+        for i in 0..N {
+            let (m_0, m_1) = self.next_correlated_ot();
+            let (m_0, m_1) = (
+                correlation_robust_hash_block_field(m_0),
+                correlation_robust_hash_block_field(m_1),
+            );
+            for j in 0..O {
+                m0_arr[j].set_bit(m_0.get_bit(j), i);
+                m1_arr[j].set_bit(m_1.get_bit(j), i);
+            }
+        }
+        (m0_arr, m1_arr)
+    }
+}
 pub async fn distributed_receiver_pcg_key<E: MultiPartyEngine>(
     engine: E,
     packed_key: &PackedOfflineReceiverPcgKey,
 ) -> Result<OfflineReceiverPcgKey, ()> {
-    let (offline_key, left_right_sums) = packed_key.unpack();
+    let (offline_key, left_right_sums) = packed_key.unpack_distributed();
     let delta = packed_key.delta;
     let pprf_futures: Vec<_> = left_right_sums
         .into_iter()
@@ -150,54 +307,29 @@ impl ReceiverPcgKey {
         let v = self.next_subfield_vole();
         (v, v + self.delta)
     }
-
-    fn next_random_ot<const N: usize, F: PackedField<GF2, N>>(&mut self) -> ([F; 128], [F; 128]) {
-        let mut m0_arr = [F::zero(); 128];
-        let mut m1_arr = [F::zero(); 128];
-        for i in 0..N {
-            let (m_0, m_1) = self.next_correlated_ot();
-            let (m_0, m_1) = (
-                correlation_robust_hash_block_field(m_0),
-                correlation_robust_hash_block_field(m_1),
-            );
-            for j in 0..128 {
-                m0_arr[j].set_bit(m_0.get_bit(j), i);
-                m1_arr[j].set_bit(m_1.get_bit(j), i);
-            }
-        }
-        (m0_arr, m1_arr)
-    }
-
-    fn next_random_bit_ot<const N: usize, F: PackedField<GF2, N>>(&mut self) -> (F, F) {
-        let mut a = F::zero();
-        let mut b = F::zero();
-        for i in 0..N {
-            let (m_0, m_1) = self.next_random_ot::<1, GF2>();
-            let (a_0, b_0) = (m_0[0], m_1[0]);
-            a.set_element(i, &a_0);
-            b.set_element(i, &b_0);
-        }
-        (a, b)
-    }
-
-    fn next_bit_beaver_triple<const N: usize, F: PackedField<GF2, N>>(
-        &mut self,
-    ) -> RegularBeaverTriple<F> {
-        let (m_0_0, mut m_0_1) = self.next_random_bit_ot();
-        let (m_1_0, mut m_1_1) = self.next_random_bit_ot();
-        m_0_1 -= m_0_0;
-        m_1_1 -= m_1_0;
-        RegularBeaverTriple(m_1_1, m_0_1, m_1_1 * m_0_1 + m_0_0 + m_1_0)
-    }
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct PackedOfflineSenderPcgKey {
     receivers: Vec<(PackedPprfReceiver, GF128)>,
 }
+impl PackedReceiverCorrelationGenerator for PackedOfflineSenderPcgKey {
+    type Offline = OfflineSenderPcgKey;
+    type Sender = PackedOfflineReceiverPcgKey;
+    fn unpack(&self) -> Self::Offline {
+        OfflineSenderPcgKey::from(self)
+    }
+}
 
 pub struct OfflineSenderPcgKey {
     evals: Vec<(GF128, GF2)>,
+}
+
+impl OfflineReceiverCorrelationGenerator for OfflineSenderPcgKey {
+    type Online = SenderPcgKey;
+    fn into_online(self, code: [u8; 16]) -> Self::Online {
+        SenderPcgKey::new(self, AesRng::from_seed(code), 7)
+    }
 }
 
 impl From<&PackedOfflineSenderPcgKey> for OfflineSenderPcgKey {
@@ -233,13 +365,6 @@ impl From<&PackedOfflineSenderPcgKey> for OfflineSenderPcgKey {
                     *d = (sum, GF2::from(bit));
                 }
                 *sum_cell = sum;
-                // for (idx, v) in pprf.evals.into_iter().enumerate() {
-                //     acc += v;
-                //     if idx == pprf.punctured_index {
-                //         bin_acc.flip();
-                //     }
-                //     evals[idx] = ((acc, bin_acc));
-                // }
             });
         // prefix sum the sums (non inclusively)
         let mut sum = GF128::zero();
@@ -263,6 +388,24 @@ pub struct SenderPcgKey {
     evals: Vec<(GF128, GF2)>,
     code_seed: AesRng,
     code_width: usize,
+}
+impl OnlineReceiverCorrelationGenerator for SenderPcgKey {
+    type Sender = ReceiverPcgKey;
+    fn next_random_ot<const O: usize, const N: usize, F: PackedField<GF2, N>>(
+        &mut self,
+    ) -> ([F; O], F) {
+        let mut m_arr = [F::zero(); O];
+        let mut c = F::zero();
+        for i in 0..N {
+            let (m_b, b) = self.next_correlated_ot();
+            let (m_b, b) = (correlation_robust_hash_block_field(m_b), b);
+            for j in 0..O {
+                m_arr[j].set_bit(m_b.get_bit(j), i);
+            }
+            c.set_element(i, &b);
+        }
+        (m_arr, c)
+    }
 }
 pub async fn distributed_sender_pcg_key<E: MultiPartyEngine>(
     engine: E,
@@ -325,76 +468,29 @@ impl SenderPcgKey {
     fn next_correlated_ot(&mut self) -> (GF128, GF2) {
         self.next_subfield_vole()
     }
-
-    fn next_random_ot<const N: usize, F: PackedField<GF2, N>>(&mut self) -> ([F; 128], F) {
-        let mut m_arr = [F::zero(); 128];
-        let mut c = F::zero();
-        for i in 0..N {
-            let (m_b, b) = self.next_correlated_ot();
-            let (m_b, b) = (correlation_robust_hash_block_field(m_b), b);
-            for j in 0..128 {
-                m_arr[j].set_bit(m_b.get_bit(j), i);
-            }
-            c.set_element(i, &b);
-        }
-        (m_arr, c)
-    }
-
-    fn next_random_bit_ot<const N: usize, F: PackedField<GF2, N>>(&mut self) -> (F, F) {
-        let mut wb = F::zero();
-        let mut wa = F::zero();
-        for i in 0..N {
-            let (m_b, b) = self.next_random_ot::<1, GF2>();
-            wb.set_element(i, &b);
-            wa.set_element(i, &m_b[0]);
-        }
-        (wa, wb)
-    }
-
-    fn next_bit_beaver_triplet<const N: usize, F: PackedField<GF2, N>>(
-        &mut self,
-    ) -> RegularBeaverTriple<F> {
-        let (m_b0, b_0) = self.next_random_bit_ot();
-        let (m_b1, b_1) = self.next_random_bit_ot();
-        RegularBeaverTriple(b_0, b_1, b_0 * b_1 + m_b0 + m_b1)
-    }
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct PackedOfflineFullPcgKey {
-    sender: PackedOfflineSenderPcgKey,
-    receiver: PackedOfflineReceiverPcgKey,
+#[serde(bound = "S: Serialize + DeserializeOwned, R: Serialize+DeserializeOwned")]
+pub struct PackedOfflineFullPcgKey<
+    S: PackedSenderCorrelationGenerator,
+    R: PackedReceiverCorrelationGenerator,
+> {
+    sender: S,
+    receiver: R,
     is_first: bool,
 }
 
-fn deal_sender_receiver_keys(
-    pprf_count: usize,
-    pprf_depth: usize,
-    mut rng: impl RngCore + CryptoRng,
-) -> (PackedOfflineSenderPcgKey, PackedOfflineReceiverPcgKey) {
-    let receiver = PackedOfflineReceiverPcgKey::random(pprf_count, pprf_depth, &mut rng);
-    let receivers = receiver
-        .pprfs
-        .iter()
-        .map(|v| {
-            let punctured_index = (rng.next_u64() % (1 << v.depth)) as usize;
-            let leaf_val = prf_eval(&v.seed, v.depth, punctured_index);
-            (v.puncture(punctured_index), leaf_val + receiver.delta)
-        })
-        .collect();
-    let sender = PackedOfflineSenderPcgKey { receivers };
-    (sender, receiver)
-}
-impl PackedOfflineFullPcgKey {
-    pub fn deal(
-        pprf_count: usize,
-        pprf_depth: usize,
+impl<S: PackedSenderCorrelationGenerator> PackedOfflineFullPcgKey<S, S::Receiver> {
+    pub fn deal<D: PackedKeysDealer<S>>(
+        dealer: &D,
         mut rng: impl RngCore + CryptoRng,
-    ) -> (PackedOfflineFullPcgKey, PackedOfflineFullPcgKey) {
-        let (first_sender, first_receiver) =
-            deal_sender_receiver_keys(pprf_count, pprf_depth, &mut rng);
-        let (second_sender, second_receiver) =
-            deal_sender_receiver_keys(pprf_count, pprf_depth, &mut rng);
+    ) -> (
+        PackedOfflineFullPcgKey<S, S::Receiver>,
+        PackedOfflineFullPcgKey<S, S::Receiver>,
+    ) {
+        let (first_sender, first_receiver) = dealer.deal(&mut rng);
+        let (second_sender, second_receiver) = dealer.deal(&mut rng);
         let first_full_key = PackedOfflineFullPcgKey {
             sender: first_sender,
             receiver: second_receiver,
@@ -409,81 +505,45 @@ impl PackedOfflineFullPcgKey {
     }
 }
 
-pub struct FullPcgKey {
-    sender: SenderPcgKey,
-    receiver: ReceiverPcgKey,
+pub struct FullPcgKey<PS: PackedSenderCorrelationGenerator> {
+    sender: Option<<PS::Offline as OfflineSenderCorrelationGenerator>::Online>,
+    receiver: Option<<<PS::Receiver as PackedReceiverCorrelationGenerator>::Offline as OfflineReceiverCorrelationGenerator>::Online>,
     is_first: bool,
 }
 
-impl FullPcgKey {
+impl<PS: PackedSenderCorrelationGenerator> FullPcgKey<PS> {
     pub fn new_from_offline(
-        offline_key: &PackedOfflineFullPcgKey,
+        offline_key: &PackedOfflineFullPcgKey<PS, PS::Receiver>,
         code_seed: [u8; 16],
         code_width: usize,
+        both: bool,
     ) -> Self {
-        let sender = SenderPcgKey::new(
-            OfflineSenderPcgKey::from(&offline_key.sender),
-            AesRng::from_seed(code_seed),
-            code_width,
-        );
-        let (offline_key_recv, _) = offline_key.receiver.unpack();
-        let receiver =
-            ReceiverPcgKey::new(offline_key_recv, AesRng::from_seed(code_seed), code_width);
+        let sender = if both || offline_key.is_first {
+            Some(offline_key.sender.unpack().into_online(code_seed))
+        } else {
+            None
+        };
+        let receiver = if both || !offline_key.is_first {
+            Some(offline_key.receiver.unpack().into_online(code_seed))
+        } else {
+            None
+        };
+
         Self {
             sender,
             receiver,
             is_first: offline_key.is_first,
         }
     }
-    pub async fn new<E: MultiPartyEngine>(
-        engine: E,
-        pprf_count: usize,
-        pprf_depth: usize,
-        code_seed: [u8; 16],
-        code_width: usize,
-    ) -> Result<Self, ()> {
-        let my_id = engine.my_party_id();
-        let peer_id = engine.party_ids()[0] + engine.party_ids()[1] - my_id;
-        let (mut first_engine, mut second_engine) = (
-            engine.sub_protocol("FULL PCG TO FIRST SUB PCG"),
-            engine.sub_protocol("FULL PCG TO SECOND SUB PCG"),
-        );
-        if my_id > peer_id {
-            (first_engine, second_engine) = (second_engine, first_engine)
-        }
-        let seed_sender = AesRng::from_seed(code_seed);
-        let sender = tokio::spawn(distributed_sender_pcg_key(
-            first_engine,
-            pprf_count,
-            pprf_depth,
-        ));
-        let delta = GF128::random(E::rng());
-        let pprfs: Vec<_> = (0..pprf_count)
-            .map(|_| PackedPprfSender::new(pprf_depth, GF128::random(E::rng())))
-            .collect();
-        let receiver = tokio::spawn(async move {
-            let pprfs = pprfs;
-            let packed_key = PackedOfflineReceiverPcgKey { delta, pprfs };
-            distributed_receiver_pcg_key(second_engine, &packed_key).await
-        });
-        let (snd_res, rcv_res) = join!(sender, receiver);
-        let sender = SenderPcgKey::new(snd_res.or(Err(()))??, seed_sender, code_width);
-        let receiver = ReceiverPcgKey::new(
-            rcv_res.or(Err(()))??,
-            AesRng::from_seed(code_seed),
-            code_width,
-        );
-        Ok(Self {
-            sender,
-            receiver,
-            is_first: my_id < peer_id,
-        })
-    }
     pub fn next_wide_beaver_triple<const N: usize, F: PackedField<GF2, N>>(
         &mut self,
     ) -> WideBeaverTriple<F> {
-        let (m_b, b) = self.sender.next_random_ot();
-        let (m_0, mut m_1) = self.receiver.next_random_ot();
+        let (m_b, b) = self
+            .receiver
+            .as_mut()
+            .unwrap()
+            .next_random_ot::<128, N, _>();
+        let (m_0, mut m_1) = self.sender.as_mut().unwrap().next_random_ot::<128, N, _>();
         for i in 0..m_0.len() {
             m_1[i] -= m_0[i];
         }
@@ -495,9 +555,9 @@ impl FullPcgKey {
         &mut self,
     ) -> RegularBeaverTriple<F> {
         if self.is_first {
-            self.sender.next_bit_beaver_triplet()
+            self.sender.as_mut().unwrap().next_bit_beaver_triple()
         } else {
-            self.receiver.next_bit_beaver_triple()
+            self.receiver.as_mut().unwrap().next_bit_beaver_triple()
         }
     }
 }
@@ -511,16 +571,16 @@ mod test {
 
     use super::{
         distributed_receiver_pcg_key, distributed_sender_pcg_key, PackedOfflineReceiverPcgKey,
-        PackedOfflineSenderPcgKey, ReceiverPcgKey, SenderPcgKey,
+        ReceiverPcgKey, SenderPcgKey,
     };
     use crate::{
         engine::LocalRouter,
-        fields::{FieldElement, GF128, GF2},
+        fields::{FieldElement, GF2},
         pcg::{
-            deal_sender_receiver_keys, FullPcgKey, OfflineReceiverPcgKey, OfflineSenderPcgKey,
-            PackedOfflineFullPcgKey,
+            FullPcgKey, OfflineSenderPcgKey, OnlineReceiverCorrelationGenerator,
+            OnlineSenderCorrelationGenerator, PackedKeysDealer, PackedOfflineFullPcgKey,
+            PackedReceiverCorrelationGenerator, PackedSenderCorrelationGenerator, StandardDealer,
         },
-        pprf::PackedPprfSender,
         uc_tags::UCTag,
     };
     use aes_prng::AesRng;
@@ -550,50 +610,12 @@ mod test {
         let mut online_sender = SenderPcgKey::new(snd_res, AesRng::from_seed(seed), CODE_WIDTH);
         let mut online_receiver = ReceiverPcgKey::new(rcv_res, AesRng::from_seed(seed), CODE_WIDTH);
         for _ in 0..CORRELATION_COUNT {
-            let sender_corr = online_sender.next_bit_beaver_triplet::<1, GF2>();
+            let sender_corr = online_sender.next_bit_beaver_triple::<1, GF2>();
             let rcv_corr = online_receiver.next_bit_beaver_triple();
             assert_eq!(
                 (sender_corr.0 + rcv_corr.0) * (sender_corr.1 + rcv_corr.1),
                 sender_corr.2 + rcv_corr.2
             );
-        }
-        local_handle.await.unwrap().unwrap();
-    }
-    #[tokio::test]
-    async fn test_full_pcg_key() {
-        const PPRF_COUNT: usize = 10;
-        const PPRF_DEPTH: usize = 7;
-        const CODE_WIDTH: usize = 8;
-        const CORRELATION_COUNT: usize = 10_000;
-        let seed = [0; 16];
-        let party_ids = [1, 2];
-        let party_ids_set = HashSet::from_iter(party_ids.iter().copied());
-        let (router, mut engines) =
-            LocalRouter::new(UCTag::new(&"root tag").into(), &party_ids_set);
-        let sender_engine = engines.remove(&party_ids[0]).unwrap();
-        let receiver_engine = engines.remove(&party_ids[1]).unwrap();
-
-        let local_handle = tokio::spawn(router.launch());
-        let sender_h = tokio::spawn(FullPcgKey::new(
-            sender_engine,
-            PPRF_COUNT,
-            PPRF_DEPTH,
-            seed,
-            CODE_WIDTH,
-        ));
-        let receiver_h = FullPcgKey::new(receiver_engine, PPRF_COUNT, PPRF_DEPTH, seed, CODE_WIDTH);
-
-        let (snd_res, rcv_res) = join!(sender_h, receiver_h);
-        let (mut snd_res, mut rcv_res) = (snd_res.unwrap().unwrap(), rcv_res.unwrap());
-        for _ in 0..CORRELATION_COUNT {
-            let sender_corr = snd_res.next_wide_beaver_triple::<1, GF2>();
-            let rcv_corr = rcv_res.next_wide_beaver_triple::<1, GF2>();
-            for i in 0..sender_corr.1.len() {
-                assert_eq!(
-                    (sender_corr.1[i] + rcv_corr.1[i]) * (sender_corr.0 + rcv_corr.0),
-                    sender_corr.2[i] + rcv_corr.2[i]
-                );
-            }
         }
         local_handle.await.unwrap().unwrap();
     }
@@ -604,13 +626,14 @@ mod test {
         const CODE_WIDTH: usize = 8;
         const CORRELATION_COUNT: usize = 10_000;
         let seed = [0u8; 16];
-        let (sender, receiver) = deal_sender_receiver_keys(PPRF_COUNT, PPRF_DEPTH, thread_rng());
-        let offline_sender = OfflineSenderPcgKey::from(&sender);
-        let (offline_receiver, sums) = receiver.unpack();
+        let dealer = StandardDealer::new(PPRF_COUNT, PPRF_DEPTH);
+        let (sender, receiver) = dealer.deal(&mut thread_rng());
+        let offline_sender = sender.unpack();
+        let offline_receiver = receiver.unpack();
         for i in 0..offline_receiver.evals.len() {
             assert_eq!(
-                offline_sender.evals[i].0 + offline_receiver.evals[i],
-                receiver.delta * offline_sender.evals[i].1
+                offline_receiver.evals[i].0 + offline_sender.evals[i],
+                sender.delta * offline_receiver.evals[i].1
             );
         }
     }
@@ -621,10 +644,13 @@ mod test {
         const CODE_WIDTH: usize = 8;
         const CORRELATION_COUNT: usize = 10_000;
         let seed = [0u8; 16];
+        let dealer = StandardDealer::new(PPRF_COUNT, PPRF_DEPTH);
         let (packed_full_key_1, packed_full_key_2) =
-            PackedOfflineFullPcgKey::deal(PPRF_COUNT, PPRF_DEPTH, thread_rng());
-        let mut full_key_1 = FullPcgKey::new_from_offline(&packed_full_key_1, seed, CODE_WIDTH);
-        let mut full_key_2 = FullPcgKey::new_from_offline(&packed_full_key_2, seed, CODE_WIDTH);
+            PackedOfflineFullPcgKey::deal(&dealer, &mut thread_rng());
+        let mut full_key_1 =
+            FullPcgKey::new_from_offline(&packed_full_key_1, seed, CODE_WIDTH, true);
+        let mut full_key_2 =
+            FullPcgKey::new_from_offline(&packed_full_key_2, seed, CODE_WIDTH, true);
 
         for _ in 0..CORRELATION_COUNT {
             let sender_corr = full_key_1.next_wide_beaver_triple::<1, GF2>();

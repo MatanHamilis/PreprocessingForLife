@@ -39,9 +39,10 @@ pub fn mul_benchmark_with_vec(c: &mut Criterion) {
                 )
             },
             |(mut a, b)| {
-                a.iter_mut().zip(b.iter()).for_each(|(a, b)| {
+                black_box(a.iter_mut().zip(b.iter()).for_each(|(a, b)| {
                     (*a *= *b);
-                })
+                }));
+                black_box(a);
             },
             BatchSize::SmallInput,
         );

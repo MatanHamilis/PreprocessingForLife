@@ -26,13 +26,47 @@ pub struct PprfSender {
     pub evals: Vec<GF128>,
     pub left_right_sums: Vec<(GF128, GF128)>,
 }
-impl From<PackedPprfSender> for PprfSender {
-    fn from(value: PackedPprfSender) -> Self {
-        (&value).into()
-    }
-}
+// impl From<PackedPprfSender> for PprfSender {
+//     fn from(value: PackedPprfSender) -> Self {
+//         (&value).into()
+//     }
+// }
 
 impl PackedPprfSender {
+    fn inflate_internal(&self, is_deal: bool) -> (Vec<GF128>, Option<Vec<(GF128, GF128)>>) {
+        let mut evals = Vec::with_capacity(1 << self.depth);
+        unsafe { evals.set_len(1 << self.depth) };
+        let mut left_right_sums = if is_deal {
+            None
+        } else {
+            Some(Vec::<(GF128, GF128)>::with_capacity(self.depth))
+        };
+        evals[0] = self.seed;
+        for i in 0..self.depth {
+            double_prg_many_inplace(&mut evals[0..1 << (i + 1)]);
+            if !is_deal {
+                let sums = left_right_sums.as_mut().unwrap();
+                sums.push(
+                    evals[0..1 << (i + 1)]
+                        .chunks_exact(2)
+                        .fold((GF128::zero(), GF128::zero()), |a, b| {
+                            (a.0 + b[0], a.1 + b[1])
+                        }),
+                );
+            }
+        }
+        (evals, left_right_sums)
+    }
+    pub fn inflate_distributed(&self) -> PprfSender {
+        let (evals, left_right_sums) = self.inflate_internal(false);
+        PprfSender {
+            evals,
+            left_right_sums: left_right_sums.unwrap(),
+        }
+    }
+    pub fn inflate_with_deal(&self) -> Vec<GF128> {
+        self.inflate_internal(true).0
+    }
     pub fn puncture(&self, punctured_index: usize) -> PackedPprfReceiver {
         let mut seed = self.seed;
         let mut subtree_seeds = Vec::with_capacity(self.depth);
@@ -54,27 +88,29 @@ impl PackedPprfSender {
     }
 }
 
-impl From<&PackedPprfSender> for PprfSender {
-    fn from(value: &PackedPprfSender) -> Self {
-        let mut evals = vec![GF128::zero(); 1 << value.depth];
-        let mut left_right_sums = Vec::<(GF128, GF128)>::with_capacity(value.depth);
-        evals[0] = value.seed;
-        for i in 0..value.depth {
-            double_prg_many_inplace(&mut evals[0..1 << (i + 1)]);
-            left_right_sums.push(
-                evals[0..1 << (i + 1)]
-                    .chunks_exact(2)
-                    .fold((GF128::zero(), GF128::zero()), |a, b| {
-                        (a.0 + b[0], a.1 + b[1])
-                    }),
-            );
-        }
-        Self {
-            evals,
-            left_right_sums,
-        }
-    }
-}
+// impl From<&PackedPprfSender> for PprfSender {
+//     fn from(value: &PackedPprfSender) -> Self {
+//         // let mut evals = vec![GF128::zero(); 1 << value.depth];
+//         let mut evals = Vec::with_capacity(1 << value.depth);
+//         unsafe { evals.set_len(1 << value.depth) };
+//         let mut left_right_sums = Vec::<(GF128, GF128)>::with_capacity(value.depth);
+//         evals[0] = value.seed;
+//         for i in 0..value.depth {
+//             double_prg_many_inplace(&mut evals[0..1 << (i + 1)]);
+//             left_right_sums.push(
+//                 evals[0..1 << (i + 1)]
+//                     .chunks_exact(2)
+//                     .fold((GF128::zero(), GF128::zero()), |a, b| {
+//                         (a.0 + b[0], a.1 + b[1])
+//                     }),
+//             );
+//         }
+//         Self {
+//             evals,
+//             left_right_sums: Vec::new(),
+//         }
+//     }
+// }
 pub async fn distributed_pprf_sender(
     engine: impl MultiPartyEngine,
     left_right_sums: &[(GF128, GF128)],
@@ -96,7 +132,8 @@ impl From<&PackedPprfReceiver> for PprfReceiver {
     fn from(value: &PackedPprfReceiver) -> Self {
         let depth = value.subtree_seeds.len();
         let n = 1 << depth;
-        let mut evals = unsafe { vec![MaybeUninit::<GF128>::uninit().assume_init(); n] };
+        let mut evals = Vec::with_capacity(n);
+        unsafe { evals.set_len(n) };
         assert!(value.punctured_index < n);
         let mut top = n;
         let mut bottom = 0;
@@ -130,7 +167,8 @@ pub async fn distributed_pprf_receiver<T: MultiPartyEngine>(
     let ot_receiver =
         ChosenMessageOTReceiver::init(engine.sub_protocol(&"PPRF TO OT"), depth).await?;
     let receiver_ots = ot_receiver.handle_choice().await?;
-    let mut evals = unsafe { vec![MaybeUninit::<GF128>::uninit().assume_init(); 1 << depth] };
+    let mut evals = Vec::with_capacity(1 << depth);
+    unsafe { evals.set_len(1 << depth) };
     let mut punctured_index = 0;
     receiver_ots.into_iter().enumerate().for_each(|(idx, ot)| {
         let round_slice = &mut evals[0..2 << idx];
@@ -187,7 +225,7 @@ mod tests {
         let pprf_receiver_engine = engines.remove(&party_ids[1]).unwrap();
         let mut rng = thread_rng();
         let pprf_sender_val: PprfSender =
-            PackedPprfSender::new(PPRF_DEPTH, GF128::random(&mut rng)).into();
+            PackedPprfSender::new(PPRF_DEPTH, GF128::random(&mut rng)).inflate_distributed();
         let pprf_sender_handle =
             distributed_pprf_sender(pprf_sender_engine, &pprf_sender_val.left_right_sums);
         let pprf_receiver_handle =
@@ -221,11 +259,11 @@ mod tests {
     fn test_puncture() {
         const DEPTH: usize = 1;
         let (sender, receiver) = deal_pprf(DEPTH, thread_rng());
-        let sender = PprfSender::from(&sender);
+        let sender = sender.inflate_with_deal();
         let receiver = PprfReceiver::from(&receiver);
         for i in 0..1 << DEPTH {
             if i != receiver.punctured_index {
-                assert_eq!(sender.evals[i], receiver.evals[i])
+                assert_eq!(sender[i], receiver.evals[i])
             }
         }
     }

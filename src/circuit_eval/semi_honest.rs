@@ -1,7 +1,7 @@
 use super::bristol_fashion;
-use core::time;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::marker::PhantomData;
 use std::ops::{Add, AddAssign};
 
 use aes_prng::AesRng;
@@ -16,7 +16,10 @@ use tokio::time::Instant;
 use crate::circuit_eval::bristol_fashion::ParsedGate;
 use crate::engine::{MultiPartyEngine, PartyId};
 use crate::fields::{FieldElement, PackedField, PackedGF2, GF128, GF2};
-use crate::pcg::{FullPcgKey, PackedOfflineFullPcgKey, RegularBeaverTriple, WideBeaverTriple};
+use crate::pcg::{
+    FullPcgKey, PackedKeysDealer, PackedOfflineFullPcgKey, PackedSenderCorrelationGenerator,
+    RegularBeaverTriple, WideBeaverTriple,
+};
 
 const PPRF_COUNT: usize = 50;
 const PPRF_DEPTH: usize = 20;
@@ -186,6 +189,7 @@ impl FieldContainer<PackedGF2> for PackedGF2Container {
 }
 #[async_trait]
 pub trait OfflineSemiHonestCorrelation<CF: FieldElement>: Serialize + DeserializeOwned {
+    type Dealer;
     fn get_personal_circuit_input_wires_masks(&self) -> &[CF];
     fn get_circuit_input_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<CF>;
     fn get_circuit_output_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<CF>;
@@ -200,6 +204,7 @@ pub trait OfflineSemiHonestCorrelation<CF: FieldElement>: Serialize + Deserializ
         rng: &mut R,
         parties_input_start_and_lengths: &HashMap<PartyId, (usize, usize)>,
         circuit: &ParsedCircuit,
+        dealer: &Self::Dealer,
     ) -> (Vec<CF>, Vec<CF>, Vec<(PartyId, Self)>);
     /// This method may optionally be called in a pre-online phase to same computation time in the online phase itself.
     fn pre_online_phase_preparation(&mut self, circuit: &ParsedCircuit);
@@ -215,21 +220,37 @@ pub trait OfflineSemiHonestCorrelation<CF: FieldElement>: Serialize + Deserializ
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct PcgBasedPairwiseBooleanCorrelation<const N: usize, F: PackedField<GF2, N>> {
+#[serde(bound = "PS: Serialize + DeserializeOwned")]
+pub struct PcgBasedPairwiseBooleanCorrelation<
+    const N: usize,
+    F: PackedField<GF2, N>,
+    PS: PackedSenderCorrelationGenerator,
+    D: PackedKeysDealer<PS>,
+> {
     #[serde(bound = "")]
     pub input_wires_masks: Vec<F>,
     pub shares_seed: [u8; 16],
-    pub pcg_keys: Vec<(PartyId, (PackedOfflineFullPcgKey, [u8; 16]))>,
+    pub pcg_keys: Vec<(
+        PartyId,
+        (PackedOfflineFullPcgKey<PS, PS::Receiver>, [u8; 16]),
+    )>,
     #[serde(bound = "")]
-    pub regular_expanded_pcg_keys: Option<Vec<((usize, usize), RegularPairwiseBeaverTriple<F>)>>,
+    pub regular_expanded_pcg_keys:
+        Option<Vec<(PartyId, Vec<((usize, usize), RegularBeaverTriple<F>)>)>>,
     #[serde(bound = "")]
-    pub wide_expanded_pcg_keys: Option<Vec<((usize, usize), WidePairwiseBeaverTriple<F>)>>,
+    pub wide_expanded_pcg_keys: Option<Vec<(PartyId, Vec<((usize, usize), WideBeaverTriple<F>)>)>>,
+    _d: PhantomData<D>,
 }
 
 #[async_trait]
-impl<const N: usize, F: PackedField<GF2, N>> OfflineSemiHonestCorrelation<F>
-    for PcgBasedPairwiseBooleanCorrelation<N, F>
+impl<
+        const N: usize,
+        F: PackedField<GF2, N>,
+        PS: PackedSenderCorrelationGenerator,
+        D: PackedKeysDealer<PS>,
+    > OfflineSemiHonestCorrelation<F> for PcgBasedPairwiseBooleanCorrelation<N, F, PS, D>
 {
+    type Dealer = D;
     fn get_personal_circuit_input_wires_masks(&self) -> &[F] {
         &self.input_wires_masks
     }
@@ -238,7 +259,7 @@ impl<const N: usize, F: PackedField<GF2, N>> OfflineSemiHonestCorrelation<F>
     }
     fn pre_online_phase_preparation(&mut self, circuit: &ParsedCircuit) {
         let (m, wm) =
-            expand_pairwise_beaver_triples::<N, CODE_WEIGHT, F>(circuit, &mut self.pcg_keys);
+            expand_pairwise_beaver_triples::<N, CODE_WEIGHT, F, PS>(circuit, &mut self.pcg_keys);
         self.regular_expanded_pcg_keys = Some(m);
         self.wide_expanded_pcg_keys = Some(wm);
     }
@@ -251,18 +272,17 @@ impl<const N: usize, F: PackedField<GF2, N>> OfflineSemiHonestCorrelation<F>
         Vec<((usize, usize), RegularMask<F>)>,
         Vec<((usize, usize), WideMask<F>)>,
     ) {
-        let (m, wm) = expand_pairwise_beaver_triples::<N, CODE_WEIGHT, F>(circuit, &self.pcg_keys);
+        let (m, wm) =
+            expand_pairwise_beaver_triples::<N, CODE_WEIGHT, F, PS>(circuit, &self.pcg_keys);
         // If there are only two parties...
         if self.pcg_keys.len() == 1 {
             let mut regular = Vec::<((usize, usize), RegularMask<F>)>::new();
             let mut wide = Vec::<((usize, usize), WideMask<F>)>::new();
-            m.iter().for_each(|(g, bts)| {
-                let b = &bts.0[0].1;
-                regular.push((*g, RegularMask(b.0, b.1)));
+            m[0].1.iter().for_each(|(g, bts)| {
+                regular.push((*g, RegularMask(bts.0, bts.1)));
             });
-            wm.iter().for_each(|(g, bts)| {
-                let b = &bts.0[0].1;
-                wide.push((*g, WideMask(b.0, b.1)));
+            wm[0].1.iter().for_each(|(g, bts)| {
+                wide.push((*g, WideMask(bts.0, bts.1)));
             });
             return (regular, wide);
         }
@@ -285,18 +305,8 @@ impl<const N: usize, F: PackedField<GF2, N>> OfflineSemiHonestCorrelation<F>
 
         // If only two parties - expansion is silent.
         if engine.party_ids().len() == 2 {
-            let mut regular_output = HashMap::new();
-            let mut wide_output = HashMap::new();
-            pairwise_triples.iter().for_each(|(g, bts)| {
-                regular_output.insert(*g, bts.0[0].1);
-                // RegularPairwiseBeaverTriple(v) => BeaverTriple::Regular(v[0].1)
-                // PairwiseBeaverTriple::Wide(v) => BeaverTriple::Wide(v[0].1),
-            });
-            wide_pairwise_triples.iter().for_each(|(g, bts)| {
-                wide_output.insert(*g, bts.0[0].1);
-                // RegularPairwiseBeaverTriple(v) => BeaverTriple::Regular(v[0].1)
-                // PairwiseBeaverTriple::Wide(v) => BeaverTriple::Wide(v[0].1),
-            });
+            let regular_output = pairwise_triples[0].1.iter().copied().collect();
+            let wide_output = wide_pairwise_triples[0].1.iter().copied().collect();
             return (regular_output, wide_output);
         }
 
@@ -320,6 +330,7 @@ impl<const N: usize, F: PackedField<GF2, N>> OfflineSemiHonestCorrelation<F>
         mut rng: &mut R,
         parties_input_start_and_lengths: &HashMap<PartyId, (usize, usize)>,
         circuit: &ParsedCircuit,
+        dealer: &Self::Dealer,
     ) -> (Vec<F>, Vec<F>, Vec<(PartyId, Self)>) {
         let parties_count = parties_input_start_and_lengths.len();
         let mut pcg_keys = HashMap::with_capacity(parties_count);
@@ -328,7 +339,7 @@ impl<const N: usize, F: PackedField<GF2, N>> OfflineSemiHonestCorrelation<F>
             for j_pid in parties_input_start_and_lengths.keys().copied().take(i) {
                 let mut pcg_code_seed = [0u8; 16];
                 rng.fill_bytes(&mut pcg_code_seed);
-                let (snd, rcv) = PackedOfflineFullPcgKey::deal(PPRF_COUNT, PPRF_DEPTH, &mut rng);
+                let (snd, rcv) = PackedOfflineFullPcgKey::deal(dealer, &mut rng);
                 pcg_keys
                     .get_mut(&j_pid)
                     .unwrap()
@@ -375,6 +386,7 @@ impl<const N: usize, F: PackedField<GF2, N>> OfflineSemiHonestCorrelation<F>
                         shares_seed: seed,
                         pcg_keys: pcg_key,
                         input_wires_masks,
+                        _d: PhantomData,
                     },
                 )
             })
@@ -454,58 +466,90 @@ pub fn expand_pairwise_beaver_triples<
     const N: usize,
     const CODE_WIDTH: usize,
     F: PackedField<GF2, N>,
+    PS: PackedSenderCorrelationGenerator,
 >(
     circuit: &ParsedCircuit,
-    pcg_keys: &[(PartyId, (PackedOfflineFullPcgKey, [u8; 16]))],
+    pcg_keys: &[(
+        PartyId,
+        (PackedOfflineFullPcgKey<PS, PS::Receiver>, [u8; 16]),
+    )],
 ) -> (
-    Vec<((usize, usize), RegularPairwiseBeaverTriple<F>)>,
-    Vec<((usize, usize), WidePairwiseBeaverTriple<F>)>,
+    Vec<(PartyId, Vec<((usize, usize), RegularBeaverTriple<F>)>)>,
+    Vec<(PartyId, Vec<((usize, usize), WideBeaverTriple<F>)>)>,
 ) {
+    // Check if circuit has Wide-ANDs, otherwise expand only one of the PCGs.
+    let mut wand_count: usize = 0;
+    let mut and_count: usize = 0;
+    circuit.gates.iter().for_each(|layer| {
+        layer.iter().for_each(|gate| match gate {
+            ParsedGate::WideAndGate {
+                input: _,
+                input_bit: _,
+                output: _,
+            } => wand_count += 1,
+            ParsedGate::AndGate {
+                input: _,
+                output: _,
+            } => and_count += 1,
+            _ => {}
+        })
+    });
+    let has_wand = wand_count > 0;
     let time = Instant::now();
     let mut pcg_keys: Vec<_> = pcg_keys
         .iter()
-        .map(|(pid, (pk, code))| (*pid, FullPcgKey::new_from_offline(pk, *code, CODE_WIDTH)))
+        .map(|(pid, (pk, code))| {
+            (
+                *pid,
+                FullPcgKey::new_from_offline(pk, *code, CODE_WIDTH, has_wand),
+            )
+        })
         .collect();
     println!("PCG Offline took: {}ms", time.elapsed().as_millis());
     let time = Instant::now();
-    let mut regular_beaver_triples = Vec::new();
-    let mut wide_beaver_triples = Vec::new();
-    circuit
-        .iter()
-        .filter(|(_, _, gate)| !gate.is_linear())
-        .for_each(|(layer_idx, gate_idx, gate)| {
-            match gate {
-                ParsedGate::AndGate {
-                    input: _,
-                    output: _,
-                } => {
-                    let v: Vec<_> = pcg_keys
-                        .iter_mut()
-                        .map(|(pid, k)| {
-                            let bt = k.next_bit_beaver_triple::<N, F>();
-                            (*pid, bt)
+    let regular_beaver_triples: Vec<(PartyId, Vec<((usize, usize), RegularBeaverTriple<F>)>)> =
+        pcg_keys
+            .iter_mut()
+            .map(|(id, key)| {
+                let time = Instant::now();
+                let o = (
+                    *id,
+                    circuit
+                        .iter()
+                        .filter(|g| match g.2 {
+                            ParsedGate::AndGate {
+                                input: _,
+                                output: _,
+                            } => true,
+                            _ => false,
                         })
-                        .collect();
-                    regular_beaver_triples
-                        .push(((layer_idx, gate_idx), RegularPairwiseBeaverTriple(v)));
-                }
-                ParsedGate::WideAndGate {
-                    input: _,
-                    input_bit: _,
-                    output: _,
-                } => {
-                    let v: Vec<_> = pcg_keys
-                        .iter_mut()
-                        .map(|(pid, k)| {
-                            let bt = k.next_wide_beaver_triple::<N, F>();
-                            (*pid, bt)
-                        })
-                        .collect();
-                    wide_beaver_triples.push(((layer_idx, gate_idx), WidePairwiseBeaverTriple(v)));
-                }
-                _ => panic!(),
-            };
-        });
+                        .map(|g| ((g.0, g.1), key.next_bit_beaver_triple()))
+                        .collect(),
+                );
+                println!("Bit PCG for party took: {}ms", time.elapsed().as_millis());
+                o
+            })
+            .collect();
+    let wide_beaver_triples: Vec<(PartyId, Vec<((usize, usize), WideBeaverTriple<F>)>)> = pcg_keys
+        .iter_mut()
+        .map(|(id, key)| {
+            (
+                *id,
+                circuit
+                    .iter()
+                    .filter(|g| match g.2 {
+                        ParsedGate::WideAndGate {
+                            input: _,
+                            input_bit: _,
+                            output: _,
+                        } => true,
+                        _ => false,
+                    })
+                    .map(|g| ((g.0, g.1), key.next_wide_beaver_triple()))
+                    .collect(),
+            )
+        })
+        .collect();
     println!("online PCG took: {}ms", time.elapsed().as_millis());
     (regular_beaver_triples, wide_beaver_triples)
 }
@@ -584,8 +628,8 @@ pub fn gate_masks_from_seed<F: FieldElement>(
 pub async fn create_multi_party_beaver_triples<F: FieldElement>(
     engine: &mut impl MultiPartyEngine,
     circuit: &ParsedCircuit,
-    pairwise_triples: &[((usize, usize), RegularPairwiseBeaverTriple<F>)],
-    wide_pairwise_triples: &[((usize, usize), WidePairwiseBeaverTriple<F>)],
+    pairwise_triples: &[(PartyId, Vec<((usize, usize), RegularBeaverTriple<F>)>)],
+    wide_pairwise_triples: &[(PartyId, Vec<((usize, usize), WideBeaverTriple<F>)>)],
     gate_input_masks: &[((usize, usize), RegularMask<F>)],
     wide_gate_input_masks: &[((usize, usize), WideMask<F>)],
 ) -> (
@@ -599,68 +643,64 @@ pub async fn create_multi_party_beaver_triples<F: FieldElement>(
         .copied()
         .filter(|v| *v != my_id)
         .collect();
-    let mut pairwise_beaver_triples = HashMap::new();
-    let mut n_wise_beaver_triples = HashMap::new();
-    let mut n_wise_wide_beaver_triples = HashMap::new();
-    gate_input_masks
+    let mut n_wise_beaver_triples: HashMap<_, _> = gate_input_masks
         .iter()
-        .copied()
-        .zip(pairwise_triples.iter())
-        .for_each(
-            |(((layer_idx, gate_idx), mask), ((layer_idx_t, gate_idx_t), gate_beaver_triples))| {
-                assert_eq!(&layer_idx, layer_idx_t);
-                assert_eq!(&gate_idx, gate_idx_t);
-                let gate = circuit.gates[layer_idx][gate_idx];
-                match (gate, mask, gate_beaver_triples) {
+        .map(|(g, m)| (*g, RegularBeaverTriple(m.0, m.1, m.0 * m.1)))
+        .collect();
+    let mut n_wise_wide_beaver_triples: HashMap<_, _> = wide_gate_input_masks
+        .iter()
+        .map(|(g, m)| {
+            (
+                *g,
+                WideBeaverTriple(m.0, m.1, core::array::from_fn(|i| m.0 * m.1[i])),
+            )
+        })
+        .collect();
+    pairwise_triples.iter().for_each(|(pid, triples)| {
+        let mut v = Vec::with_capacity(triples.len());
+        triples
+            .iter()
+            .zip(gate_input_masks.iter())
+            .for_each(|(triple, mask)| {
+                assert_eq!(triple.0, mask.0);
+                let gate = circuit.gates[triple.0 .0][triple.0 .1];
+                match (gate, mask.1, triple.1) {
                     (
                         ParsedGate::AndGate {
                             input: _,
                             output: _,
                         },
                         RegularMask(x, y),
-                        RegularPairwiseBeaverTriple(gate_beaver_triples),
+                        RegularBeaverTriple(a, b, c),
                     ) => {
-                        let xy = x * y;
-                        let mut z = xy;
-                        for (party, RegularBeaverTriple(a, b, c)) in
-                            gate_beaver_triples.iter().copied()
-                        {
-                            engine.send((layer_idx, gate_idx, RegularMask(x - a, y - b)), party);
-                            z += c + y * x - b * a - xy;
-                            pairwise_beaver_triples.insert((layer_idx, gate_idx, party), a);
-                        }
-                        n_wise_beaver_triples
-                            .insert((layer_idx, gate_idx), RegularBeaverTriple(x, y, z));
+                        v.push((mask.0 .0, mask.0 .1, RegularMask(x - a, y - b)));
+                        let z = c - b * a;
+                        let t = n_wise_beaver_triples.get_mut(&triple.0).unwrap();
+                        t.2 += z;
                     }
                     _ => panic!(),
                 }
-            },
-        );
-    while !pairwise_beaver_triples.is_empty() {
-        let ((layer_idx, gate_idx, opening), party): ((usize, usize, RegularMask<F>), _) =
-            engine.recv().await.unwrap();
-        let a = pairwise_beaver_triples
-            .remove(&(layer_idx, gate_idx, party))
-            .unwrap();
-        let beaver_triple = n_wise_beaver_triples
-            .get_mut(&(layer_idx, gate_idx))
-            .unwrap();
-        match (opening, beaver_triple) {
-            (RegularMask(xa, yb), RegularBeaverTriple(_, y, z)) => {
-                *z += xa * *y + yb * a;
-            }
+            });
+        engine.send(v, *pid);
+    });
+    for (p, triples) in pairwise_triples {
+        let v_p: Vec<(usize, usize, RegularMask<F>)> = engine.recv_from(*p).await.unwrap();
+        assert_eq!(v_p.len(), triples.len());
+        for (t, m) in triples.iter().zip(v_p.into_iter()) {
+            assert_eq!(t.0, (m.0, m.1));
+            let bt = n_wise_beaver_triples.get_mut(&t.0).unwrap();
+            bt.2 += m.2 .0 * bt.1 + m.2 .1 * t.1 .0;
         }
     }
-    wide_gate_input_masks
-        .iter()
-        .copied()
-        .zip(wide_pairwise_triples.iter())
-        .for_each(
-            |(((layer_idx, gate_idx), mask), ((layer_idx_t, gate_idx_t), gate_beaver_triples))| {
-                assert_eq!(&layer_idx, layer_idx_t);
-                assert_eq!(&gate_idx, gate_idx_t);
-                let gate = circuit.gates[layer_idx][gate_idx];
-                match (gate, mask, gate_beaver_triples) {
+    wide_pairwise_triples.iter().for_each(|(pid, triples)| {
+        let mut v = Vec::with_capacity(triples.len());
+        triples
+            .iter()
+            .zip(wide_gate_input_masks.iter())
+            .for_each(|(triple, mask)| {
+                assert_eq!(triple.0, mask.0);
+                let gate = circuit.gates[triple.0 .0][triple.0 .1];
+                match (gate, mask.1, triple.1) {
                     (
                         ParsedGate::WideAndGate {
                             input: _,
@@ -668,48 +708,30 @@ pub async fn create_multi_party_beaver_triples<F: FieldElement>(
                             output: _,
                         },
                         WideMask(x, wy),
-                        WidePairwiseBeaverTriple(gate_beaver_triples),
+                        WideBeaverTriple(a, wb, wc),
                     ) => {
-                        let xwy = core::array::from_fn(|i| wy[i] * x);
-                        let mut wz = xwy;
-                        for (party, WideBeaverTriple(a, wb, wc)) in
-                            gate_beaver_triples.iter().copied()
-                        {
-                            engine.send(
-                                (
-                                    layer_idx,
-                                    gate_idx,
-                                    WideMask(x - a, core::array::from_fn(|i| wy[i] - wb[i])),
-                                ),
-                                party,
-                            );
-                            for i in 0..wz.len() {
-                                wz[i] += wc[i] + wy[i] * x - wb[i] * a - xwy[i];
-                            }
-                            pairwise_beaver_triples.insert((layer_idx, gate_idx, party), a);
-                        }
-                        n_wise_wide_beaver_triples
-                            .insert((layer_idx, gate_idx), WideBeaverTriple(x, wy, wz));
+                        v.push((
+                            mask.0 .0,
+                            mask.0 .1,
+                            WideMask(x - a, core::array::from_fn(|i| wy[i] - wb[i])),
+                        ));
+                        let t = n_wise_wide_beaver_triples.get_mut(&triple.0).unwrap();
+                        t.2.iter_mut()
+                            .enumerate()
+                            .for_each(|(i, ti)| *ti += wc[i] - wb[i] * a);
                     }
                     _ => panic!(),
                 }
-            },
-        );
-
-    while !pairwise_beaver_triples.is_empty() {
-        let ((layer_idx, gate_idx, opening), party): ((usize, usize, WideMask<F>), _) =
-            engine.recv().await.unwrap();
-        let a = pairwise_beaver_triples
-            .remove(&(layer_idx, gate_idx, party))
-            .unwrap();
-        let beaver_triple = n_wise_wide_beaver_triples
-            .get_mut(&(layer_idx, gate_idx))
-            .unwrap();
-        match (opening, beaver_triple) {
-            (WideMask(xa, wyb), WideBeaverTriple(_, wy, wz)) => {
-                for i in 0..wz.len() {
-                    wz[i] += wy[i] * xa + wyb[i] * a;
-                }
+            });
+        engine.send(v, *pid);
+    });
+    for (p, triples) in wide_pairwise_triples {
+        let v_p: Vec<(usize, usize, WideMask<F>)> = engine.recv_from(*p).await.unwrap();
+        for (t, m) in triples.iter().zip(v_p.into_iter()) {
+            assert_eq!(t.0, (m.0, m.1));
+            let bt = n_wise_wide_beaver_triples.get_mut(&t.0).unwrap();
+            for i in 0..bt.2.len() {
+                bt.2[i] += m.2 .0 * bt.1[i] + m.2 .1[i] * t.1 .0;
             }
         }
     }
@@ -1080,10 +1102,17 @@ mod tests {
         },
         engine::{LocalRouter, MultiPartyEngine},
         fields::{FieldElement, PackedField, PackedGF2, GF2},
+        pcg::StandardDealer,
         uc_tags::UCTag,
     };
 
-    async fn test_boolean_circuit<const N: usize, F: PackedField<GF2, N>, FC: FieldContainer<F>>(
+    async fn test_boolean_circuit<
+        const PPRF_COUNT: usize,
+        const PPRF_DEPTH: usize,
+        const N: usize,
+        F: PackedField<GF2, N>,
+        FC: FieldContainer<F>,
+    >(
         circuit: ParsedCircuit,
         input: &[F],
         party_count: usize,
@@ -1112,8 +1141,14 @@ mod tests {
                 (*pid, (my_input_start, my_input_length))
             })
             .collect();
+        let dealer = StandardDealer::new(PPRF_COUNT, PPRF_DEPTH);
         let (total_input_wires_masks, total_output_wires_masks, offline_correlations) =
-            PcgBasedPairwiseBooleanCorrelation::deal(&mut rng, &parties_input_lengths, &circuit);
+            PcgBasedPairwiseBooleanCorrelation::deal(
+                &mut rng,
+                &parties_input_lengths,
+                &circuit,
+                &dealer,
+            );
 
         let mut inputs: HashMap<_, _> = parties_input_lengths
             .iter()
@@ -1351,7 +1386,8 @@ mod tests {
         );
 
         let input = vec![GF2::one(), GF2::zero()];
-        let output = test_boolean_circuit::<1, GF2, GF2Container>(parsed_circuit, &input, 2).await;
+        let output =
+            test_boolean_circuit::<10, 5, 1, GF2, GF2Container>(parsed_circuit, &input, 3).await;
 
         assert_eq!(output[0], GF2::one());
     }
@@ -1386,7 +1422,8 @@ mod tests {
         );
 
         let input = vec![GF2::one(); 129];
-        let output = test_boolean_circuit::<1, GF2, GF2Container>(parsed_circuit, &input, 7).await;
+        let output =
+            test_boolean_circuit::<10, 5, 1, GF2, GF2Container>(parsed_circuit, &input, 7).await;
 
         assert_eq!(output, vec![GF2::one(); 128]);
     }
@@ -1402,7 +1439,7 @@ mod tests {
             let parsed_circuit = super::super::circuit_from_file(path).unwrap();
 
             let input = vec![PackedGF2::one(); parsed_circuit.input_wire_count];
-            test_boolean_circuit::<{ PackedGF2::BITS }, _, PackedGF2Container>(
+            test_boolean_circuit::<10, 5, { PackedGF2::BITS }, _, PackedGF2Container>(
                 parsed_circuit,
                 &input,
                 2,

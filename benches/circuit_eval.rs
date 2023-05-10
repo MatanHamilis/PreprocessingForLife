@@ -16,7 +16,8 @@ use silent_party::{
         PcgBasedPairwiseBooleanCorrelation, PreOnlineMaterial,
     },
     engine::{self, MultiPartyEngine, NetworkRouter},
-    fields::{FieldElement, PackedField, PackedGF2, GF128, GF2},
+    fields::{FieldElement, PackedField, PackedGF2, GF128, GF2, GF64},
+    pcg::{PackedKeysDealer, PackedSenderCorrelationGenerator, StandardDealer},
     PartyId, UCTag,
 };
 use tokio::join;
@@ -65,6 +66,8 @@ fn bench_boolean_circuit_semi_honest<
     const N: usize,
     F: PackedField<GF2, N>,
     FC: FieldContainer<F>,
+    PS: PackedSenderCorrelationGenerator + 'static,
+    D: PackedKeysDealer<PS> + 'static,
 >(
     c: &mut Criterion,
     id: &str,
@@ -72,10 +75,11 @@ fn bench_boolean_circuit_semi_honest<
     input: &[F],
     party_count: usize,
     base_port: u16,
+    pcg_dealer: Arc<D>,
 ) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .worker_threads(16)
+        .worker_threads(4)
         .build()
         .unwrap();
     c.bench_function(format!("{} semi honest online", id).as_str(), |b| {
@@ -105,11 +109,13 @@ fn bench_boolean_circuit_semi_honest<
                     (*pid, (my_input_start, my_input_length))
                 })
                 .collect();
-            let (_, _, offline_correlations) = PcgBasedPairwiseBooleanCorrelation::<N, F>::deal(
-                &mut rng,
-                &parties_input_lengths,
-                &circuit,
-            );
+            let (_, _, offline_correlations) =
+                PcgBasedPairwiseBooleanCorrelation::<N, F, PS, D>::deal(
+                    &mut rng,
+                    &parties_input_lengths,
+                    &circuit,
+                    pcg_dealer.as_ref(),
+                );
 
             let parties_input_lengths = Arc::new(parties_input_lengths);
             let mut inputs: HashMap<_, _> = parties_input_lengths
@@ -209,6 +215,8 @@ fn bench_malicious_circuit<
     const PACKING: usize,
     PF: PackedField<GF2, PACKING>,
     FC: FieldContainer<PF>,
+    PS: PackedSenderCorrelationGenerator + 'static,
+    D: PackedKeysDealer<PS> + 'static,
 >(
     c: &mut Criterion,
     id: &str,
@@ -216,10 +224,11 @@ fn bench_malicious_circuit<
     input: &[PF],
     parties: usize,
     base_port: u16,
+    pcg_dealer: Arc<D>,
 ) {
-    let mut two = GF128::zero();
+    let mut two = GF64::zero();
     two.set_bit(true, 1);
-    let three = two + GF128::one();
+    let three = two + GF64::one();
     let four = two * two;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -233,6 +242,7 @@ fn bench_malicious_circuit<
         b.to_async(&runtime).iter_custom(|_| {
             let circuit = circuit.clone();
             let input = input.clone();
+            let dealer = pcg_dealer.clone();
             async move {
                 // Offline
                 let dealer_id: PartyId = parties as PartyId + 1;
@@ -273,9 +283,9 @@ fn bench_malicious_circuit<
                             PACKING,
                             PF,
                             GF2,
-                            GF128,
+                            GF64,
                             _,
-                            PcgBasedPairwiseBooleanCorrelation<PACKING, PF>,
+                            PcgBasedPairwiseBooleanCorrelation<PACKING, PF, PS, D>,
                         >::malicious_security_offline_dealer(
                             &mut dealer_engine,
                             two,
@@ -283,6 +293,7 @@ fn bench_malicious_circuit<
                             four,
                             circuit_arc_clone,
                             &input_lengths,
+                            dealer.as_ref(),
                         )
                         .await;
                         println!("Dealer:\t took: {}ms", time.elapsed().as_millis());
@@ -298,9 +309,9 @@ fn bench_malicious_circuit<
                                 PACKING,
                                 PF,
                                 GF2,
-                                GF128,
+                                GF64,
                                 _,
-                                PcgBasedPairwiseBooleanCorrelation<PACKING, PF>,
+                                PcgBasedPairwiseBooleanCorrelation<PACKING, PF, PS, D>,
                             >::malicious_security_offline_party(
                                 &mut e,
                                 dealer_id,
@@ -310,7 +321,7 @@ fn bench_malicious_circuit<
                             Result::<
                                 (
                                     PartyId,
-                                    MaliciousSecurityOffline<PACKING, PF, GF2, GF128, _, _>,
+                                    MaliciousSecurityOffline<PACKING, PF, GF2, GF64, _, _>,
                                 ),
                                 (),
                             >::Ok((pid, res))
@@ -395,23 +406,26 @@ pub fn bench_2p_semi_honest(c: &mut Criterion) {
     let path = Path::new("circuits/aes_128.txt");
     let circuit = circuit_from_file(path).unwrap();
     let input = vec![PackedGF2::one(); circuit.input_wire_count];
-    bench_boolean_circuit_semi_honest::<{ PackedGF2::BITS }, _, PackedGF2Container>(
+    let dealer = Arc::new(StandardDealer::new(50, 20));
+    bench_boolean_circuit_semi_honest::<{ PackedGF2::BITS }, _, PackedGF2Container, _, _>(
         c,
         "aes semi honest packed",
         circuit.clone(),
         &input,
         2,
         3000,
+        dealer.clone(),
     );
 
     let input = vec![GF2::one(); circuit.input_wire_count];
-    bench_boolean_circuit_semi_honest::<{ GF2::BITS }, _, GF2Container>(
+    bench_boolean_circuit_semi_honest::<{ GF2::BITS }, _, GF2Container, _, _>(
         c,
         "aes semi honest bit",
         circuit.clone(),
         &input,
         2,
         3000,
+        dealer.clone(),
     );
 }
 pub fn bench_2p_malicious(c: &mut Criterion) {
@@ -423,22 +437,25 @@ pub fn bench_2p_malicious(c: &mut Criterion) {
     let path = Path::new("circuits/aes_128.txt");
     let circuit = circuit_from_file(path).unwrap();
     let input = vec![PackedGF2::one(); circuit.input_wire_count];
-    bench_malicious_circuit::<{ PackedGF2::BITS }, _, PackedGF2Container>(
+    let dealer = Arc::new(StandardDealer::new(50, 20));
+    bench_malicious_circuit::<{ PackedGF2::BITS }, _, PackedGF2Container, _, _>(
         c,
         "aes malicious packed",
         circuit.clone(),
         &input,
         2,
         3000,
+        dealer.clone(),
     );
     let input = vec![GF2::one(); circuit.input_wire_count];
-    bench_malicious_circuit::<{ GF2::BITS }, _, GF2Container>(
+    bench_malicious_circuit::<{ GF2::BITS }, _, GF2Container, _, _>(
         c,
         "aes malicious bit",
         circuit.clone(),
         &input,
         2,
         3000,
+        dealer.clone(),
     );
 }
 criterion_group!(benches, bench_2p_malicious, bench_2p_semi_honest);

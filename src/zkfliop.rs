@@ -37,11 +37,9 @@ fn interpolate<F: FieldElement>(evals: &[(F, F)], at: F) -> F {
 }
 
 pub fn g<F: FieldElement>(z: &[F]) -> F {
-    let output = z
-        .par_chunks(CHUNK_SIZE)
+    z.par_chunks(CHUNK_SIZE)
         .map(|f| f.chunks_exact(2).map(|f| f[0] * f[1]).sum())
-        .sum();
-    output
+        .sum()
 }
 #[derive(Clone)]
 pub struct OfflineProver<F: FieldElement> {

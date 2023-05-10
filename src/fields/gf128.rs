@@ -12,7 +12,7 @@ use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, ShlAssign, S
 use std::ops::{Not, Shl};
 
 use super::gf2::GF2;
-use super::FieldElement;
+use super::{FieldElement, IntermediateMulField, MulResidue};
 
 /// This is the irreducible polynomial $x^128 + x^7 + x^2 + x + 1$.
 const IRREDUCIBLE_POLYNOMIAL_U64: u64 = (1 << 7) + (1 << 2) + (1 << 1) + (1 << 0);
@@ -389,6 +389,67 @@ impl Display for GF128 {
             write!(f, "{}", self.get_bit(i) as u8)?;
         }
         Ok(())
+    }
+}
+
+impl IntermediateMulField for GF128 {
+    type MulRes = MulResidue128;
+    fn intermediate_mul(&self, rhs: &Self) -> Self::MulRes {
+        let v = GF128::mul_no_reduce(&self.0, &rhs.0);
+        MulResidue128 {
+            base: v.0,
+            carry: v.1,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct MulResidue128 {
+    base: u64x2,
+    carry: u64x2,
+}
+impl MulResidue<GF128> for MulResidue128 {
+    fn reduce(self) -> GF128 {
+        let v = GF128::mod_reduce(self.carry);
+        GF128(v + self.base)
+    }
+}
+
+impl AddAssign for MulResidue128 {
+    fn add_assign(&mut self, rhs: Self) {
+        self.base += rhs.base;
+        self.carry += rhs.carry;
+    }
+}
+
+impl Add for MulResidue128 {
+    type Output = Self;
+    fn add(mut self, rhs: Self) -> Self::Output {
+        self += rhs;
+        self
+    }
+}
+impl Sum for MulResidue128 {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(
+            Self {
+                base: u64x2::default(),
+                carry: u64x2::default(),
+            },
+            |cur, acc| cur + acc,
+        )
+    }
+}
+impl SubAssign for MulResidue128 {
+    fn sub_assign(&mut self, rhs: Self) {
+        *self += rhs;
+    }
+}
+impl Sub for MulResidue128 {
+    type Output = Self;
+    fn sub(mut self, rhs: Self) -> Self::Output {
+        self -= rhs;
+        self
     }
 }
 

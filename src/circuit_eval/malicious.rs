@@ -1,4 +1,4 @@
-use std::{collections::HashMap, marker::PhantomData};
+use std::{collections::HashMap, marker::PhantomData, ops::Mul};
 
 use aes_prng::AesRng;
 use tokio::time::Instant;
@@ -23,7 +23,7 @@ const CODE_WIDTH: usize = 7;
 pub struct MaliciousSecurityOffline<
     const PACKING: usize,
     PF: PackedField<CF, PACKING>,
-    CF: FieldElement,
+    CF: FieldElement + Mul<F, Output = F>,
     F: FieldElement + From<CF>,
     C: AsRef<ParsedCircuit>,
     SHO: OfflineSemiHonestCorrelation<PF>,
@@ -37,7 +37,7 @@ pub struct MaliciousSecurityOffline<
 impl<
         const PACKING: usize,
         PF: PackedField<CF, PACKING>,
-        CF: FieldElement,
+        CF: FieldElement + Mul<F, Output = F>,
         F: FieldElement + From<CF>,
         C: AsRef<ParsedCircuit>,
         SHO: OfflineSemiHonestCorrelation<PF>,
@@ -50,6 +50,7 @@ impl<
         four: F,
         circuit: C,
         party_input_length: &HashMap<PartyId, (usize, usize)>,
+        dealer: &SHO::Dealer,
     ) {
         let my_id = engine.my_party_id();
         let mut parties: Vec<_> = engine
@@ -64,7 +65,7 @@ impl<
         let mut aes_rng = AesRng::from_random_seed();
 
         let (input_wire_masks, output_wire_masks, offline_correlations) =
-            SHO::deal(&mut aes_rng, party_input_length, circuit.as_ref());
+            SHO::deal(&mut aes_rng, party_input_length, circuit.as_ref(), dealer);
         for (p, oc) in offline_correlations.iter() {
             engine.send(oc, *p);
         }
@@ -164,7 +165,7 @@ pub struct PreOnlineMaterial<
 impl<
         const PACKING: usize,
         PF: PackedField<CF, PACKING>,
-        CF: FieldElement,
+        CF: FieldElement + Mul<F, Output = F>,
         F: FieldElement + From<CF>,
         C: AsRef<ParsedCircuit>,
         SHO: OfflineSemiHonestCorrelation<PF>,
@@ -269,16 +270,23 @@ mod tests {
         },
         engine::{self, LocalRouter, MultiPartyEngine, MultiPartyEngineImpl},
         fields::{FieldElement, PackedField, PackedGF2, GF128, GF2},
+        pcg::{
+            PackedKeysDealer, PackedOfflineReceiverPcgKey, PackedSenderCorrelationGenerator,
+            StandardDealer,
+        },
         PartyId, UCTag,
     };
 
     async fn test_malicious_circuit<
         const PACKING: usize,
         PF: PackedField<GF2, PACKING>,
+        PS: PackedSenderCorrelationGenerator + 'static,
+        D: PackedKeysDealer<PS> + 'static,
         FC: FieldContainer<PF>,
     >(
         circuit: ParsedCircuit,
         input: Vec<PF>,
+        dealer: Arc<D>,
     ) -> Vec<PF> {
         let mut local_eval_output = semi_honest::local_eval_circuit(&circuit, &input);
         local_eval_output.drain(0..local_eval_output.len() - circuit.output_wire_count);
@@ -319,6 +327,7 @@ mod tests {
             let circuit_arc_clone = circuit_arc.clone();
             let mut dealer_engine = offline_engines.remove(&DEALER_ID).unwrap();
             let input_lengths = input_lengths_arc.clone();
+            let dealer = dealer.clone();
             async move {
                 MaliciousSecurityOffline::<
                     PACKING,
@@ -326,7 +335,7 @@ mod tests {
                     GF2,
                     GF128,
                     _,
-                    PcgBasedPairwiseBooleanCorrelation<PACKING, PF>,
+                    PcgBasedPairwiseBooleanCorrelation<PACKING, PF, _, _>,
                 >::malicious_security_offline_dealer(
                     &mut dealer_engine,
                     two,
@@ -334,6 +343,7 @@ mod tests {
                     four,
                     circuit_arc_clone,
                     &input_lengths,
+                    dealer.as_ref(),
                 )
                 .await;
             }
@@ -350,7 +360,7 @@ mod tests {
                         GF2,
                         GF128,
                         _,
-                        PcgBasedPairwiseBooleanCorrelation<PACKING, PF>,
+                        PcgBasedPairwiseBooleanCorrelation<PACKING, PF, _, D>,
                     >::malicious_security_offline_party(
                         &mut e, DEALER_ID, circuit_clone_arc
                     )
@@ -398,6 +408,7 @@ mod tests {
         let pre_online_handles = try_join_all(pre_online_handles).await.unwrap();
 
         // Online
+
         let online_handles = pre_online_handles.into_iter().map(|(pid, mut pre)| {
             let input = inputs.remove(&pid).unwrap();
             let mut engine = online_engines.remove(&pid).unwrap();
@@ -452,7 +463,9 @@ mod tests {
         let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
             .expect("Failed to parse");
         let input = vec![GF2::zero(), GF2::zero()];
-        test_malicious_circuit::<1, _, GF2Container>(parsed_circuit, input).await;
+        let dealer = StandardDealer::new(10, 7);
+        test_malicious_circuit::<1, _, _, _, GF2Container>(parsed_circuit, input, Arc::new(dealer))
+            .await;
     }
     #[tokio::test]
     async fn test_three_bit_and() {
@@ -460,7 +473,9 @@ mod tests {
         let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
             .expect("Failed to parse");
         let input = vec![GF2::zero(), GF2::zero(), GF2::zero()];
-        test_malicious_circuit::<1, _, GF2Container>(parsed_circuit, input).await;
+        let dealer = StandardDealer::new(10, 7);
+        test_malicious_circuit::<1, _, _, _, GF2Container>(parsed_circuit, input, Arc::new(dealer))
+            .await;
     }
     #[tokio::test]
     async fn test_three_bit_or() {
@@ -479,7 +494,9 @@ mod tests {
         let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
             .expect("Failed to parse");
         let input = vec![GF2::zero(), GF2::zero(), GF2::zero()];
-        test_malicious_circuit::<1, _, GF2Container>(parsed_circuit, input).await;
+        let dealer = StandardDealer::new(10, 7);
+        test_malicious_circuit::<1, _, _, _, GF2Container>(parsed_circuit, input, Arc::new(dealer))
+            .await;
     }
 
     #[test]
@@ -497,7 +514,9 @@ mod tests {
             for _ in 0..circuit.input_wire_count {
                 input.push(GF2::one())
             }
-            test_malicious_circuit::<1, _, GF2Container>(circuit, input).await;
+            let dealer = StandardDealer::new(10, 7);
+            test_malicious_circuit::<1, _, _, _, GF2Container>(circuit, input, Arc::new(dealer))
+                .await;
         });
     }
 }

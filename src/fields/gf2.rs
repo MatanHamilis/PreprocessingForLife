@@ -1,4 +1,4 @@
-use super::{FieldElement, PackedField};
+use super::{FieldElement, PackedField, GF128, GF64};
 use bitvec::prelude::*;
 use rand::Rng;
 use rand_core::{CryptoRng, RngCore};
@@ -25,6 +25,27 @@ impl GF2 {
 
     pub fn random_not_cryptographic<T: RngCore>(rng: &mut T) -> Self {
         GF2::from(rng.next_u32() & 1 == 0)
+    }
+}
+
+impl Mul<GF128> for GF2 {
+    type Output = GF128;
+    fn mul(self, rhs: GF128) -> Self::Output {
+        if self.is_zero() {
+            GF128::zero()
+        } else {
+            rhs
+        }
+    }
+}
+impl Mul<GF64> for GF2 {
+    type Output = GF64;
+    fn mul(self, rhs: GF64) -> Self::Output {
+        if self.is_zero() {
+            GF64::zero()
+        } else {
+            rhs
+        }
     }
 }
 
@@ -206,7 +227,6 @@ const Packing: usize = 1 << 10;
 pub struct PackedGF2 {
     pub bits: BitArr!(for Packing, in usize),
 }
-
 impl FieldElement for PackedGF2 {
     const BITS: usize = Packing;
     fn from_bit(bit: bool) -> Self {
