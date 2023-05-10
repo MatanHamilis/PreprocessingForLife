@@ -174,35 +174,61 @@ impl PackedOfflineReceiverPcgKey {
         is_deal: bool,
     ) -> (OfflineReceiverPcgKey, Option<Vec<Vec<(GF128, GF128)>>>) {
         let n = self.pprfs.iter().map(|v| 1 << v.depth).sum();
+        let single_pprf_size = 1 << self.pprfs[0].depth;
         let mut evals = Vec::with_capacity(n);
+        unsafe { evals.set_len(n) };
         let mut left_right_sums = if is_deal {
             None
         } else {
-            Some(Vec::with_capacity(self.pprfs.len()))
+            let mut v = Vec::with_capacity(self.pprfs.len());
+            unsafe { v.set_len(self.pprfs.len()) };
+            Some(v)
         };
-        let evals_vecs: Vec<_> = self
-            .pprfs
-            .iter()
-            .enumerate()
-            .map(|(_, v)| {
-                let sender = if is_deal {
-                    v.inflate_with_deal()
-                } else {
-                    let sums = left_right_sums.as_mut().unwrap();
-                    let t = v.inflate_distributed();
-                    sums.push(t.left_right_sums);
-                    t.evals
-                };
-                sender
-            })
-            .collect();
-        let mut acc = GF128::zero();
-        evals_vecs.iter().for_each(|v| {
-            v.iter().for_each(|o| {
-                acc += o;
-                evals.push(acc);
-            })
+        let mut sums = vec![GF128::zero(); self.pprfs.len()];
+        if is_deal {
+            self.pprfs
+                .par_iter()
+                .zip(sums.par_iter_mut())
+                .zip(evals.par_chunks_exact_mut(single_pprf_size))
+                .for_each(|((v, s), output)| {
+                    let mut sum = GF128::zero();
+                    v.inflate_with_deal(output);
+                    output.iter_mut().for_each(|v| {
+                        sum += *v;
+                        *v = sum;
+                    });
+                    *s = sum;
+                });
+        } else {
+            self.pprfs
+                .par_iter()
+                .zip(left_right_sums.as_mut().unwrap().par_iter_mut())
+                .zip(sums.par_iter_mut())
+                .zip(evals.par_chunks_exact_mut(single_pprf_size))
+                .for_each(|(((v, sums), s), output)| {
+                    *sums = v.inflate_distributed(output);
+                    let mut sum = GF128::zero();
+                    output.iter_mut().for_each(|v| {
+                        sum += *v;
+                        *v = sum;
+                    });
+                    *s = sum;
+                });
+        };
+        //prefix sum
+        let mut sum = GF128::zero();
+        sums.iter_mut().for_each(|v| {
+            let a = *v;
+            *v = sum;
+            sum += a;
         });
+        evals
+            .par_chunks_exact_mut(single_pprf_size)
+            .zip(sums.par_iter())
+            .for_each(|(v, s)| {
+                let s = *s;
+                v.iter_mut().for_each(|vv| *vv += s);
+            });
         (
             OfflineReceiverPcgKey {
                 delta: self.delta,
