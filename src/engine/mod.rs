@@ -149,7 +149,6 @@ impl MultiPartyEngine for MultiPartyEngineImpl {
     }
     async fn recv<T: DeserializeOwned>(&mut self) -> Option<(T, PartyId)> {
         let received = if let Some(v) = self.buffer.pop_front() {
-            println!("Buffer");
             v
         } else {
             self.upstream_receiver.recv().await?

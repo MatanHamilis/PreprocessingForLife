@@ -11,6 +11,7 @@ pub use self::semi_honest::{
 mod bristol_fashion;
 mod malicious;
 mod semi_honest;
+mod spdz;
 mod verify;
 
 pub fn circuit_from_file(path: &Path) -> Option<ParsedCircuit> {

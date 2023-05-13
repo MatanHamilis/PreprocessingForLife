@@ -3,6 +3,7 @@
 #![feature(maybe_uninit_uninit_array)]
 #![feature(split_array)]
 #![feature(maybe_uninit_array_assume_init)]
+#![feature(generic_const_exprs)]
 
 pub mod circuit_eval;
 pub mod commitment;

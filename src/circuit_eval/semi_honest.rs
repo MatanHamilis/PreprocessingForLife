@@ -8,6 +8,7 @@ use aes_prng::AesRng;
 use async_trait::async_trait;
 use bitvec::vec::BitVec;
 use rand::{CryptoRng, RngCore, SeedableRng};
+use rayon::ThreadPoolBuilder;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
@@ -184,8 +185,10 @@ impl FieldContainer<PackedGF2> for PackedGF2Container {
     }
 }
 #[async_trait]
-pub trait OfflineSemiHonestCorrelation<CF: FieldElement>: Serialize + DeserializeOwned {
-    type Dealer;
+pub trait OfflineSemiHonestCorrelation<CF: FieldElement>:
+    Serialize + DeserializeOwned + Send + Sync
+{
+    type Dealer: Sync + Send;
     fn get_personal_circuit_input_wires_masks(&self) -> &[CF];
     fn get_circuit_input_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<CF>;
     fn get_circuit_output_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<CF>;
@@ -196,7 +199,7 @@ pub trait OfflineSemiHonestCorrelation<CF: FieldElement>: Serialize + Deserializ
         Vec<((usize, usize), RegularMask<CF>)>,
         Vec<((usize, usize), WideMask<CF>)>,
     );
-    fn deal<R: CryptoRng + RngCore>(
+    fn deal<R: CryptoRng + RngCore + Sync + Send>(
         rng: &mut R,
         parties_input_start_and_lengths: &HashMap<PartyId, (usize, usize)>,
         circuit: &ParsedCircuit,
@@ -320,7 +323,7 @@ impl<
     fn get_circuit_output_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<F> {
         output_wires_masks_from_seed(self.shares_seed, circuit)
     }
-    fn deal<R: CryptoRng + RngCore>(
+    fn deal<R: CryptoRng + RngCore + Send + Sync>(
         mut rng: &mut R,
         parties_input_start_and_lengths: &HashMap<PartyId, (usize, usize)>,
         circuit: &ParsedCircuit,
@@ -435,76 +438,83 @@ pub fn expand_pairwise_beaver_triples<
     Vec<(PartyId, Vec<((usize, usize), RegularBeaverTriple<F>)>)>,
     Vec<(PartyId, Vec<((usize, usize), WideBeaverTriple<F>)>)>,
 ) {
-    // Check if circuit has Wide-ANDs, otherwise expand only one of the PCGs.
-    let mut wand_count: usize = 0;
-    let mut and_count: usize = 0;
-    circuit.gates.iter().for_each(|layer| {
-        layer.iter().for_each(|gate| match gate {
-            ParsedGate::WideAndGate {
-                input: _,
-                input_bit: _,
-                output: _,
-            } => wand_count += 1,
-            ParsedGate::AndGate {
-                input: _,
-                output: _,
-            } => and_count += 1,
-            _ => {}
-        })
-    });
-    let has_wand = wand_count > 0;
-    let time = Instant::now();
-    let mut pcg_keys: Vec<_> = pcg_keys
-        .iter()
-        .map(|(pid, (pk, code))| (*pid, FullPcgKey::new_from_offline(pk, *code, has_wand)))
-        .collect();
-    println!("PCG Offline took: {}ms", time.elapsed().as_millis());
-    let time = Instant::now();
-    let regular_beaver_triples: Vec<(PartyId, Vec<((usize, usize), RegularBeaverTriple<F>)>)> =
-        pcg_keys
-            .iter_mut()
-            .map(|(id, key)| {
-                let time = Instant::now();
-                let o = (
-                    *id,
-                    circuit
-                        .iter()
-                        .filter(|g| match g.2 {
-                            ParsedGate::AndGate {
-                                input: _,
-                                output: _,
-                            } => true,
-                            _ => false,
-                        })
-                        .map(|g| ((g.0, g.1), key.next_bit_beaver_triple()))
-                        .collect(),
-                );
-                println!("Bit PCG for party took: {}ms", time.elapsed().as_millis());
-                o
+    ThreadPoolBuilder::new().build().unwrap().install(|| {
+        println!(
+            "Entered threadpool, threads: {}",
+            rayon::current_num_threads()
+        );
+        // Check if circuit has Wide-ANDs, otherwise expand only one of the PCGs.
+        let mut wand_count: usize = 0;
+        let mut and_count: usize = 0;
+        circuit.gates.iter().for_each(|layer| {
+            layer.iter().for_each(|gate| match gate {
+                ParsedGate::WideAndGate {
+                    input: _,
+                    input_bit: _,
+                    output: _,
+                } => wand_count += 1,
+                ParsedGate::AndGate {
+                    input: _,
+                    output: _,
+                } => and_count += 1,
+                _ => {}
             })
+        });
+        let has_wand = wand_count > 0;
+        let time = Instant::now();
+        let mut pcg_keys: Vec<_> = pcg_keys
+            .iter()
+            .map(|(pid, (pk, code))| (*pid, FullPcgKey::new_from_offline(pk, *code, has_wand)))
             .collect();
-    let wide_beaver_triples: Vec<(PartyId, Vec<((usize, usize), WideBeaverTriple<F>)>)> = pcg_keys
-        .iter_mut()
-        .map(|(id, key)| {
-            (
-                *id,
-                circuit
-                    .iter()
-                    .filter(|g| match g.2 {
-                        ParsedGate::WideAndGate {
-                            input: _,
-                            input_bit: _,
-                            output: _,
-                        } => true,
-                        _ => false,
-                    })
-                    .map(|g| ((g.0, g.1), key.next_wide_beaver_triple()))
-                    .collect(),
-            )
-        })
-        .collect();
-    println!("online PCG took: {}ms", time.elapsed().as_millis());
-    (regular_beaver_triples, wide_beaver_triples)
+        println!("PCG Offline took: {}ms", time.elapsed().as_millis());
+        let time = Instant::now();
+        let regular_beaver_triples: Vec<(PartyId, Vec<((usize, usize), RegularBeaverTriple<F>)>)> =
+            pcg_keys
+                .iter_mut()
+                .map(|(id, key)| {
+                    let time = Instant::now();
+                    let o = (
+                        *id,
+                        circuit
+                            .iter()
+                            .filter(|g| match g.2 {
+                                ParsedGate::AndGate {
+                                    input: _,
+                                    output: _,
+                                } => true,
+                                _ => false,
+                            })
+                            .map(|g| ((g.0, g.1), key.next_bit_beaver_triple()))
+                            .collect(),
+                    );
+                    println!("Bit PCG for party took: {}ms", time.elapsed().as_millis());
+                    o
+                })
+                .collect();
+        let wide_beaver_triples: Vec<(PartyId, Vec<((usize, usize), WideBeaverTriple<F>)>)> =
+            pcg_keys
+                .iter_mut()
+                .map(|(id, key)| {
+                    (
+                        *id,
+                        circuit
+                            .iter()
+                            .filter(|g| match g.2 {
+                                ParsedGate::WideAndGate {
+                                    input: _,
+                                    input_bit: _,
+                                    output: _,
+                                } => true,
+                                _ => false,
+                            })
+                            .map(|g| ((g.0, g.1), key.next_wide_beaver_triple()))
+                            .collect(),
+                    )
+                })
+                .collect();
+        println!("online PCG took: {}ms", time.elapsed().as_millis());
+        (regular_beaver_triples, wide_beaver_triples)
+    })
 }
 
 pub fn derive_key_from_seed<const ID: usize>(seed: [u8; 16]) -> [u8; 16] {
@@ -1007,6 +1017,7 @@ mod tests {
         sync::Arc,
     };
 
+    use aes_prng::AesRng;
     use futures::future::try_join_all;
     use rand::thread_rng;
     use tokio::time::Instant;
@@ -1026,13 +1037,14 @@ mod tests {
         },
         engine::{LocalRouter, MultiPartyEngine},
         fields::{FieldElement, PackedField, PackedGF2, GF2},
-        pcg::StandardDealer,
+        pcg::{PackedOfflineReceiverPcgKey, StandardDealer},
         uc_tags::UCTag,
     };
 
     async fn test_boolean_circuit<
         const PPRF_COUNT: usize,
         const PPRF_DEPTH: usize,
+        const PCGPACK: usize,
         const N: usize,
         F: PackedField<GF2, N>,
         FC: FieldContainer<F>,
@@ -1040,7 +1052,10 @@ mod tests {
         circuit: ParsedCircuit,
         input: &[F],
         party_count: usize,
-    ) -> Vec<F> {
+    ) -> Vec<F>
+    where
+        [(); (PCGPACK + 7) / 8]:,
+    {
         assert_eq!(input.len(), circuit.input_wire_count);
         let mut party_ids: Vec<_> = (1..=party_count).map(|i| i as u64).collect();
         party_ids.sort();
@@ -1048,7 +1063,7 @@ mod tests {
         let (local_router, mut execs) = LocalRouter::new(UCTag::new(&"root_tag"), &party_ids_set);
         let router_handle = tokio::spawn(local_router.launch());
 
-        let mut rng = thread_rng();
+        let mut rng = AesRng::from_random_seed();
         let addition_threshold = circuit.input_wire_count % party_count;
         let mut total_input_previous = 0;
         let parties_input_lengths: HashMap<_, _> = party_ids
@@ -1063,7 +1078,14 @@ mod tests {
             })
             .collect();
         let dealer = StandardDealer::new(PPRF_COUNT, PPRF_DEPTH);
-        let (_, _, offline_correlations) = PcgBasedPairwiseBooleanCorrelation::deal(
+        let (_, _, offline_correlations): (
+            _,
+            _,
+            Vec<(
+                u64,
+                PcgBasedPairwiseBooleanCorrelation<N, _, PackedOfflineReceiverPcgKey<PCGPACK>, _>,
+            )>,
+        ) = PcgBasedPairwiseBooleanCorrelation::deal(
             &mut rng,
             &parties_input_lengths,
             &circuit,
@@ -1262,7 +1284,7 @@ mod tests {
         output
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn test_small_circuit() {
         let logical_or_circuit = [
             "4 6",
@@ -1305,7 +1327,7 @@ mod tests {
 
         let input = vec![GF2::one(), GF2::zero()];
         let output =
-            test_boolean_circuit::<10, 5, 1, GF2, GF2Container>(parsed_circuit, &input, 3).await;
+            test_boolean_circuit::<10, 5, 1, 1, GF2, GF2Container>(parsed_circuit, &input, 2).await;
 
         assert_eq!(output[0], GF2::one());
     }
@@ -1341,7 +1363,7 @@ mod tests {
 
         let input = vec![GF2::one(); 129];
         let output =
-            test_boolean_circuit::<10, 5, 1, GF2, GF2Container>(parsed_circuit, &input, 7).await;
+            test_boolean_circuit::<10, 5, 4, 1, GF2, GF2Container>(parsed_circuit, &input, 7).await;
 
         assert_eq!(output, vec![GF2::one(); 128]);
     }
@@ -1357,7 +1379,7 @@ mod tests {
             let parsed_circuit = super::super::circuit_from_file(path).unwrap();
 
             let input = vec![PackedGF2::one(); parsed_circuit.input_wire_count];
-            test_boolean_circuit::<10, 5, { PackedGF2::BITS }, _, PackedGF2Container>(
+            test_boolean_circuit::<10, 5, 4, { PackedGF2::BITS }, _, PackedGF2Container>(
                 parsed_circuit,
                 &input,
                 2,

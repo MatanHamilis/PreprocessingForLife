@@ -1,6 +1,7 @@
 use std::{collections::HashMap, marker::PhantomData, ops::Mul};
 
 use aes_prng::AesRng;
+use rayon::ThreadPoolBuilder;
 use tokio::time::Instant;
 
 use crate::{
@@ -59,7 +60,6 @@ impl<
 
         // Correlated Randomness for Semi-Honest
         let mut aes_rng = AesRng::from_random_seed();
-
         let (input_wire_masks, output_wire_masks, offline_correlations) =
             SHO::deal(&mut aes_rng, party_input_length, circuit.as_ref(), dealer);
         for (p, oc) in offline_correlations.iter() {
@@ -261,7 +261,10 @@ mod tests {
         },
         engine::{LocalRouter, MultiPartyEngine},
         fields::{FieldElement, PackedField, GF128, GF2},
-        pcg::{PackedKeysDealer, PackedSenderCorrelationGenerator, StandardDealer},
+        pcg::{
+            PackedKeysDealer, PackedOfflineReceiverPcgKey, PackedSenderCorrelationGenerator,
+            StandardDealer,
+        },
         PartyId, UCTag,
     };
 
@@ -452,8 +455,12 @@ mod tests {
             .expect("Failed to parse");
         let input = vec![GF2::zero(), GF2::zero()];
         let dealer = StandardDealer::new(10, 7);
-        test_malicious_circuit::<1, _, _, _, GF2Container>(parsed_circuit, input, Arc::new(dealer))
-            .await;
+        test_malicious_circuit::<1, _, PackedOfflineReceiverPcgKey<4>, _, GF2Container>(
+            parsed_circuit,
+            input,
+            Arc::new(dealer),
+        )
+        .await;
     }
     #[tokio::test]
     async fn test_three_bit_and() {
@@ -462,8 +469,12 @@ mod tests {
             .expect("Failed to parse");
         let input = vec![GF2::zero(), GF2::zero(), GF2::zero()];
         let dealer = StandardDealer::new(10, 7);
-        test_malicious_circuit::<1, _, _, _, GF2Container>(parsed_circuit, input, Arc::new(dealer))
-            .await;
+        test_malicious_circuit::<1, _, PackedOfflineReceiverPcgKey<4>, _, GF2Container>(
+            parsed_circuit,
+            input,
+            Arc::new(dealer),
+        )
+        .await;
     }
     #[tokio::test]
     async fn test_three_bit_or() {
@@ -483,8 +494,12 @@ mod tests {
             .expect("Failed to parse");
         let input = vec![GF2::zero(), GF2::zero(), GF2::zero()];
         let dealer = StandardDealer::new(10, 7);
-        test_malicious_circuit::<1, _, _, _, GF2Container>(parsed_circuit, input, Arc::new(dealer))
-            .await;
+        test_malicious_circuit::<1, _, PackedOfflineReceiverPcgKey<4>, _, GF2Container>(
+            parsed_circuit,
+            input,
+            Arc::new(dealer),
+        )
+        .await;
     }
 
     #[test]
@@ -502,8 +517,12 @@ mod tests {
                 input.push(GF2::one())
             }
             let dealer = StandardDealer::new(10, 7);
-            test_malicious_circuit::<1, _, _, _, GF2Container>(circuit, input, Arc::new(dealer))
-                .await;
+            test_malicious_circuit::<1, _, PackedOfflineReceiverPcgKey<4>, _, GF2Container>(
+                circuit,
+                input,
+                Arc::new(dealer),
+            )
+            .await;
         });
     }
 }
