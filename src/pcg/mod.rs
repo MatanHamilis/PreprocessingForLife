@@ -1,9 +1,12 @@
-use std::time::Instant;
+use std::{mem::MaybeUninit, time::Instant};
 
 use crate::{
     fields::{FieldElement, PackedField, GF128, GF2},
     pprf::{PackedPprfReceiver, PackedPprfSender, PprfReceiver},
-    pseudorandom::{hash::correlation_robust_hash_block_field, prf::prf_eval},
+    pseudorandom::{
+        hash::{correlation_robust_hash_block_field, correlation_robust_hash_block_field_slice},
+        prf::prf_eval,
+    },
 };
 use aes_prng::AesRng;
 use rand::{CryptoRng, SeedableRng};
@@ -39,14 +42,8 @@ pub trait OnlineReceiverCorrelationGenerator {
         &mut self,
     ) -> ([F; O], F);
     fn next_random_bit_ot<const N: usize, F: PackedField<GF2, N>>(&mut self) -> (F, F) {
-        let mut wb = F::zero();
-        let mut wa = F::zero();
-        for i in 0..N {
-            let (m_b, b) = self.next_random_ot::<1, 1, GF2>();
-            wb.set_element(i, &b);
-            wa.set_element(i, &m_b[0]);
-        }
-        (wa, wb)
+        let (m_b, b) = self.next_random_ot::<1, N, F>();
+        (m_b[0], b)
     }
     fn next_bit_beaver_triple<const N: usize, F: PackedField<GF2, N>>(
         &mut self,
@@ -62,15 +59,8 @@ pub trait OnlineSenderCorrelationGenerator {
         &mut self,
     ) -> ([F; O], [F; O]);
     fn next_random_bit_ot<const N: usize, F: PackedField<GF2, N>>(&mut self) -> (F, F) {
-        let mut a = F::zero();
-        let mut b = F::zero();
-        for i in 0..N {
-            let (m_0, m_1) = self.next_random_ot::<1, 1, GF2>();
-            let (a_0, b_0) = (m_0[0], m_1[0]);
-            a.set_element(i, &a_0);
-            b.set_element(i, &b_0);
-        }
-        (a, b)
+        let (m_0, m_1) = self.next_random_ot::<1, N, F>();
+        (m_0[0], m_1[0])
     }
 
     fn next_bit_beaver_triple<const N: usize, F: PackedField<GF2, N>>(
@@ -113,7 +103,7 @@ where
             receiver.pprfs[i]
                 .iter()
                 .map(|v| {
-                    let punctured_index = (rng.next_u64() % (1 << v.depth)) as usize;
+                    let punctured_index = (rng.next_u32() % (1 << v.depth)) as usize;
                     let leaf_val = prf_eval(&v.seed, v.depth, punctured_index);
                     (v.puncture(punctured_index), leaf_val + receiver.delta[i])
                 })
@@ -299,14 +289,11 @@ where
         let mut m0_arr = [F::zero(); O];
         let mut m1_arr = [F::zero(); O];
         for i in 0..N {
-            let (m_0, m_1) = self.next_correlated_ot();
-            let (m_0, m_1) = (
-                correlation_robust_hash_block_field(m_0),
-                correlation_robust_hash_block_field(m_1),
-            );
+            let mut n = self.next_correlated_ot();
+            correlation_robust_hash_block_field_slice(&mut n);
             for j in 0..O {
-                m0_arr[j].set_bit(m_0.get_bit(j), i);
-                m1_arr[j].set_bit(m_1.get_bit(j), i);
+                m0_arr[j].set_bit(n[0].get_bit(j), i);
+                m1_arr[j].set_bit(n[1].get_bit(j), i);
             }
         }
         (m0_arr, m1_arr)
@@ -352,7 +339,7 @@ impl<const N: usize> ReceiverPcgKey<N> {
         if self.idx == 0 {
             self.arr.iter_mut().for_each(|v| *v = GF128::zero());
             for _ in 0..self.code_width {
-                let entry = self.evals[self.code_seed.next_u64() as usize & (self.evals.len() - 1)];
+                let entry = self.evals[self.code_seed.next_u32() as usize & (self.evals.len() - 1)];
                 self.arr.iter_mut().zip(entry.iter()).for_each(|(a, e)| {
                     *a += *e;
                 })
@@ -363,11 +350,11 @@ impl<const N: usize> ReceiverPcgKey<N> {
         self.arr[ridx]
     }
 
-    fn next_correlated_ot(&mut self) -> (GF128, GF128) {
+    fn next_correlated_ot(&mut self) -> [GF128; 2] {
         if self.idx == 0 {
             self.arr.iter_mut().for_each(|v| *v = GF128::zero());
             for _ in 0..self.code_width {
-                let entry = self.evals[self.code_seed.next_u64() as usize & (self.evals.len() - 1)];
+                let entry = self.evals[self.code_seed.next_u32() as usize & (self.evals.len() - 1)];
                 self.arr.iter_mut().zip(entry.iter()).for_each(|(a, e)| {
                     *a += *e;
                 })
@@ -375,7 +362,7 @@ impl<const N: usize> ReceiverPcgKey<N> {
         }
         let ridx = self.idx;
         self.idx = (self.idx + 1) % N;
-        (self.arr[ridx], self.arr[ridx] + self.delta[ridx])
+        [self.arr[ridx], self.arr[ridx] + self.delta[ridx]]
     }
 }
 
@@ -513,11 +500,10 @@ where
         let mut c = F::zero();
         for i in 0..N {
             let (m_b, b) = self.next_correlated_ot();
-            let (m_b, b) = (correlation_robust_hash_block_field(m_b), b);
+            c.set_element(i, &b);
             for j in 0..O {
                 m_arr[j].set_bit(m_b.get_bit(j), i);
             }
-            c.set_element(i, &b);
         }
         (m_arr, c)
     }
@@ -584,7 +570,7 @@ where
                 .iter_mut()
                 .for_each(|v| *v = (GF128::zero(), GF2::zero()));
             for _ in 0..self.code_width {
-                let entry = self.evals[self.code_seed.next_u64() as usize & (self.evals.len() - 1)];
+                let entry = self.evals[self.code_seed.next_u32() as usize & (self.evals.len() - 1)];
                 self.arr
                     .iter_mut()
                     .zip(entry.0.iter())

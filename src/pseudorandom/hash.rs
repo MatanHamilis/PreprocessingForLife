@@ -1,7 +1,7 @@
-use std::mem::size_of;
+use std::mem::{size_of, transmute};
 
 use aes::{
-    cipher::{BlockEncrypt, KeyInit},
+    cipher::{BlockEncrypt, BlockEncryptMut, KeyInit},
     Aes128, Block,
 };
 use once_cell::sync::Lazy;
@@ -19,4 +19,9 @@ pub fn correlation_robust_hash_block(block: &mut Block) {
 pub fn correlation_robust_hash_block_field(block: GF128) -> GF128 {
     AES.encrypt_block(&mut block.into());
     block
+}
+pub fn correlation_robust_hash_block_field_slice(block: &mut [GF128]) {
+    let block =
+        unsafe { std::slice::from_raw_parts_mut(block.as_mut_ptr() as *mut Block, block.len()) };
+    AES.encrypt_blocks(block);
 }

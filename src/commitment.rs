@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use aes_prng::AesRng;
-use blake3::{hash, Hash};
+use blake3::{hash, Hash, OUT_LEN};
 use rand::SeedableRng;
 use rand_core::RngCore;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -9,7 +9,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use crate::{engine::MultiPartyEngine, PartyId};
 
 #[derive(Serialize, Deserialize, Clone)]
-enum CommmitShare {
+pub(crate) enum CommmitShare {
     Seed([u8; 16], usize),
     Value(Box<[u8]>),
 }
@@ -25,26 +25,19 @@ impl CommmitShare {
 
 #[derive(Clone)]
 pub struct OfflineCommitment {
-    commit_share: CommmitShare,
-    commitment: Hash,
+    pub(crate) commit_share: CommmitShare,
+    pub(crate) commitment: Hash,
 }
 
 impl OfflineCommitment {
-    pub async fn offline_commit<E: MultiPartyEngine, T: Serialize + DeserializeOwned>(
-        engine: &mut E,
+    pub(crate) fn commit<T: Serialize + DeserializeOwned>(
         value: &T,
-    ) {
-        let my_id = engine.my_party_id();
-        let peers: Box<[PartyId]> = engine
-            .party_ids()
-            .iter()
-            .copied()
-            .filter(|v| v != &my_id)
-            .collect();
+        party_count: usize,
+    ) -> (Vec<CommmitShare>, [u8; OUT_LEN]) {
         let mut encoded_value: Box<[u8]> = bincode::serialize(value).unwrap().into();
         let value_hash = blake3::hash(&encoded_value);
         let mut rng = AesRng::from_random_seed();
-        let seeds: Vec<[u8; 16]> = (0..peers.len() - 1)
+        let seeds: Vec<[u8; 16]> = (0..party_count - 1)
             .map(|_| {
                 let mut seed = [0u8; 16];
                 rng.fill_bytes(&mut seed);
@@ -61,20 +54,29 @@ impl OfflineCommitment {
                 .zip(xor_share.iter())
                 .for_each(|(d, s)| *d ^= *s);
         }
-        let value_encoding_length = encoded_value.len();
-        engine.send(
-            (CommmitShare::Value(encoded_value), value_hash.as_bytes()),
-            peers[0],
-        );
-        for (peer, seed) in peers[1..].into_iter().copied().zip(seeds.into_iter()) {
-            engine.send(
-                (
-                    CommmitShare::Seed(seed, value_encoding_length),
-                    value_hash.as_bytes(),
-                ),
-                peer,
-            );
-        }
+        let encoded_value_len = encoded_value.len();
+        let v: Vec<_> = seeds
+            .iter()
+            .map(|&s| CommmitShare::Seed(s, encoded_value_len))
+            .chain(std::iter::once(CommmitShare::Value(encoded_value)))
+            .collect();
+        (v, *value_hash.as_bytes())
+    }
+    pub async fn offline_commit<E: MultiPartyEngine, T: Serialize + DeserializeOwned>(
+        engine: &mut E,
+        value: &T,
+    ) {
+        let my_id = engine.my_party_id();
+        let peers: Box<[PartyId]> = engine
+            .party_ids()
+            .iter()
+            .copied()
+            .filter(|v| v != &my_id)
+            .collect();
+        let (vs, hash) = Self::commit(value, peers.len());
+        vs.iter().zip(peers.iter()).for_each(|(v, &pid)| {
+            engine.send((v, hash), pid);
+        });
     }
 
     pub async fn offline_obtain_commit(
