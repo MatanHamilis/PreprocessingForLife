@@ -235,7 +235,13 @@ impl<const N: usize> PackedOfflineReceiverPcgKey<N> {
             time.elapsed().as_millis()
         );
         let time = Instant::now();
-        let mut final_evals: Vec<[GF128; N]> = Vec::with_capacity(n);
+        let p = unsafe {
+            std::alloc::alloc(
+                std::alloc::Layout::from_size_align(n * std::mem::size_of::<[GF128; N]>(), 128)
+                    .unwrap(),
+            ) as *mut [GF128; N]
+        };
+        let mut final_evals: Vec<[GF128; N]> = unsafe { Vec::from_raw_parts(p, n, n) };
         unsafe { final_evals.set_len(n) };
         final_evals.par_iter_mut().enumerate().for_each(|(i, v)| {
             *v = core::array::from_fn(|j| evals[j][i]);
