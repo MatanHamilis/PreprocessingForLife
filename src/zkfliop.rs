@@ -119,33 +119,26 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
 
     // Rounds
     let inv_two_minus_one = F::one() / (two - F::one());
-    let mut slope_container_uninit = vec![MaybeUninit::<F>::uninit(); z_tilde.len() / 2];
-    let mut slope_container = unsafe {
-        Vec::from_raw_parts(
-            slope_container_uninit.as_mut_ptr() as *mut F,
-            slope_container_uninit.len(),
-            slope_container_uninit.capacity(),
-        )
-    };
-    std::mem::forget(slope_container_uninit);
+    let mut slope_container = Vec::with_capacity(z_tilde.len() / 2);
+    unsafe { slope_container.set_len(z_tilde.len() / 2) };
     for round_id in 1..round_count {
         let z_len = z_tilde.len();
         let r = F::random(&mut rng);
         OfflineCommitment::offline_commit(&mut engine, &r).await;
         let q_base = (round_id - 1) * INTERNAL_ROUND_PROOF_LENGTH;
-        let (q_1_tilde, q_2_tilde, q_3_tilde) = (
+        let (q_0_tilde, q_1_tilde, q_2_tilde) = (
             proof_masks[q_base],
             proof_masks[q_base + 1],
             proof_masks[q_base + 2],
         );
-        b_tilde.push(z_tilde[0] - q_1_tilde - q_2_tilde);
+        b_tilde.push(z_tilde[0] - q_0_tilde - q_1_tilde);
         slope_container
             .par_chunks_mut(CHUNK_SIZE)
             .zip(z_tilde[1..=z_len / 2].par_chunks(CHUNK_SIZE))
             .zip(z_tilde[z_len / 2 + 1..].par_chunks(CHUNK_SIZE))
-            .for_each(|((slope_i, f_one), f_two)| {
+            .for_each(|((slope_i, f_zero), f_one)| {
                 for i in 0..f_one.len() {
-                    slope_i[i] = (f_two[i] - f_one[i]) * inv_two_minus_one;
+                    slope_i[i] = f_one[i] - f_zero[i];
                 }
             });
         z_tilde[1..=z_len / 2]
@@ -153,14 +146,15 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
             .zip(slope_container.par_chunks(CHUNK_SIZE))
             .for_each(|(z_i, slope_i)| {
                 for i in 0..z_i.len() {
-                    let f_one = z_i[i];
-                    let f_zero = f_one - slope_i[i];
-                    let f_hat_r = f_zero + r * slope_i[i];
-                    z_i[i] = f_hat_r;
+                    z_i[i] += r * slope_i[i];
                 }
             });
         let q_r = interpolate(
-            &[(F::one(), q_1_tilde), (two, q_2_tilde), (three, q_3_tilde)],
+            &[
+                (F::zero(), q_0_tilde),
+                (F::one(), q_1_tilde),
+                (two, q_2_tilde),
+            ],
             r,
         );
         z_tilde[0] = q_r;
@@ -171,16 +165,16 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
     let r = F::random(&mut rng);
     OfflineCommitment::offline_commit(&mut engine, &r).await;
     let last_round_masks = &proof_masks[proof_masks.len() - LAST_ROUND_PROOF_LENGTH..];
-    let mut f_1_tilde = [
-        (F::zero(), s_tilde.0),
-        (F::one(), z_tilde[1]),
-        (two, z_tilde[3]),
+    let mut f_0_tilde = [
+        (F::zero(), z_tilde[1]),
+        (F::one(), z_tilde[3]),
+        (two, s_tilde.0),
         (r, F::zero()),
     ];
-    let mut f_2_tilde = [
-        (F::zero(), s_tilde.1),
-        (F::one(), z_tilde[2]),
-        (two, z_tilde[4]),
+    let mut f_1_tilde = [
+        (F::zero(), z_tilde[2]),
+        (F::one(), z_tilde[4]),
+        (two, s_tilde.1),
         (r, F::zero()),
     ];
     let mut q_tilde = [
@@ -191,10 +185,10 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
         (four, last_round_masks[4]),
         (r, F::zero()),
     ];
+    f_0_tilde[3].1 = interpolate(&f_0_tilde[0..3], f_0_tilde[3].0);
     f_1_tilde[3].1 = interpolate(&f_1_tilde[0..3], f_1_tilde[3].0);
-    f_2_tilde[3].1 = interpolate(&f_2_tilde[0..3], f_2_tilde[3].0);
     q_tilde[5].1 = interpolate(&q_tilde[0..5], q_tilde[5].0);
-    b_tilde.push(z_tilde[0] - q_tilde[1].1 - q_tilde[2].1);
+    b_tilde.push(z_tilde[0] - q_tilde[0].1 - q_tilde[1].1);
 
     // Decision
     let betas: Vec<_> = (0..round_count).map(|_| F::random(&mut rng)).collect();
@@ -207,8 +201,8 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
     let final_value = (
         betas,
         b_tilde_check,
+        f_0_tilde[3].1,
         f_1_tilde[3].1,
-        f_2_tilde[3].1,
         q_tilde[5].1,
     );
     OfflineCommitment::offline_commit(&mut engine, &final_value).await;
@@ -234,8 +228,8 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     println!("Proving: round count {}", round_count);
 
     let inv_two_minus_one = F::one() / (two - F::one());
-    let mut q_3_container = Vec::with_capacity(z.len() / 2);
-    unsafe { q_3_container.set_len(z.len() / 2) };
+    let mut q_2_container = Vec::with_capacity(z.len() / 2);
+    unsafe { q_2_container.set_len(z.len() / 2) };
     let mut slope_container = Vec::with_capacity(z.len() / 2);
     unsafe { slope_container.set_len(z.len() / 2) };
     // Rounds
@@ -246,29 +240,29 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     {
         // Computation
         let z_len = z.len();
-        let i1 = &z[1..=z_len / 2];
+        let i0 = &z[1..=z_len / 2];
+        let q_0 = g(i0);
+        let i1 = &z[z_len / 2 + 1..];
         let q_1 = g(i1);
-        let i2 = &z[z_len / 2 + 1..];
-        let q_2 = g(i2);
-        debug_assert_eq!(z[0], q_1 + q_2);
-        q_3_container
+        debug_assert_eq!(z[0], q_0 + q_1);
+        q_2_container
             .par_chunks_mut(CHUNK_SIZE)
             .zip(slope_container.par_chunks_mut(CHUNK_SIZE))
             .zip(z[1..=z_len / 2].par_chunks(CHUNK_SIZE))
             .zip(z[z_len / 2 + 1..].par_chunks(CHUNK_SIZE))
-            .for_each(|(((q_3_i, slope_i), f_one), f_two)| {
+            .for_each(|(((q_2_i, slope_i), f_zero), f_one)| {
                 for i in 0..f_one.len() {
-                    slope_i[i] = (f_two[i] - f_one[i]) * inv_two_minus_one;
-                    q_3_i[i] = f_two[i] + slope_i[i] * (three - two);
+                    slope_i[i] = f_one[i] - f_zero[i];
+                    q_2_i[i] = f_zero[i] + slope_i[i] * two;
                 }
             });
 
-        let q_3 = g(&q_3_container[..z.len() / 2]);
+        let q_2 = g(&q_2_container[..z.len() / 2]);
         let proof_masks_base = INTERNAL_ROUND_PROOF_LENGTH * (round_id);
-        let mask_1 = proof_masks[proof_masks_base];
-        let mask_2 = proof_masks[proof_masks_base + 1];
-        let mask_3 = proof_masks[proof_masks_base + 2];
-        let masked_proof = (q_1 - mask_1, q_2 - mask_2, q_3 - mask_3);
+        let mask_0 = proof_masks[proof_masks_base];
+        let mask_1 = proof_masks[proof_masks_base + 1];
+        let mask_2 = proof_masks[proof_masks_base + 2];
+        let masked_proof = (q_0 - mask_0, q_1 - mask_1, q_2 - mask_2);
 
         // Communication
         engine.broadcast(masked_proof);
@@ -280,40 +274,38 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
             .take(z_len / 2)
             .zip(slope_container.par_iter().take(z_len / 2))
             .for_each(|(z_i, slope_i)| {
-                let f_one = *z_i;
-                let f_zero = f_one - *slope_i;
-                *z_i = f_zero + r * *slope_i;
+                *z_i = *z_i + r * *slope_i;
             });
-        let q_r = interpolate(&[(F::one(), q_1), (two, q_2), (three, q_3)], r);
+        let q_r = interpolate(&[(F::zero(), q_0), (F::one(), q_1), (two, q_2)], r);
         z[0] = q_r;
         z = &mut z[..=z_len / 2];
     }
     // last round
     debug_assert_eq!(z.len(), 5);
-    let (s_1, s_2) = (F::random(E::rng()), F::random(E::rng()));
+    let (s_0, s_1) = (F::random(E::rng()), F::random(E::rng()));
+    let mut f_0 = [
+        (F::zero(), z[1]),
+        (F::one(), z[3]),
+        (two, s_0),
+        (three, F::zero()),
+        (four, F::zero()),
+    ];
     let mut f_1 = [
-        (F::zero(), s_1),
-        (F::one(), z[1]),
-        (two, z[3]),
+        (F::zero(), z[2]),
+        (F::one(), z[4]),
+        (two, s_1),
         (three, F::zero()),
         (four, F::zero()),
     ];
-    let mut f_2 = [
-        (F::zero(), s_2),
-        (F::one(), z[2]),
-        (two, z[4]),
-        (three, F::zero()),
-        (four, F::zero()),
-    ];
+    f_0[3].1 = interpolate(&f_0[0..3], three);
+    f_0[4].1 = interpolate(&f_0[0..3], four);
     f_1[3].1 = interpolate(&f_1[0..3], three);
     f_1[4].1 = interpolate(&f_1[0..3], four);
-    f_2[3].1 = interpolate(&f_2[0..3], three);
-    f_2[4].1 = interpolate(&f_2[0..3], four);
     let proof_masks_last_round = &proof_masks[proof_masks.len() - LAST_ROUND_PROOF_LENGTH..];
-    let q: [_; 5] = core::array::from_fn(|i| f_1[i].1 * f_2[i].1);
+    let q: [_; 5] = core::array::from_fn(|i| f_0[i].1 * f_1[i].1);
     let last_round_proof = [
-        s_1 - s_tilde.0,
-        s_2 - s_tilde.1,
+        s_0 - s_tilde.0,
+        s_1 - s_tilde.1,
         q[0] - proof_masks_last_round[0],
         q[1] - proof_masks_last_round[1],
         q[2] - proof_masks_last_round[2],
@@ -356,16 +348,16 @@ pub async fn verifier<F: FieldElement>(
         .enumerate()
     {
         let z_len = z_hat.len();
-        let (q_1_hat, q_2_hat, q_3_hat): (F, F, F) = engine.recv_from(prover_id).await.unwrap();
+        let (q_0_hat, q_1_hat, q_2_hat): (F, F, F) = engine.recv_from(prover_id).await.unwrap();
         let r: F = round_challenge.online_decommit(&mut engine).await;
-        b_hat.push(z_hat[0] - q_1_hat - q_2_hat);
+        b_hat.push(z_hat[0] - q_0_hat - q_1_hat);
         slope_container
             .par_chunks_mut(CHUNK_SIZE)
             .zip(z_hat[1..=z_len / 2].par_chunks(CHUNK_SIZE))
             .zip(z_hat[z_len / 2 + 1..].par_chunks(CHUNK_SIZE))
-            .for_each(|((slope_i, f_one), f_two)| {
+            .for_each(|((slope_i, f_zero), f_one)| {
                 for i in 0..f_one.len() {
-                    slope_i[i] = (f_two[i] - f_one[i]) * inv_two_minus_one;
+                    slope_i[i] = f_one[i] - f_zero[i];
                 }
             });
         z_hat[1..=z_len / 2]
@@ -373,12 +365,14 @@ pub async fn verifier<F: FieldElement>(
             .zip(slope_container.par_chunks(CHUNK_SIZE))
             .for_each(|(z_i, slope_i)| {
                 for i in 0..z_i.len() {
-                    let f_one = z_i[i];
-                    let f_zero = f_one - slope_i[i];
+                    let f_zero = z_i[i];
                     z_i[i] = f_zero + r * slope_i[i];
                 }
             });
-        let q_r = interpolate(&[(F::one(), q_1_hat), (two, q_2_hat), (three, q_3_hat)], r);
+        let q_r = interpolate(
+            &[(F::zero(), q_0_hat), (F::one(), q_1_hat), (two, q_2_hat)],
+            r,
+        );
         z_hat[0] = q_r;
         z_hat = &mut z_hat[..=z_len / 2];
     }
@@ -386,16 +380,16 @@ pub async fn verifier<F: FieldElement>(
     debug_assert_eq!(z_hat.len(), 5);
     let last_round_proof: [F; 7] = engine.recv_from(prover_id).await.unwrap();
     let r: F = last_round_challenge.online_decommit(&mut engine).await;
-    let mut f_1_hat = [
-        (F::zero(), last_round_proof[0]),
-        (F::one(), z_hat[1]),
-        (two, z_hat[3]),
+    let mut f_0_hat = [
+        (F::zero(), z_hat[1]),
+        (F::one(), z_hat[3]),
+        (two, last_round_proof[0]),
         (r, F::zero()),
     ];
-    let mut f_2_hat = [
-        (F::zero(), last_round_proof[1]),
-        (F::one(), z_hat[2]),
-        (two, z_hat[4]),
+    let mut f_1_hat = [
+        (F::zero(), z_hat[2]),
+        (F::one(), z_hat[4]),
+        (two, last_round_proof[1]),
         (r, F::zero()),
     ];
     let mut q_hat = [
@@ -406,13 +400,13 @@ pub async fn verifier<F: FieldElement>(
         (four, last_round_proof[6]),
         (r, F::zero()),
     ];
+    f_0_hat[3].1 = interpolate(&f_0_hat[0..3], f_0_hat[3].0);
     f_1_hat[3].1 = interpolate(&f_1_hat[0..3], f_1_hat[3].0);
-    f_2_hat[3].1 = interpolate(&f_2_hat[0..3], f_2_hat[3].0);
     q_hat[5].1 = interpolate(&q_hat[0..5], q_hat[5].0);
-    b_hat.push(z_hat[0] - q_hat[1].1 - q_hat[2].1);
+    b_hat.push(z_hat[0] - q_hat[0].1 - q_hat[1].1);
 
     // Decision
-    let (betas, b_tilde_check, f_1_tilde_r, f_2_tilde_r, q_tilde_r): (Vec<F>, F, F, F, F) =
+    let (betas, b_tilde_check, f_0_tilde_r, f_1_tilde_r, q_tilde_r): (Vec<F>, F, F, F, F) =
         final_msg.online_decommit(&mut engine).await;
     assert_eq!(betas.len(), b_hat.len());
     let b_hat_check = betas
@@ -421,10 +415,10 @@ pub async fn verifier<F: FieldElement>(
         .map(|(a, b)| *a * *b)
         .fold(F::zero(), |acc, cur| acc + cur);
     assert_eq!(b_tilde_check + b_hat_check, F::zero());
+    let f_0_r = f_0_tilde_r + f_0_hat[3].1;
     let f_1_r = f_1_tilde_r + f_1_hat[3].1;
-    let f_2_r = f_2_tilde_r + f_2_hat[3].1;
     let q_r = q_tilde_r + q_hat[5].1;
-    assert_eq!(q_r, f_1_r * f_2_r);
+    assert_eq!(q_r, f_0_r * f_1_r);
 }
 
 #[cfg(test)]

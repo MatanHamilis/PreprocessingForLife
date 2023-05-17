@@ -1,9 +1,10 @@
-use std::{assert_eq, collections::HashMap, debug_assert, ops::Mul, unimplemented};
+use std::{assert_eq, collections::HashMap, debug_assert, ops::Mul, print, unimplemented};
 
 use aes_prng::AesRng;
 use blake3::{Hash, OUT_LEN};
 use rand::Rng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
+use tokio::time::Instant;
 
 use crate::{
     circuit_eval::bristol_fashion::ParsedGate,
@@ -154,6 +155,7 @@ pub fn spdz_deal<
     circuit: &ParsedCircuit,
     input_pos: &HashMap<PartyId, (usize, usize)>,
 ) -> HashMap<PartyId, SpdzCorrelation<N, PF, VF>> {
+    let time = Instant::now();
     let party_count = input_pos.len();
     let mut rng = AesRng::from_random_seed();
     let mut mac = VF::zero();
@@ -230,7 +232,7 @@ pub fn spdz_deal<
             .for_each(|(bt, v)| v.push(bt));
     });
     debug_assert_eq!(macs.values().copied().sum::<VF>(), mac);
-    input_pos
+    let o = input_pos
         .keys()
         .map(|pid| {
             (
@@ -244,7 +246,9 @@ pub fn spdz_deal<
                 },
             )
         })
-        .collect()
+        .collect();
+    println!("SPDZ Dealer took: {}ms", time.elapsed().as_millis());
+    o
 }
 pub async fn online_spdz<
     const N: usize,
