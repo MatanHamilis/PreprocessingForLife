@@ -296,7 +296,8 @@ where
         let mut m1_arr = [F::zero(); O];
         for i in 0..N {
             let mut n = self.next_correlated_ot();
-            correlation_robust_hash_block_field_slice(&mut n);
+            n[0] = correlation_robust_hash_block_field(n[0]);
+            n[1] = correlation_robust_hash_block_field(n[1]);
             for j in 0..O {
                 m0_arr[j].set_bit(n[0].get_bit(j), i);
                 m1_arr[j].set_bit(n[1].get_bit(j), i);

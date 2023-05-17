@@ -19,7 +19,7 @@ use silent_party::{
         PcgBasedPairwiseBooleanCorrelation, PreOnlineMaterial,
     },
     engine::{self, MultiPartyEngine, NetworkRouter},
-    fields::{FieldElement, PackedField, PackedGF2, GF128, GF2, GF64},
+    fields::{FieldElement, PackedField, PackedGF2, GF2, GF64},
     pcg::{
         PackedKeysDealer, PackedOfflineReceiverPcgKey, PackedSenderCorrelationGenerator,
         StandardDealer,

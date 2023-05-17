@@ -4,7 +4,7 @@ use crate::{
     fields::FieldElement,
 };
 use rayon::prelude::*;
-use std::mem::MaybeUninit;
+use std::{mem::MaybeUninit, println};
 
 const INTERNAL_ROUND_PROOF_LENGTH: usize = 3;
 const LAST_ROUND_PROOF_LENGTH: usize = 5;
@@ -234,24 +234,10 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     println!("Proving: round count {}", round_count);
 
     let inv_two_minus_one = F::one() / (two - F::one());
-    let mut q_3_container_uninit = vec![MaybeUninit::<F>::uninit(); z.len() / 2];
-    let mut q_3_container = unsafe {
-        Vec::from_raw_parts(
-            q_3_container_uninit.as_mut_ptr() as *mut F,
-            q_3_container_uninit.len(),
-            q_3_container_uninit.capacity(),
-        )
-    };
-    std::mem::forget(q_3_container_uninit);
-    let mut slope_container_uninit = vec![MaybeUninit::<F>::uninit(); z.len() / 2];
-    let mut slope_container = unsafe {
-        Vec::from_raw_parts(
-            slope_container_uninit.as_mut_ptr() as *mut F,
-            slope_container_uninit.len(),
-            slope_container_uninit.capacity(),
-        )
-    };
-    std::mem::forget(slope_container_uninit);
+    let mut q_3_container = Vec::with_capacity(z.len() / 2);
+    unsafe { q_3_container.set_len(z.len() / 2) };
+    let mut slope_container = Vec::with_capacity(z.len() / 2);
+    unsafe { slope_container.set_len(z.len() / 2) };
     // Rounds
     for (round_id, round_challenge) in round_challenges
         .into_iter()
@@ -362,15 +348,8 @@ pub async fn verifier<F: FieldElement>(
     let mut b_hat = Vec::with_capacity(round_count);
     // Rounds
     let inv_two_minus_one = F::one() / (two - F::one());
-    let mut slope_container_uninit = vec![MaybeUninit::<F>::uninit(); z_hat.len() / 2];
-    let mut slope_container = unsafe {
-        Vec::from_raw_parts(
-            slope_container_uninit.as_mut_ptr() as *mut F,
-            slope_container_uninit.len(),
-            slope_container_uninit.capacity(),
-        )
-    };
-    std::mem::forget(slope_container_uninit);
+    let mut slope_container = Vec::with_capacity(z_hat.len() / 2);
+    unsafe { slope_container.set_len(z_hat.len() / 2) };
     for (_, round_challenge) in round_challenges
         .into_iter()
         .take(round_challenges.len() - 1)

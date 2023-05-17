@@ -60,3 +60,7 @@ harness = false
 [[bench]]
 name = "mem"
 harness = false
+
+[[bench]]
+name = "spdz"
+harness = false

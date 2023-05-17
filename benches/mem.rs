@@ -37,6 +37,7 @@ pub fn bench_mem_random(c: &mut Criterion) {
     });
 }
 pub fn bench_mem_strides(c: &mut Criterion) {
+    const ITERS: usize = 10;
     c.bench_function("mem_strides_64", |b| {
         const VEC_SIZE: usize = 1 << 22;
         let mut v = vec![[0u64; 8]; VEC_SIZE];
@@ -47,15 +48,15 @@ pub fn bench_mem_strides(c: &mut Criterion) {
         }
         let mut rng = AesRng::from_random_seed();
         b.iter(|| {
-            let a = v[rng.next_u32() as usize & (VEC_SIZE - 1)];
-            let b = v[rng.next_u32() as usize & (VEC_SIZE - 1)];
-            black_box(a);
-            black_box(b);
+            for _ in 0..ITERS {
+                let a = v[rng.next_u32() as usize & (VEC_SIZE - 1)];
+                black_box(a);
+            }
         });
     });
     c.bench_function("mem_strides_128", |b| {
-        const VEC_SIZE: usize = 1 << 21;
-        let mut v = vec![[0u64; 16]; VEC_SIZE];
+        const VEC_SIZE: usize = 1 << 19;
+        let mut v = vec![[0u64; 80]; VEC_SIZE];
         for (i, v_item) in v.iter_mut().enumerate() {
             for j in 0..v_item.len() {
                 v_item[j] = j as u64;
@@ -63,8 +64,10 @@ pub fn bench_mem_strides(c: &mut Criterion) {
         }
         let mut rng = AesRng::from_random_seed();
         b.iter(|| {
-            let a = v[rng.next_u32() as usize & (VEC_SIZE - 1)];
-            black_box(a);
+            for _ in 0..ITERS / 10 {
+                let a = v[rng.next_u32() as usize & (VEC_SIZE - 1)];
+                black_box(a);
+            }
         });
     });
 

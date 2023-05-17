@@ -1,4 +1,4 @@
-use std::{assert_eq, collections::HashMap, ops::Mul, unimplemented};
+use std::{assert_eq, collections::HashMap, debug_assert, ops::Mul, unimplemented};
 
 use aes_prng::AesRng;
 use blake3::{Hash, OUT_LEN};
@@ -15,7 +15,7 @@ use crate::{
 
 use super::{FieldContainer, ParsedCircuit};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct AuthenticatedValue<const N: usize, PF: PackedField<GF2, N>, VF: FieldElement>
 where
     VF: Mul<GF2, Output = VF>,
@@ -67,15 +67,22 @@ impl<const N: usize, PF: PackedField<GF2, N>, VF: FieldElement + Mul<GF2, Output
             mac: core::array::from_fn(|i| self.mac[i] + rhs.mac[i]),
         }
     }
-    fn add_public_value_into(&mut self, rhs: &PF, mac_key_share: &VF) {
-        self.value += *rhs;
+    fn add_public_value_into(&mut self, rhs: &PF, mac_key_share: &VF, is_first: bool) {
+        if is_first {
+            self.value += *rhs;
+        }
         for i in 0..N {
             self.mac[i] += *mac_key_share * rhs.get_element(i);
         }
     }
-    fn add_public_value(&self, rhs: &PF, mac_key_share: &VF) -> Self {
+    fn add_public_value(&self, rhs: &PF, mac_key_share: &VF, is_first: bool) -> Self {
+        let value = if is_first {
+            self.value + *rhs
+        } else {
+            self.value
+        };
         Self {
-            value: self.value + *rhs,
+            value,
             mac: core::array::from_fn(|i| self.mac[i] + *mac_key_share * rhs.get_element(i)),
         }
     }
@@ -222,6 +229,7 @@ pub fn spdz_deal<
             .zip(party_triples.values_mut())
             .for_each(|(bt, v)| v.push(bt));
     });
+    debug_assert_eq!(macs.values().copied().sum::<VF>(), mac);
     input_pos
         .keys()
         .map(|pid| {
@@ -246,18 +254,27 @@ pub async fn online_spdz<
     engine: &mut impl MultiPartyEngine,
     circuit: &ParsedCircuit,
     input: &[PF],
-    triples: &[AuthenticatedBeaverTriple<N, PF, VF>],
-    personal_input_masks: &[PF],
-    mac_key_share: &VF,
-    input_authenticated_masks: &[AuthenticatedValue<N, PF, VF>],
+    correlation: SpdzCorrelation<N, PF, VF>,
     input_pos: impl AsRef<HashMap<PartyId, (usize, usize)>>,
-    check_seed: &OfflineCommitment,
 ) -> Vec<PF> {
+    let SpdzCorrelation {
+        mac_share,
+        auth_input,
+        check_seed,
+        personal_input_masks,
+        triples,
+    } = correlation;
     let my_id = engine.my_party_id();
+    let is_first = engine.party_ids()[0] == my_id;
     let mut wires = Vec::<AuthenticatedValue<N, PF, VF>>::with_capacity(
         circuit.input_wire_count + circuit.output_wire_count + circuit.internal_wire_count,
     );
-    debug_assert_eq!(input_authenticated_masks.len(), circuit.input_wire_count);
+    unsafe {
+        wires.set_len(
+            circuit.input_wire_count + circuit.output_wire_count + circuit.internal_wire_count,
+        )
+    }
+    debug_assert_eq!(auth_input.len(), circuit.input_wire_count);
     let input_pos = input_pos.as_ref();
     let total_input_pos: usize = input_pos.iter().map(|(_, len)| len.1).sum();
     debug_assert_eq!(total_input_pos, circuit.input_wire_count);
@@ -266,7 +283,7 @@ pub async fn online_spdz<
 
     let (my_input_start, my_input_len) = input_pos[&my_id];
     assert_eq!(my_input_len, input.len());
-    wires[..circuit.input_wire_count].copy_from_slice(input_authenticated_masks);
+    wires[..circuit.input_wire_count].copy_from_slice(&auth_input);
     let openings: Vec<_> = personal_input_masks
         .iter()
         .zip(input.iter())
@@ -276,7 +293,7 @@ pub async fn online_spdz<
         .iter_mut()
         .zip(openings.iter())
         .for_each(|(w, o)| {
-            w.add_public_value_into(o, mac_key_share);
+            w.add_public_value_into(o, &mac_share, is_first);
         });
     engine.broadcast(openings);
     let peers_num = engine.party_ids().len() - 1;
@@ -288,10 +305,9 @@ pub async fn online_spdz<
             .iter_mut()
             .zip(openings.iter())
             .for_each(|(w, o)| {
-                w.add_public_value_into(o, mac_key_share);
+                w.add_public_value_into(o, &mac_share, is_first);
             })
     }
-
     // Semi-honest Computation
 
     let mut open_triples_iter = triples.iter().enumerate();
@@ -308,7 +324,7 @@ pub async fn online_spdz<
                     wires[output] = wires[input[0]].add(&wires[input[1]]);
                 }
                 &ParsedGate::NotGate { input, output } => {
-                    wires[output] = wires[input].add_public_value(&PF::one(), mac_key_share)
+                    wires[output] = wires[input].add_public_value(&PF::one(), &mac_share, is_first)
                 }
                 ParsedGate::AndGate { input, output } => {
                     let bt = open_triples_iter.next().unwrap();
@@ -346,10 +362,10 @@ pub async fn online_spdz<
                 let (_, bt) = eval_triples_iter.next().unwrap();
                 let AuthenticatedBeaverTriple(a, b, _) = &bt;
                 let check_first_opening = core::array::from_fn(|i| {
-                    x.mac[i] - a.mac[i] + *mac_key_share * opening.0.get_element(i)
+                    x.mac[i] - a.mac[i] + mac_share * opening.0.get_element(i)
                 });
                 let check_second_opening: [_; N] = core::array::from_fn(|i| {
-                    y.mac[i] - b.mac[i] + *mac_key_share * opening.1.get_element(i)
+                    y.mac[i] - b.mac[i] + mac_share * opening.1.get_element(i)
                 });
                 proof_values.push(check_first_opening);
                 proof_values.push(check_second_opening);
@@ -357,7 +373,6 @@ pub async fn online_spdz<
                     wires[input[0]].mul_compute(&wires[input[1]], opening.0, opening.1, bt);
             })
     }
-
     let challenge: [u8; 16] = check_seed.online_decommit(engine).await;
     let mut rng = AesRng::from_seed(challenge);
 
@@ -403,7 +418,7 @@ pub async fn online_spdz<
         .zip(output_wires_vals.iter())
         .for_each(|(o, v)| {
             proof_values.push(core::array::from_fn(|i| {
-                o.mac[i] - *mac_key_share * v.get_element(i)
+                o.mac[i] - mac_share * v.get_element(i)
             }));
         });
     let check_value: VF = proof_values
@@ -432,5 +447,119 @@ pub async fn online_spdz<
 
 #[cfg(test)]
 mod tests {
-    fn spdz_test() {}
+    use std::{
+        assert_eq,
+        collections::{HashMap, HashSet},
+        path::Path,
+        sync::Arc,
+    };
+
+    use aes_prng::AesRng;
+    use tokio::join;
+
+    use crate::{
+        circuit_eval::{parse_bristol, semi_honest::local_eval_circuit, ParsedCircuit},
+        engine::{LocalRouter, NetworkRouter},
+        fields::{FieldElement, PackedField, PackedGF2, GF2, GF64},
+        PartyId, UCTag,
+    };
+
+    use super::{online_spdz, spdz_deal};
+    fn spdz_test_circuit<const N: usize, PF: PackedField<GF2, N>>(
+        circuit: ParsedCircuit,
+        party_count: usize,
+        input: Vec<PF>,
+    ) {
+        let circuit = Arc::new(circuit);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let party_ids: [PartyId; 2] = [1, 2];
+        let input_pos: HashMap<PartyId, (usize, usize)> = HashMap::from([
+            (1, (0, circuit.input_wire_count / 2)),
+            (
+                2,
+                (
+                    circuit.input_wire_count / 2,
+                    circuit.input_wire_count - circuit.input_wire_count / 2,
+                ),
+            ),
+        ]);
+        let local_value = local_eval_circuit(circuit.as_ref(), &input);
+        let first_pos = input_pos[&party_ids[0]];
+        let input_first: Vec<_> = input[first_pos.0..first_pos.0 + first_pos.1].to_vec();
+        let second_pos = input_pos[&party_ids[1]];
+        let input_second: Vec<_> = input[second_pos.0..second_pos.0 + second_pos.1].to_vec();
+        let mut corr = spdz_deal::<N, PF, GF64>(circuit.as_ref(), &input_pos);
+        let parties_set = HashSet::from_iter(party_ids);
+        let (router, mut execs) = LocalRouter::new(UCTag::new(&"ROOT TAG"), &parties_set);
+        let router_handle = runtime.spawn(router.launch());
+        let first_party = execs.remove(&party_ids[0]).unwrap();
+        let second_party = execs.remove(&party_ids[1]).unwrap();
+        let first_party_circuit = circuit.clone();
+        let second_party_circuit = circuit.clone();
+        let corr_first = corr.remove(&party_ids[0]).unwrap();
+        let corr_second = corr.remove(&party_ids[1]).unwrap();
+        let input_pos_first = Arc::new(input_pos);
+        let input_pos_second = input_pos_first.clone();
+        let first_party_handle = runtime.spawn(async move {
+            let mut first_party = first_party;
+            online_spdz(
+                &mut first_party,
+                &first_party_circuit,
+                &input_first,
+                corr_first,
+                input_pos_first,
+            )
+            .await
+        });
+        let second_party_handle = runtime.spawn(async move {
+            let mut second_party = second_party;
+            online_spdz(
+                &mut second_party,
+                &second_party_circuit,
+                &input_second,
+                corr_second,
+                input_pos_second,
+            )
+            .await
+        });
+        let (first, second, router) = runtime
+            .block_on(async move { join!(first_party_handle, second_party_handle, router_handle) });
+        router.unwrap().unwrap();
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_eq!(first, second);
+        let output_start = circuit.as_ref().input_wire_count + circuit.as_ref().internal_wire_count;
+        assert_eq!(first, local_value[output_start..]);
+    }
+
+    #[test]
+    fn spdz_small_circuit_test() {
+        let logical_or_circuit = [
+            "4 6",
+            "2 1 1",
+            "1 1",
+            "",
+            "1 1 0 2 INV",
+            "1 1 1 3 INV",
+            "2 1 2 3 4 AND",
+            "1 1 4 5 INV",
+        ];
+        let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
+            .expect("Failed to parse");
+
+        spdz_test_circuit::<{ GF2::BITS }, GF2>(parsed_circuit, 2, vec![GF2::zero(), GF2::zero()]);
+    }
+    #[test]
+    fn spdz_test() {
+        const PARTY_COUNT: usize = 2;
+        let path = Path::new("circuits/aes_128.txt");
+        let parsed_circuit = super::super::circuit_from_file(path).unwrap();
+        spdz_test_circuit::<{ PackedGF2::BITS }, PackedGF2>(
+            parsed_circuit,
+            PARTY_COUNT,
+            vec![PackedGF2::one(); 256],
+        );
+    }
 }

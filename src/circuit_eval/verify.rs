@@ -1,7 +1,7 @@
 use std::{collections::HashMap, ops::Mul, sync::Arc};
 
 use futures::{future::try_join_all, join};
-use rayon::prelude::*;
+use rayon::{prelude::*, ThreadPoolBuilder};
 use tokio::time::Instant;
 
 use crate::{
@@ -554,6 +554,7 @@ pub async fn verify_parties<
     circuit: &ParsedCircuit,
     offline_material: &OfflineCircuitVerify<F>,
 ) -> bool {
+    let thread_pool = ThreadPoolBuilder::new().build().unwrap();
     let my_id = engine.my_party_id();
     let peers: Vec<_> = engine
         .party_ids()
