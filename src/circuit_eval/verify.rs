@@ -2,6 +2,7 @@ use std::{collections::HashMap, ops::Mul, sync::Arc};
 
 use futures::{future::try_join_all, join};
 use rayon::{prelude::*, ThreadPoolBuilder};
+use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
 use crate::{
@@ -225,7 +226,7 @@ fn compute_gamma_i<
     wide_masked_values: &HashMap<(usize, usize), WideMask<PF>>,
 ) -> F {
     let regular: F = gammas
-        .iter()
+        .par_iter()
         .map(|(layer_idx, gate_idx, gamma)| {
             let mask = mask_shares.get(&(*layer_idx, *gate_idx)).unwrap();
             let masked_values = masked_values.get(&(*layer_idx, *gate_idx)).unwrap();
@@ -240,7 +241,7 @@ fn compute_gamma_i<
         })
         .sum();
     let wide: F = wide_gammas
-        .iter()
+        .par_iter()
         .map(|(layer_idx, gate_idx, gamma)| {
             let mask = wide_mask_shares.get(&(*layer_idx, *gate_idx)).unwrap();
             let masked_values = wide_masked_values.get(&(*layer_idx, *gate_idx)).unwrap();
@@ -276,12 +277,12 @@ fn dot_product_gamma<
     input_wires_masks: &[PF],
 ) -> F {
     let input_dp: F = input_wires_gammas
-        .iter()
-        .zip(input_wires_masks.iter())
+        .par_iter()
+        .zip(input_wires_masks.par_iter())
         .map(|(a, b)| (0..PACKING).map(|pack| b.get_element(pack) * a[pack]).sum())
         .sum();
     let regular_gates_dp = gammas
-        .iter()
+        .par_iter()
         .map(|(layer_idx, gate_idx, gamma)| {
             let mask = masks_gates.get(&(*layer_idx, *gate_idx)).unwrap();
             match (gamma, mask) {
@@ -295,7 +296,7 @@ fn dot_product_gamma<
         })
         .sum();
     let wides_gates_dp = wide_gammas
-        .iter()
+        .par_iter()
         .map(|(layer_idx, gate_idx, gamma)| {
             let mask = wide_masks_gates.get(&(*layer_idx, *gate_idx)).unwrap();
             match (gamma, mask) {
@@ -330,7 +331,7 @@ fn dot_product_alpha<
 ) -> F {
     // Sigma alpha_w r_w
     let regular_sigma_alpha_w_r_w_gates: F = alphas_gate
-        .iter()
+        .par_iter()
         .map(|(layer_id, gate_id, input_wire_coefficients)| {
             let mask = regular_masks_gates.get(&(*layer_id, *gate_id)).unwrap();
             match (mask, input_wire_coefficients) {
@@ -344,7 +345,7 @@ fn dot_product_alpha<
         })
         .sum();
     let wide_sigma_alpha_w_r_w_gates: F = wide_alphas_gate
-        .iter()
+        .par_iter()
         .map(|(layer_id, gate_id, input_wire_coefficients)| {
             let mask = wide_masks_gates.get(&(*layer_id, *gate_id)).unwrap();
             match (mask, input_wire_coefficients) {
@@ -362,8 +363,8 @@ fn dot_product_alpha<
         })
         .sum();
     let sigma_alpha_w_r_w_outputs: F = alphas_outputs
-        .iter()
-        .zip(masks_outputs.iter())
+        .par_iter()
+        .zip(masks_outputs.par_iter())
         .map(|(u, v)| (0..N).map(|pack| v.get_element(pack) * u[pack]).sum())
         .sum();
     wide_sigma_alpha_w_r_w_gates + regular_sigma_alpha_w_r_w_gates + sigma_alpha_w_r_w_outputs
@@ -486,12 +487,15 @@ fn construct_statement<
     statement
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OfflineCircuitVerify<F: FieldElement> {
+    #[serde(bound = "")]
     s_i: F,
     alpha_omega_commitment: OfflineCommitment,
     s_commitment: OfflineCommitment,
+    #[serde(bound = "")]
     verifiers_offline_material: Vec<(PartyId, OfflineVerifier)>,
+    #[serde(bound = "")]
     prover_offline_material: OfflineProver<F>,
 }
 pub async fn offline_verify_parties<F: FieldElement>(

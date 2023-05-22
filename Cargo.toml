@@ -64,3 +64,7 @@ harness = false
 [[bench]]
 name = "spdz"
 harness = false
+
+[[bench]]
+name = "parallel"
+harness = false

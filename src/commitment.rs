@@ -23,10 +23,10 @@ impl CommmitShare {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OfflineCommitment {
     pub(crate) commit_share: CommmitShare,
-    pub(crate) commitment: Hash,
+    pub(crate) commitment: [u8; OUT_LEN],
 }
 
 impl OfflineCommitment {
@@ -87,7 +87,7 @@ impl OfflineCommitment {
             engine.recv_from(committer).await.unwrap();
         OfflineCommitment {
             commit_share,
-            commitment: Hash::from(commitment),
+            commitment,
         }
     }
 

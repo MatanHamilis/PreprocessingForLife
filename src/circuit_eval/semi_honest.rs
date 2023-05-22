@@ -28,6 +28,7 @@ pub trait FieldContainer<F: FieldElement>: Serialize + DeserializeOwned + Send {
     fn push(&mut self, element: RegularMask<F>);
     fn push_wide(&mut self, element: WideMask<F>);
     fn to_vec(self) -> (Vec<RegularMask<F>>, Vec<WideMask<F>>);
+    fn is_empty(&self) -> bool;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -36,6 +37,9 @@ pub struct GF2Container {
     wv: BitVec,
 }
 impl FieldContainer<GF2> for GF2Container {
+    fn is_empty(&self) -> bool {
+        self.v.is_empty() && self.wv.is_empty()
+    }
     fn new_with_capacity(capacity: usize) -> Self {
         Self {
             v: BitVec::with_capacity(capacity),
@@ -97,6 +101,9 @@ pub struct PackedGF2Container {
 }
 
 impl FieldContainer<PackedGF2> for PackedGF2Container {
+    fn is_empty(&self) -> bool {
+        self.v.is_empty() && self.wv.is_empty()
+    }
     fn clear(&mut self) {
         self.v.clear();
     }
@@ -891,56 +898,58 @@ pub async fn multi_party_semi_honest_eval_circuit<
                 }
             }
         }
-        engine.broadcast(&msg_vec);
-        msg_vec.clear();
+        if !msg_vec.is_empty() {
+            engine.broadcast(&msg_vec);
+            msg_vec.clear();
 
-        for _ in 0..number_of_peers {
-            let (recv_vec, _): (FC, PartyId) = engine.recv().await.unwrap();
-            // let (msg, _): (EvalMessage<F>, PartyId) = engine.recv().await.unwrap();
-            let (gate_masks, wide_gate_masks) = recv_vec.to_vec();
-            let mut gate_masks = gate_masks.into_iter();
-            let mut wide_gate_masks = wide_gate_masks.into_iter();
-            for (gate_idx, _) in layer.iter().enumerate().filter(|(_, g)| !g.is_linear()) {
-                let gate = layer[gate_idx];
-                match gate {
-                    ParsedGate::AndGate {
-                        input: input_wires,
-                        output: output_wire,
-                    } => {
-                        let RegularMask(ax, by) = gate_masks.next().unwrap();
-                        let RegularMask(mask_a, mask_b) =
-                            masked_gate_inputs.get_mut(&(layer_idx, gate_idx)).unwrap();
-                        let &RegularBeaverTriple(a, _, _) = multi_party_beaver_triples
-                            .get(&(layer_idx, gate_idx))
-                            .unwrap();
-                        let y = wires[input_wires[1]];
-                        wires[output_wire] += y * ax + by * a;
-                        *mask_a += ax;
-                        *mask_b += by;
-                    }
+            for _ in 0..number_of_peers {
+                let (recv_vec, _): (FC, PartyId) = engine.recv().await.unwrap();
+                // let (msg, _): (EvalMessage<F>, PartyId) = engine.recv().await.unwrap();
+                let (gate_masks, wide_gate_masks) = recv_vec.to_vec();
+                let mut gate_masks = gate_masks.into_iter();
+                let mut wide_gate_masks = wide_gate_masks.into_iter();
+                for (gate_idx, _) in layer.iter().enumerate().filter(|(_, g)| !g.is_linear()) {
+                    let gate = layer[gate_idx];
+                    match gate {
+                        ParsedGate::AndGate {
+                            input: input_wires,
+                            output: output_wire,
+                        } => {
+                            let RegularMask(ax, by) = gate_masks.next().unwrap();
+                            let RegularMask(mask_a, mask_b) =
+                                masked_gate_inputs.get_mut(&(layer_idx, gate_idx)).unwrap();
+                            let &RegularBeaverTriple(a, _, _) = multi_party_beaver_triples
+                                .get(&(layer_idx, gate_idx))
+                                .unwrap();
+                            let y = wires[input_wires[1]];
+                            wires[output_wire] += y * ax + by * a;
+                            *mask_a += ax;
+                            *mask_b += by;
+                        }
 
-                    ParsedGate::WideAndGate {
-                        input,
-                        input_bit: _,
-                        output,
-                    } => {
-                        let WideMask(ax, wby) = wide_gate_masks.next().unwrap();
-                        let WideMask(mask_a, mask_wb) = wide_masked_gate_inputs
-                            .get_mut(&(layer_idx, gate_idx))
-                            .unwrap();
-                        let &WideBeaverTriple(a, _, _) = wide_multi_party_beaver_triples
-                            .get(&(layer_idx, gate_idx))
-                            .unwrap();
-                        for i in 0..wby.len() {
-                            mask_wb[i] += wby[i];
+                        ParsedGate::WideAndGate {
+                            input,
+                            input_bit: _,
+                            output,
+                        } => {
+                            let WideMask(ax, wby) = wide_gate_masks.next().unwrap();
+                            let WideMask(mask_a, mask_wb) = wide_masked_gate_inputs
+                                .get_mut(&(layer_idx, gate_idx))
+                                .unwrap();
+                            let &WideBeaverTriple(a, _, _) = wide_multi_party_beaver_triples
+                                .get(&(layer_idx, gate_idx))
+                                .unwrap();
+                            for i in 0..wby.len() {
+                                mask_wb[i] += wby[i];
+                            }
+                            *mask_a += ax;
+                            for i in 0..output.len() {
+                                let y = wires[input[i]];
+                                wires[output[i]] += y * ax + wby[i] * a;
+                            }
                         }
-                        *mask_a += ax;
-                        for i in 0..output.len() {
-                            let y = wires[input[i]];
-                            wires[output[i]] += y * ax + wby[i] * a;
-                        }
+                        _ => panic!(),
                     }
-                    _ => panic!(),
                 }
             }
         }

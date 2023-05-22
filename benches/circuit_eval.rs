@@ -37,18 +37,18 @@ async fn set_up_routers_for_parties(
     HashMap<PartyId, NetworkRouter>,
     HashMap<PartyId, impl MultiPartyEngine>,
 ) {
-    let addresses = Arc::new(HashMap::from_iter(party_ids.iter().map(|i| {
-        (
-            *i,
-            SocketAddrV4::new(Ipv4Addr::LOCALHOST, base_port + *i as u16),
-        )
-    })));
     let mut routers = vec![];
     let parties_count = party_ids.len();
     for &id in party_ids {
-        let personal_peers = addresses.clone();
+        let addresses = HashMap::from_iter(party_ids.iter().filter(|i| *i > &id).map(|i| {
+            (
+                *i,
+                SocketAddrV4::new(Ipv4Addr::LOCALHOST, base_port + *i as u16),
+            )
+        }));
         routers.push(async move {
-            let personal_port = personal_peers.get(&id).unwrap().port();
+            let personal_port = base_port + id as u16;
+            let personal_peers = addresses;
             NetworkRouter::new(
                 id,
                 &personal_peers,
@@ -289,7 +289,6 @@ fn bench_malicious_circuit<
                             PF,
                             GF2,
                             GF64,
-                            _,
                             PcgBasedPairwiseBooleanCorrelation<PACKING, PF, PS, D>,
                         >::malicious_security_offline_dealer(
                             &mut dealer_engine,
@@ -315,7 +314,6 @@ fn bench_malicious_circuit<
                                 PF,
                                 GF2,
                                 GF64,
-                                _,
                                 PcgBasedPairwiseBooleanCorrelation<PACKING, PF, PS, D>,
                             >::malicious_security_offline_party(
                                 &mut e,
@@ -324,10 +322,7 @@ fn bench_malicious_circuit<
                             )
                             .await;
                             Result::<
-                                (
-                                    PartyId,
-                                    MaliciousSecurityOffline<PACKING, PF, GF2, GF64, _, _>,
-                                ),
+                                (PartyId, MaliciousSecurityOffline<PACKING, PF, GF2, GF64, _>),
                                 (),
                             >::Ok((pid, res))
                         }
@@ -353,9 +348,11 @@ fn bench_malicious_circuit<
                 let pre_online_handles = parties_offline_material.into_iter().map(
                     |(pid, offline_material)| {
                         let mut engine = engines.get(&pid).unwrap().sub_protocol("PRE-ONLINE");
+                        let circuit = circuit.clone();
                         async move {
-                            let pre_online_material =
-                                offline_material.into_pre_online_material(&mut engine).await;
+                            let pre_online_material = offline_material
+                                .into_pre_online_material(&mut engine, circuit)
+                                .await;
                             Result::<(PartyId, PreOnlineMaterial<PACKING, PF, _, _, _, _>), ()>::Ok(
                                 (pid, pre_online_material),
                             )

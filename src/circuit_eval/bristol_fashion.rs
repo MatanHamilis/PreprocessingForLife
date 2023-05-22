@@ -30,6 +30,33 @@ pub enum ParsedGate {
 }
 
 impl ParsedGate {
+    fn offset_wires(&mut self, offset: usize) {
+        match self {
+            ParsedGate::AndGate { input, output } => {
+                input[0] += offset;
+                input[1] += offset;
+                *output += offset;
+            }
+            ParsedGate::NotGate { input, output } => {
+                *input += offset;
+                *output += offset;
+            }
+            ParsedGate::XorGate { input, output } => {
+                input[0] += offset;
+                input[1] += offset;
+                *output += offset;
+            }
+            ParsedGate::WideAndGate {
+                input,
+                input_bit,
+                output,
+            } => {
+                input.iter_mut().for_each(|v| *v += offset);
+                output.iter_mut().for_each(|v| *v += offset);
+                *input_bit += offset;
+            }
+        }
+    }
     pub fn input_wires(&self) -> &[usize] {
         match self {
             ParsedGate::AndGate { input, output: _ } => input,
@@ -131,6 +158,33 @@ impl ParsedCircuit {
     }
     pub fn total_non_linear_gates(&self) -> usize {
         self.iter().filter(|(_, _, g)| !g.is_linear()).count()
+    }
+    /// Computes the composition of this circuit with another circuit.
+    /// Generates a new circuit computing f(x) = rhs(self(x)) (i.e. first self is applied and then rhs).
+    /// Requires that rhs number of input wires is equal to self number of output wires.
+    pub fn try_compose(mut self, mut rhs: ParsedCircuit) -> Option<Self> {
+        if self.output_wire_count != rhs.input_wire_count {
+            return None;
+        }
+        // We should add this amount to the wire number of all numbers in rhs.
+        let wire_num_offset = self.input_wire_count + self.internal_wire_count;
+        if self.gates.last().unwrap().iter().any(|g| !g.is_linear()) {
+            rhs.gates.push(Vec::new());
+        }
+        let last_layer = self.gates.last_mut().unwrap();
+        rhs.gates[0].drain(..).for_each(|mut g| {
+            g.offset_wires(wire_num_offset);
+            last_layer.push(g);
+        });
+        rhs.gates.drain(1..).for_each(|mut layer| {
+            layer
+                .iter_mut()
+                .for_each(|g| g.offset_wires(wire_num_offset));
+            self.gates.push(layer);
+        });
+        self.output_wire_count = rhs.output_wire_count;
+        self.internal_wire_count += rhs.input_wire_count + rhs.internal_wire_count;
+        Some(self)
     }
 }
 impl TryFrom<&str> for GateOp {

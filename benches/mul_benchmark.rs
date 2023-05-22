@@ -2,6 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion
 use rand_core::OsRng;
 use silent_party::fields::FieldElement;
 use silent_party::fields::GF128;
+use silent_party::fields::GF64;
 use std::time::Instant;
 
 pub fn mul_benchmark(c: &mut Criterion) {
@@ -27,6 +28,12 @@ pub fn mul_benchmark_with_mem(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+    c.bench_function("mul_bench_with_mem_gf64", |bench| {
+        let mut rng = &mut OsRng;
+        let a = GF64::random(&mut rng);
+        let b = GF64::random(&mut rng);
+        bench.iter(|| black_box(a * b));
+    });
 }
 pub fn mul_benchmark_with_vec(c: &mut Criterion) {
     c.bench_function("mul_bench_with_vec", |bench| {
@@ -36,6 +43,24 @@ pub fn mul_benchmark_with_vec(c: &mut Criterion) {
                 (
                     vec![GF128::random(&mut rng); 1 << 20],
                     vec![GF128::random(&mut rng); 1 << 20],
+                )
+            },
+            |(mut a, b)| {
+                black_box(a.iter_mut().zip(b.iter()).for_each(|(a, b)| {
+                    (*a *= *b);
+                }));
+                black_box(a);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    c.bench_function("mul_bench_with_vec_gf64", |bench| {
+        let mut rng = &mut OsRng;
+        bench.iter_batched(
+            || {
+                (
+                    vec![GF64::random(&mut rng); 1 << 20],
+                    vec![GF64::random(&mut rng); 1 << 20],
                 )
             },
             |(mut a, b)| {

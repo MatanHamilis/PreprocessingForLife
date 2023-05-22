@@ -111,18 +111,11 @@ impl NetworkRouter {
         total_party_count: usize,
         listen_port: u16,
     ) -> Option<(Self, MultiPartyEngineImpl)> {
-        let parties: Box<[PartyId]> = peers.keys().copied().collect();
         let (downstream_sender, downstream_receiver) = unbounded_channel();
 
-        let engine = MultiPartyEngineImpl::new(
-            local_party_id,
-            root_tag.clone(),
-            downstream_sender,
-            Arc::from(parties),
-        );
-
-        let expected_incoming_connections =
-            peers.iter().filter(|(i, _)| *i < &local_party_id).count();
+        // let expected_incoming_connections =
+        // peers.iter().filter(|(i, _)| *i < &local_party_id).count();
+        let expected_incoming_connections = total_party_count - 1 - peers.len();
         let incoming_conns = receive_connections(listen_port, expected_incoming_connections);
         let outgoing_conns = make_connections(local_party_id, peers);
         let (incoming_conns, outgoing_conns) = join!(incoming_conns, outgoing_conns);
@@ -135,6 +128,19 @@ impl NetworkRouter {
                 )
                 .as_str(),
             ),
+        );
+        let parties: Box<[PartyId]> = incoming_conns
+            .iter()
+            .map(|v| v.0)
+            .copied()
+            .chain(std::iter::once(local_party_id))
+            .chain(outgoing_conns.iter().map(|v| v.0).copied())
+            .collect();
+        let engine = MultiPartyEngineImpl::new(
+            local_party_id,
+            root_tag.clone(),
+            downstream_sender,
+            Arc::from(parties),
         );
 
         let mut peers_send = HashMap::with_capacity(total_party_count - 1);
@@ -322,18 +328,18 @@ mod test {
         const PARTIES_COUNT: usize = 5;
         const ROOT_TAG: &str = "ROOT TAG";
         let party_ids: [PartyId; PARTIES_COUNT] = core::array::from_fn(|i| (i + 1) as PartyId);
-        let addresses = HashMap::from_iter(party_ids.iter().map(|i| {
-            (
-                *i,
-                SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40000 + *i as u16),
-            )
-        }));
 
         let mut routers = vec![];
         for id in party_ids {
-            let personal_peers = addresses.clone();
+            let personal_peers =
+                HashMap::from_iter(party_ids.iter().filter(|i| *i > &id).map(|i| {
+                    (
+                        *i,
+                        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40000 + *i as u16),
+                    )
+                }));
             routers.push(async move {
-                let personal_port = personal_peers.get(&id).unwrap().port();
+                let personal_port = 40_000 + id as u16;
                 NetworkRouter::new(
                     id,
                     &personal_peers,

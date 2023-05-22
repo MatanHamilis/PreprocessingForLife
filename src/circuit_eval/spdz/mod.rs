@@ -186,16 +186,16 @@ pub fn spdz_deal<
 
     let mut check_seed: [u8; 16] = [0u8; 16];
     rng.fill_bytes(&mut check_seed);
-    let (comms, comm_hash) = OfflineCommitment::commit(&check_seed, party_count);
+    let (comms, commitment) = OfflineCommitment::commit(&check_seed, party_count);
     let mut check_seeds: HashMap<_, _> = comms
         .into_iter()
         .zip(input_pos.keys())
-        .map(|(comm, &pid)| {
+        .map(|(commit_share, &pid)| {
             (
                 pid,
                 OfflineCommitment {
-                    commit_share: comm,
-                    commitment: Hash::from(comm_hash),
+                    commit_share,
+                    commitment,
                 },
             )
         })

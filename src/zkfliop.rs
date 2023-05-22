@@ -4,11 +4,13 @@ use crate::{
     fields::FieldElement,
 };
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::time::Instant;
 use std::{mem::MaybeUninit, println};
 
 const INTERNAL_ROUND_PROOF_LENGTH: usize = 3;
 const LAST_ROUND_PROOF_LENGTH: usize = 5;
-const CHUNK_SIZE: usize = 1 << 12;
+// const CHUNK_SIZE: usize = 1 << 10;
 
 pub fn compute_round_count_and_m(z_len: usize) -> (usize, usize) {
     assert_eq!((z_len - 1) & 3, 0);
@@ -37,19 +39,19 @@ fn interpolate<F: FieldElement>(evals: &[(F, F)], at: F) -> F {
 }
 
 pub fn g<F: FieldElement>(z: &[F]) -> F {
-    z.par_chunks(CHUNK_SIZE)
-        .map(|f| f.chunks_exact(2).map(|f| f[0] * f[1]).sum())
-        .sum()
+    z.par_chunks_exact(2).map(|f| f[0] * f[1]).sum()
 }
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OfflineProver<F: FieldElement> {
+    #[serde(bound = "")]
     proof_masks: Vec<F>,
+    #[serde(bound = "")]
     s_tilde: (F, F),
     round_challenges: Vec<OfflineCommitment>,
     final_msg: OfflineCommitment,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OfflineVerifier {
     round_challenges: Vec<OfflineCommitment>,
     final_msg: OfflineCommitment,
@@ -118,9 +120,6 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
     engine.send((&proof_masks, s_tilde), prover_id);
 
     // Rounds
-    let inv_two_minus_one = F::one() / (two - F::one());
-    let mut slope_container = Vec::with_capacity(z_tilde.len() / 2);
-    unsafe { slope_container.set_len(z_tilde.len() / 2) };
     for round_id in 1..round_count {
         let z_len = z_tilde.len();
         let r = F::random(&mut rng);
@@ -132,22 +131,14 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
             proof_masks[q_base + 2],
         );
         b_tilde.push(z_tilde[0] - q_0_tilde - q_1_tilde);
-        slope_container
-            .par_chunks_mut(CHUNK_SIZE)
-            .zip(z_tilde[1..=z_len / 2].par_chunks(CHUNK_SIZE))
-            .zip(z_tilde[z_len / 2 + 1..].par_chunks(CHUNK_SIZE))
-            .for_each(|((slope_i, f_zero), f_one)| {
-                for i in 0..f_one.len() {
-                    slope_i[i] = f_one[i] - f_zero[i];
-                }
-            });
+        let z_second_half =
+            unsafe { std::slice::from_raw_parts(z_tilde[z_len / 2 + 1..].as_ptr(), z_len / 2) };
         z_tilde[1..=z_len / 2]
-            .par_chunks_mut(CHUNK_SIZE)
-            .zip(slope_container.par_chunks(CHUNK_SIZE))
-            .for_each(|(z_i, slope_i)| {
-                for i in 0..z_i.len() {
-                    z_i[i] += r * slope_i[i];
-                }
+            .par_iter_mut()
+            .zip(z_second_half.par_iter())
+            .for_each(|(f_zero, f_one)| {
+                let slope_i = *f_one - *f_zero;
+                *f_zero += slope_i * r;
             });
         let q_r = interpolate(
             &[
@@ -227,58 +218,83 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     let (_, round_count) = compute_round_count_and_m(z.len());
     println!("Proving: round count {}", round_count);
 
-    let inv_two_minus_one = F::one() / (two - F::one());
-    let mut q_2_container = Vec::with_capacity(z.len() / 2);
-    unsafe { q_2_container.set_len(z.len() / 2) };
-    let mut slope_container = Vec::with_capacity(z.len() / 2);
-    unsafe { slope_container.set_len(z.len() / 2) };
     // Rounds
     for (round_id, round_challenge) in round_challenges
         .into_iter()
         .take(round_challenges.len() - 1)
         .enumerate()
     {
+        // let time = Instant::now();
         // Computation
         let z_len = z.len();
         let i0 = &z[1..=z_len / 2];
+        let first_g_time = Instant::now();
         let q_0 = g(i0);
+        println!(
+            "First g took: {} round: {}",
+            first_g_time.elapsed().as_millis(),
+            round_id
+        );
         let i1 = &z[z_len / 2 + 1..];
+        // let first_g_time = Instant::now();
         let q_1 = g(i1);
+        // println!(
+        //     "second g took: {} round: {}",
+        //     first_g_time.elapsed().as_millis(),
+        //     round_id
+        // );
         debug_assert_eq!(z[0], q_0 + q_1);
-        q_2_container
-            .par_chunks_mut(CHUNK_SIZE)
-            .zip(slope_container.par_chunks_mut(CHUNK_SIZE))
-            .zip(z[1..=z_len / 2].par_chunks(CHUNK_SIZE))
-            .zip(z[z_len / 2 + 1..].par_chunks(CHUNK_SIZE))
-            .for_each(|(((q_2_i, slope_i), f_zero), f_one)| {
-                for i in 0..f_one.len() {
-                    slope_i[i] = f_one[i] - f_zero[i];
-                    q_2_i[i] = f_zero[i] + slope_i[i] * two;
-                }
-            });
+        // let first_g_time = Instant::now();
+        let q_2 = z[1..=z_len / 2]
+            .par_chunks(2)
+            .zip(z[z_len / 2 + 1..].par_chunks(2))
+            .map(|(f_zero, f_one)| {
+                let slope_first = f_one[0] - f_zero[0];
+                let slope_second = f_one[1] - f_zero[1];
+                let q_2_first = f_zero[0] + slope_first * two;
+                let q_2_second = f_zero[1] + slope_second * two;
+                q_2_first * q_2_second
+            })
+            .sum();
 
-        let q_2 = g(&q_2_container[..z.len() / 2]);
+        // println!(
+        //     "last loop took: {} round: {}",
+        //     first_g_time.elapsed().as_millis(),
+        //     round_id
+        // );
         let proof_masks_base = INTERNAL_ROUND_PROOF_LENGTH * (round_id);
         let mask_0 = proof_masks[proof_masks_base];
         let mask_1 = proof_masks[proof_masks_base + 1];
         let mask_2 = proof_masks[proof_masks_base + 2];
         let masked_proof = (q_0 - mask_0, q_1 - mask_1, q_2 - mask_2);
+        // println!(
+        //     "prover round: {} part 1 took: {}ms",
+        //     round_id,
+        //     time.elapsed().as_millis()
+        // );
 
         // Communication
         engine.broadcast(masked_proof);
         let r: F = round_challenge.online_decommit(&mut engine).await;
 
+        // let time = Instant::now();
         // Query
-        z.par_iter_mut()
-            .skip(1)
-            .take(z_len / 2)
-            .zip(slope_container.par_iter().take(z_len / 2))
-            .for_each(|(z_i, slope_i)| {
-                *z_i = *z_i + r * *slope_i;
+        let z_second_output =
+            unsafe { std::slice::from_raw_parts(z[z_len / 2 + 1..].as_ptr(), z_len / 2) };
+        z[1..=z_len / 2]
+            .par_iter_mut()
+            .zip(z_second_output.par_iter())
+            .for_each(|(z_i, f_one)| {
+                *z_i += r * (*f_one - *z_i);
             });
         let q_r = interpolate(&[(F::zero(), q_0), (F::one(), q_1), (two, q_2)], r);
         z[0] = q_r;
         z = &mut z[..=z_len / 2];
+        // println!(
+        //     "prover round: {} part 2 took: {}ms",
+        //     round_id,
+        //     time.elapsed().as_millis()
+        // );
     }
     // last round
     debug_assert_eq!(z.len(), 5);
@@ -339,9 +355,6 @@ pub async fn verifier<F: FieldElement>(
 
     let mut b_hat = Vec::with_capacity(round_count);
     // Rounds
-    let inv_two_minus_one = F::one() / (two - F::one());
-    let mut slope_container = Vec::with_capacity(z_hat.len() / 2);
-    unsafe { slope_container.set_len(z_hat.len() / 2) };
     for (_, round_challenge) in round_challenges
         .into_iter()
         .take(round_challenges.len() - 1)
@@ -351,23 +364,14 @@ pub async fn verifier<F: FieldElement>(
         let (q_0_hat, q_1_hat, q_2_hat): (F, F, F) = engine.recv_from(prover_id).await.unwrap();
         let r: F = round_challenge.online_decommit(&mut engine).await;
         b_hat.push(z_hat[0] - q_0_hat - q_1_hat);
-        slope_container
-            .par_chunks_mut(CHUNK_SIZE)
-            .zip(z_hat[1..=z_len / 2].par_chunks(CHUNK_SIZE))
-            .zip(z_hat[z_len / 2 + 1..].par_chunks(CHUNK_SIZE))
-            .for_each(|((slope_i, f_zero), f_one)| {
-                for i in 0..f_one.len() {
-                    slope_i[i] = f_one[i] - f_zero[i];
-                }
-            });
+        let z_second_half =
+            unsafe { std::slice::from_raw_parts(z_hat[z_len / 2 + 1..].as_ptr(), z_len / 2) };
         z_hat[1..=z_len / 2]
-            .par_chunks_mut(CHUNK_SIZE)
-            .zip(slope_container.par_chunks(CHUNK_SIZE))
-            .for_each(|(z_i, slope_i)| {
-                for i in 0..z_i.len() {
-                    let f_zero = z_i[i];
-                    z_i[i] = f_zero + r * slope_i[i];
-                }
+            .par_iter_mut()
+            .zip(z_second_half.par_iter())
+            .for_each(|(f_zero, f_one)| {
+                let slope_i = *f_one - *f_zero;
+                *f_zero += r * slope_i;
             });
         let q_r = interpolate(
             &[(F::zero(), q_0_hat), (F::one(), q_1_hat), (two, q_2_hat)],
