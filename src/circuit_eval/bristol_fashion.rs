@@ -1,7 +1,7 @@
 //! # Bristol Fashion Circuits Parser
 //! Based on [Bristol Fashion documentation](https://homes.esat.kuleuven.be/~nsmart/MPC/).
 
-use log::error;
+use log::{debug, error};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -304,6 +304,10 @@ fn parse_regular_gate_line(line: &str) -> Option<ParsedGate> {
 
 pub fn parse_bristol<T: Iterator<Item = String>>(mut lines: T) -> Option<ParsedCircuit> {
     let (gates_num, total_wire_count) = parse_first_line(lines.next()?.as_str())?;
+    debug!(
+        "Total gates: {}, total wires: {}",
+        gates_num, total_wire_count
+    );
     let (_, inputs_lengths) = parse_io_lines(lines.next()?.as_str())?;
     let input_wire_count: usize = inputs_lengths.iter().sum();
     let (_, outputs_lengths) = parse_io_lines(lines.next()?.as_str())?;

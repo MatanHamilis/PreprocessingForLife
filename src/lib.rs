@@ -24,3 +24,23 @@ pub(crate) fn xor_arrays<const LENGTH: usize>(a: &mut [u8; LENGTH], b: &[u8; LEN
         a[i] ^= b[i];
     }
 }
+
+pub(crate) fn diff_arrays<const LENGTH: usize, F: std::ops::Sub<F, Output = F> + Copy>(
+    a: &[F; LENGTH],
+    b: &[F; LENGTH],
+) -> [F; LENGTH] {
+    core::array::from_fn(|i| a[i] - b[i])
+}
+pub(crate) fn diff_assign_arrays<const LENGTH: usize, F: std::ops::SubAssign<F> + Copy>(
+    a: &mut [F; LENGTH],
+    b: &[F; LENGTH],
+) {
+    a.iter_mut().zip(b.iter()).for_each(|(ai, bi)| *ai -= *bi);
+}
+
+pub(crate) fn add_assign_arrays<const LENGTH: usize, F: std::ops::AddAssign<F> + Copy>(
+    a: &mut [F; LENGTH],
+    b: &[F; LENGTH],
+) {
+    a.iter_mut().zip(b.iter()).for_each(|(ai, bi)| *ai += *bi);
+}

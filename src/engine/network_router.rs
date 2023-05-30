@@ -221,7 +221,7 @@ impl NetworkRouter {
                 let (pid, msg) = match v {
                     Ok(x) => x,
                     Err((pid, _)) => {
-                        println!("Got error, my id: {}, peer: {}", self.local_party_id, pid);
+                        log::error!("Got error, my id: {}, peer: {}", self.local_party_id, pid);
                         panic!()
                     }
                 };

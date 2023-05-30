@@ -7,6 +7,7 @@ use std::ops::{Add, AddAssign};
 use aes_prng::AesRng;
 use async_trait::async_trait;
 use bitvec::vec::BitVec;
+use log::info;
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rayon::ThreadPoolBuilder;
 use serde::de::DeserializeOwned;
@@ -446,7 +447,7 @@ pub fn expand_pairwise_beaver_triples<
     Vec<(PartyId, Vec<((usize, usize), WideBeaverTriple<F>)>)>,
 ) {
     ThreadPoolBuilder::new().build().unwrap().install(|| {
-        println!(
+        info!(
             "Entered threadpool, threads: {}",
             rayon::current_num_threads()
         );
@@ -473,7 +474,7 @@ pub fn expand_pairwise_beaver_triples<
             .iter()
             .map(|(pid, (pk, code))| (*pid, FullPcgKey::new_from_offline(pk, *code, has_wand)))
             .collect();
-        println!("PCG Offline took: {}ms", time.elapsed().as_millis());
+        info!("PCG Offline took: {}ms", time.elapsed().as_millis());
         let time = Instant::now();
         let regular_beaver_triples: Vec<(PartyId, Vec<((usize, usize), RegularBeaverTriple<F>)>)> =
             pcg_keys
@@ -494,7 +495,7 @@ pub fn expand_pairwise_beaver_triples<
                             .map(|g| ((g.0, g.1), key.next_bit_beaver_triple()))
                             .collect(),
                     );
-                    println!("Bit PCG for party took: {}ms", time.elapsed().as_millis());
+                    info!("Bit PCG for party took: {}ms", time.elapsed().as_millis());
                     o
                 })
                 .collect();
@@ -519,7 +520,7 @@ pub fn expand_pairwise_beaver_triples<
                     )
                 })
                 .collect();
-        println!("online PCG took: {}ms", time.elapsed().as_millis());
+        info!("online PCG took: {}ms", time.elapsed().as_millis());
         (regular_beaver_triples, wide_beaver_triples)
     })
 }
@@ -817,7 +818,7 @@ pub async fn multi_party_semi_honest_eval_circuit<
         circuit,
     )
     .await;
-    println!(
+    info!(
         "\t\tSemi Honest - obtain masked and shared input: {}ms",
         time.elapsed().as_millis()
     );
@@ -829,7 +830,7 @@ pub async fn multi_party_semi_honest_eval_circuit<
         .iter()
         .map(|layer| layer.iter().filter(|g| !g.is_linear()).count())
         .sum();
-    println!(
+    info!(
         "\t\tSemi Honest - count non linear gates: {}ms",
         time.elapsed().as_millis()
     );
@@ -1028,6 +1029,7 @@ mod tests {
 
     use aes_prng::AesRng;
     use futures::future::try_join_all;
+    use log::info;
     use rand::thread_rng;
     use tokio::time::Instant;
 
@@ -1219,7 +1221,7 @@ mod tests {
 
         let timer_start = Instant::now();
         let exec_results = try_join_all(engine_futures).await.unwrap();
-        println!("Computation took: {}", timer_start.elapsed().as_millis());
+        info!("Computation took: {}", timer_start.elapsed().as_millis());
         let exec_results: Vec<_> = exec_results.into_iter().map(|e| e.unwrap()).collect();
         let local_computation_wires = local_eval_circuit(&circuit, input);
         let mut local_computation_output = local_computation_wires

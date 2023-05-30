@@ -10,6 +10,7 @@ use std::{
 use aes_prng::AesRng;
 use criterion::{criterion_group, criterion_main, Criterion};
 use futures::future::try_join_all;
+use log::info;
 use rand::thread_rng;
 use rayon::prelude::*;
 use silent_party::{
@@ -143,7 +144,7 @@ fn bench_boolean_circuit_semi_honest<
                             let bts = offline_correlation
                                 .get_multiparty_beaver_triples(&mut engine, &circuit)
                                 .await;
-                            println!(
+                            info!(
                                 "\t\tSemi Honest - Opening Beaver triples: {}ms",
                                 timer.elapsed().as_millis()
                             );
@@ -198,7 +199,7 @@ fn bench_boolean_circuit_semi_honest<
                             },
                         );
                         let time = time.elapsed();
-                        println!("semi honest: {}", time.as_millis());
+                        info!("semi honest: {}", time.as_millis());
                         (time, o)
                     })
                 },
@@ -211,7 +212,7 @@ fn bench_boolean_circuit_semi_honest<
                 .unwrap()
                 .into_iter()
                 .sum();
-            println!("Total bytes sent: {}", v);
+            info!("Total bytes sent: {}", v);
             output
         })
     });
@@ -300,7 +301,7 @@ fn bench_malicious_circuit<
                             dealer.as_ref(),
                         )
                         .await;
-                        println!("Dealer:\t took: {}ms", time.elapsed().as_millis());
+                        info!("Dealer:\t took: {}ms", time.elapsed().as_millis());
                     }
                 };
 
@@ -380,7 +381,7 @@ fn bench_malicious_circuit<
                             )
                             .await
                             .ok_or(());
-                        println!("Malicious eval took: {}ms", start.elapsed().as_millis());
+                        info!("Malicious eval took: {}ms", start.elapsed().as_millis());
                         o
                     })
                 });
@@ -392,13 +393,13 @@ fn bench_malicious_circuit<
                     .map(|v| v.unwrap())
                     .collect();
                 let output = start.elapsed();
-                println!("Running took: {}", output.as_millis());
+                info!("Running took: {}", output.as_millis());
                 let total_bytes: usize = try_join_all(router_handles)
                     .await
                     .unwrap()
                     .into_iter()
                     .sum();
-                println!("Total bytes:{}", total_bytes);
+                info!("Total bytes:{}", total_bytes);
                 output
             }
         })
@@ -444,7 +445,7 @@ pub fn bench_2p_semi_honest(c: &mut Criterion) {
 }
 pub fn bench_2p_malicious(c: &mut Criterion) {
     let p = PackedGF2::one();
-    println!(
+    info!(
         "Packed GF2 serialized size: {}",
         bincode::serialize(&p).unwrap().len()
     );

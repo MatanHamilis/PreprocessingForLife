@@ -174,6 +174,9 @@ impl FieldElement for GF64 {
         GF64(1u64)
     }
 
+    fn hash(&self, hasher: &mut blake3::Hasher) {
+        hasher.update(&self.0.to_le_bytes());
+    }
     fn is_one(&self) -> bool {
         self.0 == 1u64
     }

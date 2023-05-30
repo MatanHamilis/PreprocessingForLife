@@ -1,6 +1,8 @@
 use std::{collections::HashMap, ops::Mul, sync::Arc};
 
+use crate::zkfliop::PowersIterator;
 use futures::{future::try_join_all, join};
+use log::info;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -45,25 +47,6 @@ pub struct WideGateGamma<const PACKING: usize, F: FieldElement>([[F; 128]; PACKI
 //     WideAnd([[F; 128]; PACKING]),
 // }
 
-pub struct PowersIterator<F: FieldElement> {
-    alpha: F,
-    current: F,
-}
-impl<F: FieldElement> PowersIterator<F> {
-    fn new(alpha: F) -> Self {
-        Self {
-            alpha,
-            current: F::one(),
-        }
-    }
-}
-impl<F: FieldElement> Iterator for PowersIterator<F> {
-    type Item = F;
-    fn next(&mut self) -> Option<Self::Item> {
-        self.current *= self.alpha;
-        Some(self.current)
-    }
-}
 fn compute_gammas_alphas<
     const PACKING: usize,
     F: FieldElement,
@@ -148,7 +131,7 @@ fn compute_gammas_alphas<
                 };
             }
         });
-    println!(
+    info!(
         "\t\tVerify - Alphas initialization: {}ms",
         time.elapsed().as_millis()
     );
@@ -197,7 +180,7 @@ fn compute_gammas_alphas<
             }
         }
     }
-    println!(
+    info!(
         "\t\tVerify: Propagation took: {}ms",
         time.elapsed().as_millis()
     );
@@ -576,7 +559,7 @@ pub async fn verify_parties<
     let timer = Instant::now();
     let prover_offline_material = prover_offline_material.clone();
     let (alpha, omega_hat): (F, F) = alpha_omega_commitment.online_decommit(engine).await;
-    println!(
+    info!(
         "\t\tVerify - cloning and decommit took: {}ms",
         timer.elapsed().as_millis()
     );
@@ -594,7 +577,7 @@ pub async fn verify_parties<
         gammas_input_wires,
         total_constant_addition,
     ) = compute_gammas_alphas::<PACKING, _, PF>(&alpha, circuit);
-    println!(
+    info!(
         "\t\tVerify - compute gammas alphas took: {}ms",
         timer.elapsed().as_millis()
     );
@@ -639,7 +622,7 @@ pub async fn verify_parties<
         masked_gamma_i_s.insert(pid, masked_gamma_i_peer);
     }
     let p_hat = lambda - masked_gamma_i_s.values().copied().sum() - masked_gamma_i + omega_hat;
-    println!(
+    info!(
         "\t\tVerify - Compute and obtain gammas: {}ms",
         timer.elapsed().as_millis()
     );
@@ -666,7 +649,7 @@ pub async fn verify_parties<
         None,
         circuit,
     ));
-    println!(
+    info!(
         "\t\tVerify - Statements Construction: {}ms",
         timer.elapsed().as_millis()
     );
@@ -683,7 +666,7 @@ pub async fn verify_parties<
             four,
         )
         .await;
-        println!("\t\tVerify - Proving took: {}", timer.elapsed().as_millis());
+        info!("\t\tVerify - Proving took: {}", timer.elapsed().as_millis());
     });
 
     let verifiers_futures =
@@ -696,7 +679,7 @@ pub async fn verify_parties<
                 let verify_statement_arc = verify_statement.clone();
                 let masked_gamma_prover = *masked_gamma_i_s.get(&prover_id).unwrap();
                 let prover_id = *prover_id;
-                println!(
+                info!(
                     "\t\tVerify - Making preparations to verify: {}ms",
                     timer.elapsed().as_millis()
                 );
@@ -715,7 +698,7 @@ pub async fn verify_parties<
                         four,
                     )
                     .await;
-                    println!(
+                    info!(
                         "\t\tVerify - zkfliop verifier took: {}",
                         timer.elapsed().as_millis()
                     );
@@ -728,7 +711,7 @@ pub async fn verify_parties<
     let timer = Instant::now();
     let s = s_commitment.online_decommit(engine).await;
     let p = p_hat + s;
-    println!(
+    info!(
         "\t\tVerify - last communication round took: {}ms",
         timer.elapsed().as_millis()
     );

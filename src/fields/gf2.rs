@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fmt::Display,
     iter::Sum,
+    mem::size_of,
     ops::{
         Add, AddAssign, BitAnd, BitAndAssign, BitXor, BitXorAssign, Div, DivAssign, Mul, MulAssign,
         Neg, Sub, SubAssign,
@@ -95,6 +96,10 @@ impl FieldElement for GF2 {
     const BITS: usize = 1;
     fn one() -> Self {
         Self { v: 1u8 }
+    }
+
+    fn hash(&self, hasher: &mut blake3::Hasher) {
+        hasher.update(&[self.v]);
     }
 
     fn is_one(&self) -> bool {
@@ -238,6 +243,15 @@ impl FieldElement for PackedGF2 {
     }
     fn is_zero(&self) -> bool {
         self.bits.as_raw_slice().iter().all(|i| i == &0)
+    }
+    fn hash(&self, hasher: &mut blake3::Hasher) {
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                self.bits.as_raw_slice().as_ptr() as *const u8,
+                self.bits.as_raw_slice().len() * size_of::<usize>(),
+            )
+        };
+        hasher.update(bytes);
     }
     fn one() -> Self {
         Self::from_bit(true)

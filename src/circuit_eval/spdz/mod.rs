@@ -2,6 +2,7 @@ use std::{assert_eq, collections::HashMap, debug_assert, ops::Mul, print, unimpl
 
 use aes_prng::AesRng;
 use blake3::{Hash, OUT_LEN};
+use log::info;
 use rand::Rng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use tokio::time::Instant;
@@ -247,7 +248,7 @@ pub fn spdz_deal<
             )
         })
         .collect();
-    println!("SPDZ Dealer took: {}ms", time.elapsed().as_millis());
+    info!("SPDZ Dealer took: {}ms", time.elapsed().as_millis());
     o
 }
 pub async fn online_spdz<

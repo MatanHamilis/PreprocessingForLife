@@ -35,16 +35,20 @@ def get_fresh_wire():
 
 
 def make_header(gates):
-    global current_output
     first_line = "{} {}".format(len(gates), current_output)
     second_line = "1 {}".format(input_size)
     last_line = "1 {}".format(output_size)
     return '\n'.join([first_line, second_line, last_line, ""])
 
 
-if __name__ == "__main__":
-    for i in range(0, input_size//2):
-        gates.append(make_xor(i, input_size - i-1, get_fresh_wire()))
+def build_pre_xor_circuit(input_size):
+    gates = []
+    for i in range(0, input_size):
+        gates.append(make_xor(i, i+input_size, i+2*input_size))
     print(make_header(gates))
     for g in gates:
         print(emit_gate(g))
+
+
+if __name__ == "__main__":
+    build_pre_xor_circuit(256)

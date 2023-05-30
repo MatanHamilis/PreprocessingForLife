@@ -9,6 +9,7 @@ use crate::{
     },
 };
 use aes_prng::AesRng;
+use log::info;
 use rand::{CryptoRng, SeedableRng};
 use rand_core::RngCore;
 use rayon::prelude::*;
@@ -196,7 +197,7 @@ impl<const N: usize> PackedOfflineReceiverPcgKey<N> {
                             });
                             *s = sum;
                         });
-                    println!(
+                    info!(
                         "time internal pprfs expansion only: {}ms",
                         time.elapsed().as_millis()
                     );
@@ -230,7 +231,7 @@ impl<const N: usize> PackedOfflineReceiverPcgKey<N> {
                         v.iter_mut().for_each(|vv| *vv += s);
                     });
             });
-        println!(
+        info!(
             "PCG: Finished tree expansion {}ms!",
             time.elapsed().as_millis()
         );
@@ -246,7 +247,7 @@ impl<const N: usize> PackedOfflineReceiverPcgKey<N> {
         final_evals.par_iter_mut().enumerate().for_each(|(i, v)| {
             *v = core::array::from_fn(|j| evals[j][i]);
         });
-        println!("PCG: Finished final evals! {}", time.elapsed().as_millis());
+        info!("PCG: Finished final evals! {}", time.elapsed().as_millis());
         (
             OfflineReceiverPcgKey {
                 delta: self.delta,

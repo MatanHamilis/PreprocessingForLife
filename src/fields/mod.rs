@@ -2,12 +2,11 @@ mod gf128;
 mod gf2;
 mod gf64;
 mod packed_gf2;
+use blake3::Hasher;
 pub use gf128::GF128;
 pub use gf2::PackedGF2;
 pub use gf2::GF2;
 pub use gf64::GF64;
-pub use packed_gf2::PackedGF2Array;
-pub use packed_gf2::PackedGF2U64;
 use rand::CryptoRng;
 use rand::RngCore;
 use serde::de::DeserializeOwned;
@@ -54,6 +53,7 @@ pub trait FieldElement:
     fn zero() -> Self;
     fn is_zero(&self) -> bool;
 
+    fn hash(&self, hasher: &mut Hasher);
     const BITS: usize;
     fn set_bit(&mut self, bit: bool, idx: usize);
     fn random(rng: impl CryptoRng + RngCore) -> Self;
@@ -70,6 +70,17 @@ pub trait FieldElement:
         } else {
             Self::zero()
         }
+    }
+    fn two() -> Self {
+        let mut output = Self::zero();
+        output.set_bit(true, 1);
+        output
+    }
+    fn three() -> Self {
+        Self::two() + Self::one()
+    }
+    fn four() -> Self {
+        Self::two() * Self::two()
     }
 }
 

@@ -3,14 +3,35 @@ use crate::{
     engine::{MultiPartyEngine, PartyId},
     fields::FieldElement,
 };
+use log::info;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use std::{mem::MaybeUninit, println};
+
+pub mod ni;
 
 const INTERNAL_ROUND_PROOF_LENGTH: usize = 3;
 const LAST_ROUND_PROOF_LENGTH: usize = 5;
 // const CHUNK_SIZE: usize = 1 << 10;
+pub struct PowersIterator<F: FieldElement> {
+    alpha: F,
+    current: F,
+}
+impl<F: FieldElement> PowersIterator<F> {
+    pub fn new(alpha: F) -> Self {
+        Self {
+            alpha,
+            current: F::one(),
+        }
+    }
+}
+impl<F: FieldElement> Iterator for PowersIterator<F> {
+    type Item = F;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.current *= self.alpha;
+        Some(self.current)
+    }
+}
 
 pub fn compute_round_count_and_m(z_len: usize) -> (usize, usize) {
     assert_eq!((z_len - 1) & 3, 0);
@@ -199,6 +220,50 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
     OfflineCommitment::offline_commit(&mut engine, &final_value).await;
 }
 
+fn make_round_proof<F: FieldElement>(z: &[F], two: F) -> [F; 3] {
+    let z_len = z.len();
+    let i0 = &z[1..=z_len / 2];
+    let q_0 = g(i0);
+    let i1 = &z[z_len / 2 + 1..];
+    let q_1 = g(i1);
+    debug_assert_eq!(z[0], q_0 + q_1);
+    let q_2 = z[1..=z_len / 2]
+        .par_chunks(2)
+        .zip(z[z_len / 2 + 1..].par_chunks(2))
+        .map(|(f_zero, f_one)| {
+            let slope_first = f_one[0] - f_zero[0];
+            let slope_second = f_one[1] - f_zero[1];
+            let q_2_first = f_zero[0] + slope_first * two;
+            let q_2_second = f_zero[1] + slope_second * two;
+            q_2_first * q_2_second
+        })
+        .sum();
+    [q_0, q_1, q_2]
+}
+fn multi_eval_at_point<F: FieldElement>(
+    z: &mut [F],
+    round_proof: &[F; 3],
+    challenge: F,
+    two: F,
+) -> F {
+    let z_len = z.len();
+    let z_second_output =
+        unsafe { std::slice::from_raw_parts(z[z_len / 2 + 1..].as_ptr(), z_len / 2) };
+    z[1..=z_len / 2]
+        .par_iter_mut()
+        .zip(z_second_output.par_iter())
+        .for_each(|(z_i, f_one)| {
+            *z_i += challenge * (*f_one - *z_i);
+        });
+    interpolate(
+        &[
+            (F::zero(), round_proof[0]),
+            (F::one(), round_proof[1]),
+            (two, round_proof[2]),
+        ],
+        challenge,
+    )
+}
 pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     mut engine: E,
     mut z: &mut [F],
@@ -216,85 +281,30 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     let last_round_challenge = round_challenges.last().unwrap();
     // Init
     let (_, round_count) = compute_round_count_and_m(z.len());
-    println!("Proving: round count {}", round_count);
-
+    info!("Proving: round count {}", round_count);
     // Rounds
-    for (round_id, round_challenge) in round_challenges
+    for (_, (round_challenge, masks)) in round_challenges
         .into_iter()
         .take(round_challenges.len() - 1)
+        .zip(proof_masks.chunks_exact(3))
         .enumerate()
     {
-        // let time = Instant::now();
         // Computation
-        let z_len = z.len();
-        let i0 = &z[1..=z_len / 2];
-        let first_g_time = Instant::now();
-        let q_0 = g(i0);
-        println!(
-            "First g took: {} round: {}",
-            first_g_time.elapsed().as_millis(),
-            round_id
+        let proof = make_round_proof(z, two);
+        let masked_proof = (
+            proof[0] - masks[0],
+            proof[1] - masks[1],
+            proof[2] - masks[2],
         );
-        let i1 = &z[z_len / 2 + 1..];
-        // let first_g_time = Instant::now();
-        let q_1 = g(i1);
-        // println!(
-        //     "second g took: {} round: {}",
-        //     first_g_time.elapsed().as_millis(),
-        //     round_id
-        // );
-        debug_assert_eq!(z[0], q_0 + q_1);
-        // let first_g_time = Instant::now();
-        let q_2 = z[1..=z_len / 2]
-            .par_chunks(2)
-            .zip(z[z_len / 2 + 1..].par_chunks(2))
-            .map(|(f_zero, f_one)| {
-                let slope_first = f_one[0] - f_zero[0];
-                let slope_second = f_one[1] - f_zero[1];
-                let q_2_first = f_zero[0] + slope_first * two;
-                let q_2_second = f_zero[1] + slope_second * two;
-                q_2_first * q_2_second
-            })
-            .sum();
-
-        // println!(
-        //     "last loop took: {} round: {}",
-        //     first_g_time.elapsed().as_millis(),
-        //     round_id
-        // );
-        let proof_masks_base = INTERNAL_ROUND_PROOF_LENGTH * (round_id);
-        let mask_0 = proof_masks[proof_masks_base];
-        let mask_1 = proof_masks[proof_masks_base + 1];
-        let mask_2 = proof_masks[proof_masks_base + 2];
-        let masked_proof = (q_0 - mask_0, q_1 - mask_1, q_2 - mask_2);
-        // println!(
-        //     "prover round: {} part 1 took: {}ms",
-        //     round_id,
-        //     time.elapsed().as_millis()
-        // );
 
         // Communication
         engine.broadcast(masked_proof);
         let r: F = round_challenge.online_decommit(&mut engine).await;
 
-        // let time = Instant::now();
         // Query
-        let z_second_output =
-            unsafe { std::slice::from_raw_parts(z[z_len / 2 + 1..].as_ptr(), z_len / 2) };
-        z[1..=z_len / 2]
-            .par_iter_mut()
-            .zip(z_second_output.par_iter())
-            .for_each(|(z_i, f_one)| {
-                *z_i += r * (*f_one - *z_i);
-            });
-        let q_r = interpolate(&[(F::zero(), q_0), (F::one(), q_1), (two, q_2)], r);
-        z[0] = q_r;
+        z[0] = multi_eval_at_point(&mut z, &proof, r, two);
+        let z_len = z.len();
         z = &mut z[..=z_len / 2];
-        // println!(
-        //     "prover round: {} part 2 took: {}ms",
-        //     round_id,
-        //     time.elapsed().as_millis()
-        // );
     }
     // last round
     debug_assert_eq!(z.len(), 5);

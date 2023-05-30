@@ -8,6 +8,7 @@ pub use self::semi_honest::{
     RegularMask, WideMask,
 };
 
+use log::{error, info};
 mod bristol_fashion;
 mod malicious;
 mod semi_honest;
@@ -18,6 +19,7 @@ pub fn circuit_from_file(path: &Path) -> Option<ParsedCircuit> {
     let circuit_file = match File::open(path) {
         Ok(f) => f,
         Err(_) => {
+            error!("Failed to open file");
             return None;
         }
     };
@@ -29,6 +31,9 @@ pub fn circuit_from_file(path: &Path) -> Option<ParsedCircuit> {
         });
     match parse_bristol(lines) {
         n @ Some(_) => n,
-        None => None,
+        None => {
+            error!("Failed to parse circuit lines");
+            None
+        }
     }
 }

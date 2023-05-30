@@ -1,6 +1,7 @@
 use std::{collections::HashMap, marker::PhantomData, ops::Mul};
 
 use aes_prng::AesRng;
+use log::info;
 use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -190,7 +191,7 @@ impl<
             semi_honest_offline_correlation
                 .get_multiparty_beaver_triples(engine, circuit.as_ref())
                 .await;
-        println!("Getting triples took: {}", timer.elapsed().as_millis());
+        info!("Getting triples took: {}", timer.elapsed().as_millis());
         let input_wire_mask_shares = input_wire_mask_shares.clone();
         let timer = Instant::now();
         let (masked_input_wires, masked_gate_inputs, wide_masked_gate_inputs, masked_outputs) =
@@ -207,7 +208,7 @@ impl<
             )
             .await
             .unwrap();
-        println!("Semi Honest took: {}", timer.elapsed().as_millis());
+        info!("Semi Honest took: {}", timer.elapsed().as_millis());
         let timer = Instant::now();
         if !verify::verify_parties(
             engine,
@@ -227,7 +228,7 @@ impl<
         {
             return None;
         }
-        println!("Verify took: {}", timer.elapsed().as_millis());
+        info!("Verify took: {}", timer.elapsed().as_millis());
         let timer = Instant::now();
         let output_wire_masks: Vec<PF> = output_wire_mask_commitments.online_decommit(engine).await;
         let outputs: Vec<_> = output_wire_masks
@@ -235,7 +236,7 @@ impl<
             .zip(masked_outputs.into_iter())
             .map(|(a, b)| a + b)
             .collect();
-        println!("Output opening took: {}", timer.elapsed().as_millis());
+        info!("Output opening took: {}", timer.elapsed().as_millis());
         Some(outputs)
     }
 }
@@ -249,6 +250,7 @@ mod tests {
     };
 
     use futures::future::try_join_all;
+    use log::info;
     use tokio::{join, runtime, time::Instant};
 
     use super::MaliciousSecurityOffline;
@@ -416,7 +418,7 @@ mod tests {
                     )
                     .await
                     .ok_or(());
-                println!("Malicious eval took: {}ms", start.elapsed().as_millis());
+                info!("Malicious eval took: {}ms", start.elapsed().as_millis());
                 o
             })
         });
@@ -427,7 +429,7 @@ mod tests {
             .into_iter()
             .map(|v| v.unwrap())
             .collect();
-        println!("Running took: {}", start.elapsed().as_millis());
+        info!("Running took: {}", start.elapsed().as_millis());
         let first_output = online_outputs.pop().unwrap();
         for o in online_outputs.into_iter() {
             assert_eq!(first_output, o);

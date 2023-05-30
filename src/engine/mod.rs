@@ -153,9 +153,7 @@ impl MultiPartyEngine for MultiPartyEngineImpl {
         } else {
             self.upstream_receiver.recv().await?
         };
-        // let start = Instant::now();
         let val = bincode::deserialize(&received.content).ok()?;
-        // println!("Deserialize took: {}", start.elapsed().as_micros());
         Some((val, received.from))
     }
     async fn recv_from<T: DeserializeOwned>(&mut self, from: PartyId) -> Option<T> {
