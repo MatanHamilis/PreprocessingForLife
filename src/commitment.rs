@@ -6,7 +6,7 @@ use rand::SeedableRng;
 use rand_core::RngCore;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::{engine::MultiPartyEngine, PartyId};
+use crate::{engine::MultiPartyEngine, fields::FieldElement, PartyId};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) enum CommmitShare {
@@ -145,5 +145,45 @@ impl OfflineCommitment {
         let h = hash(&v);
         assert_eq!(h, self.commitment);
         bincode::deserialize(&v).unwrap()
+    }
+}
+
+pub struct StandardCommitReveal<E: MultiPartyEngine, V: Serialize + DeserializeOwned> {
+    engine: E,
+    commitments: HashMap<PartyId, [u8; OUT_LEN]>,
+    my_value: V,
+}
+impl<E: MultiPartyEngine, V: Serialize + DeserializeOwned> StandardCommitReveal<E, V> {
+    pub async fn commit(mut engine: E, value: V) -> Self {
+        let comm = *blake3::hash(&bincode::serialize(&value).unwrap()).as_bytes();
+        engine.broadcast(comm);
+        let my_id = engine.my_party_id();
+        let mut comms = HashMap::with_capacity(engine.party_ids().len() - 1);
+        let peers: Vec<_> = engine
+            .party_ids()
+            .iter()
+            .copied()
+            .filter(|id| *id != my_id)
+            .collect();
+        for p in peers {
+            let peer_comm = engine.recv_from(p).await.unwrap();
+            comms.insert(p, peer_comm);
+        }
+        Self {
+            engine,
+            my_value: value,
+            commitments: comms,
+        }
+    }
+    pub async fn reveal(mut self) -> HashMap<PartyId, V> {
+        self.engine.broadcast(self.my_value);
+        let mut output_values = HashMap::with_capacity(self.engine.party_ids().len() - 1);
+        for (p, comm) in self.commitments {
+            let peer_value: V = self.engine.recv_from(p).await.unwrap();
+            let computed_comm = *blake3::hash(&bincode::serialize(&peer_value).unwrap()).as_bytes();
+            assert_eq!(computed_comm, comm);
+            output_values.insert(p, peer_value);
+        }
+        output_values
     }
 }

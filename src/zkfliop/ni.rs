@@ -2,6 +2,7 @@ use aes_prng::AesRng;
 use blake3::OUT_LEN;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     add_assign_arrays, diff_assign_arrays,
@@ -42,7 +43,7 @@ fn commit_and_obtain_challenge<const PROOF_LEN: usize, F: FieldElement>(
     let challenge = F::random(random_oracle(parties_transcript_hashes));
     (challenge, blinding_factors)
 }
-fn hash_statement<F: FieldElement>(statement_share: &[F]) -> [u8; OUT_LEN] {
+pub fn hash_statement<F: FieldElement>(statement_share: &[F]) -> [u8; OUT_LEN] {
     let mut hasher = blake3::Hasher::new();
     for v in statement_share {
         v.hash(&mut hasher);
@@ -59,11 +60,14 @@ fn random_oracle(commits: &[[u8; OUT_LEN]]) -> impl RngCore + CryptoRng {
     let seed = core::array::from_fn(|i| hash.as_bytes()[i]);
     AesRng::from_seed(seed)
 }
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ZkFliopProof<F: FieldElement> {
+    #[serde(bound = "")]
     proof_shares: Vec<[F; 3]>,
     commit_blinders: Vec<[u8; 16]>,
     commit_idx: usize,
     commits: Vec<Vec<[u8; OUT_LEN]>>,
+    #[serde(bound = "")]
     last_round_proof_share: [F; 7],
 }
 impl<F: FieldElement> ZkFliopProof<F> {
@@ -170,13 +174,14 @@ pub fn prove<'a, F: FieldElement>(
     }
     output
 }
-fn obtain_check_value<F: FieldElement>(
+pub fn obtain_check_value<F: FieldElement>(
     mut statement_share: Vec<F>,
-    proof: &ZkFliopProof<F>,
+    proof: impl AsRef<ZkFliopProof<F>>,
     two: F,
     three: F,
     four: F,
 ) -> (bool, [F; 4]) {
+    let proof = proof.as_ref();
     let mut statement_hash = hash_statement(&statement_share);
     let commit_idx = proof.commit_idx;
     let (_, round_count) = compute_round_count_and_m(statement_share.len());
@@ -252,7 +257,7 @@ fn obtain_check_value<F: FieldElement>(
     (bool, [f_0_hat[3].1, f_1_hat[3].1, q_hat[5].1, check_value])
 }
 
-async fn verify_check_value<F: FieldElement>(
+pub async fn verify_check_value<F: FieldElement>(
     mut engine: impl MultiPartyEngine,
     mut is_commit_ok: bool,
     mut input: [F; 4],
@@ -269,7 +274,10 @@ async fn verify_check_value<F: FieldElement>(
 
 #[cfg(test)]
 mod test {
-    use std::collections::{HashMap, HashSet};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
 
     use aes_prng::AesRng;
     use futures::future::try_join_all;
@@ -316,7 +324,7 @@ mod test {
             .zip(engines.into_iter())
             .map(|((share, proof), (_, engine))| async move {
                 let (is_commit_ok, input) =
-                    obtain_check_value(share, &proof, F::two(), F::three(), F::four());
+                    obtain_check_value(share, Arc::new(proof), F::two(), F::three(), F::four());
                 Result::<bool, ()>::Ok(verify_check_value(engine, is_commit_ok, input).await)
             })
             .collect();

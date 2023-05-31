@@ -1,8 +1,17 @@
 use std::{collections::HashMap, ops::Mul, sync::Arc};
 
-use crate::zkfliop::PowersIterator;
+use crate::{
+    fields::GF2,
+    zkfliop::{
+        ni::{hash_statement, prove, ZkFliopProof},
+        PowersIterator,
+    },
+};
+use aes_prng::AesRng;
+use blake3::Hash;
 use futures::{future::try_join_all, join};
 use log::info;
+use rand_core::SeedableRng;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -17,7 +26,9 @@ use crate::{
 
 use super::{
     bristol_fashion::{ParsedCircuit, ParsedGate},
-    semi_honest::{OfflineSemiHonestCorrelation, RegularMask, WideMask},
+    semi_honest::{
+        construct_statement_from_bts, OfflineSemiHonestCorrelation, RegularMask, WideMask,
+    },
 };
 
 #[derive(Debug)]
@@ -31,21 +42,10 @@ pub struct WideInputWireCoefficient<const PACKING: usize, F: FieldElement>(
     [[F; 128]; PACKING],
 );
 
-// #[derive(Debug)]
-// enum InputWireCoefficients<const PACKING: usize, F: FieldElement> {
-//     And([F; PACKING], [F; PACKING]),
-//     WideAnd([F; PACKING], [[F; 128]; PACKING]),
-// }
-
 #[derive(Debug)]
 pub struct RegularGateGamma<const PACKING: usize, F: FieldElement>([F; PACKING]);
 #[derive(Debug)]
 pub struct WideGateGamma<const PACKING: usize, F: FieldElement>([[F; 128]; PACKING]);
-// #[derive(Debug)]
-// enum GateGamma<const PACKING: usize, F: FieldElement> {
-//     And([F; PACKING]),
-//     WideAnd([[F; 128]; PACKING]),
-// }
 
 fn compute_gammas_alphas<
     const PACKING: usize,
@@ -485,8 +485,18 @@ pub async fn offline_verify_parties<F: FieldElement>(
     mut engine: impl MultiPartyEngine,
     dealer_id: PartyId,
     round_count: usize,
-) -> OfflineCircuitVerify<F> {
+    is_authenticated: bool,
+) -> (
+    OfflineCircuitVerify<F>,
+    Option<HashMap<PartyId, ZkFliopProof<F>>>,
+) {
     let s_i: F = engine.recv_from(dealer_id).await.unwrap();
+    let proofs = if is_authenticated {
+        let proofs: HashMap<PartyId, ZkFliopProof<F>> = engine.recv_from(dealer_id).await.unwrap();
+        Some(proofs)
+    } else {
+        None
+    };
     let alpha_omega_commitment =
         OfflineCommitment::offline_obtain_commit(&mut engine, dealer_id).await;
     let s_commitment = OfflineCommitment::offline_obtain_commit(&mut engine, dealer_id).await;
@@ -512,13 +522,16 @@ pub async fn offline_verify_parties<F: FieldElement>(
         join!(verifiers_offline_material, prover_offline_material);
     let verifiers_offline_material = verifiers_offline_material.unwrap();
 
-    OfflineCircuitVerify {
-        s_i,
-        alpha_omega_commitment,
-        verifiers_offline_material,
-        prover_offline_material,
-        s_commitment,
-    }
+    (
+        OfflineCircuitVerify {
+            s_i,
+            alpha_omega_commitment,
+            verifiers_offline_material,
+            prover_offline_material,
+            s_commitment,
+        },
+        proofs,
+    )
 }
 
 pub async fn verify_parties<
@@ -720,9 +733,8 @@ pub async fn verify_parties<
 
 pub async fn offline_verify_dealer<
     const PACKING: usize,
-    PF: PackedField<CF, PACKING>,
-    CF: FieldElement + Mul<F, Output = F>,
-    F: FieldElement + From<CF>,
+    PF: PackedField<GF2, PACKING>,
+    F: FieldElement + From<GF2>,
     E: MultiPartyEngine,
     SHO: OfflineSemiHonestCorrelation<PF>,
 >(
@@ -734,7 +746,10 @@ pub async fn offline_verify_dealer<
     total_input_wires_masks: &[PF],
     total_output_wires_masks: &[PF],
     sho: &[(PartyId, SHO)],
-) {
+    is_authenticated: bool,
+) where
+    GF2: Mul<F, Output = F>,
+{
     let mut rng = E::rng();
     let alpha = F::random(&mut rng);
     let dealer_id = engine.my_party_id();
@@ -825,6 +840,54 @@ pub async fn offline_verify_dealer<
         // per_party_input_and_output_wires_masks.insert(pid, (input_wires_masks, output_wires_masks));
     }
 
+    if is_authenticated {
+        let pairwise_triples: HashMap<_, _> = sho
+            .iter()
+            .map(|(pid, sho)| (*pid, sho.get_pairwise_triples(circuit)))
+            .collect();
+        let coin: F = sho
+            .iter()
+            .map(|sho| {
+                let hash_correlation = sho.1.hash_correlation();
+                let hash_correlation: [u8; 16] = core::array::from_fn(|i| hash_correlation[i]);
+                let mut rng = AesRng::from_seed(hash_correlation);
+                F::random(&mut rng)
+            })
+            .sum();
+        let mut proofs: HashMap<PartyId, HashMap<PartyId, ZkFliopProof<F>>> = parties
+            .iter()
+            .copied()
+            .map(|pid| (pid, HashMap::new()))
+            .collect();
+        for i in 0..parties.len() {
+            let pi = parties[i];
+            for j in 0..i {
+                let pj = parties[j];
+                let (reg_ci, wide_ci) = pairwise_triples.get(&pi).unwrap();
+                let (reg_ci, wide_ci) = (reg_ci.get(&pj).unwrap(), wide_ci.get(&pj).unwrap());
+                let (reg_cj, wide_cj) = pairwise_triples.get(&pj).unwrap();
+                let (reg_cj, wide_cj) = (reg_cj.get(&pi).unwrap(), wide_cj.get(&pi).unwrap());
+                let stmt_i = construct_statement_from_bts(&reg_ci, &wide_ci, coin);
+                let stmt_j = construct_statement_from_bts(&reg_cj, &wide_cj, coin);
+                let stmt: Vec<F> = stmt_i
+                    .iter()
+                    .copied()
+                    .zip(stmt_j.iter().copied())
+                    .map(|(i, j)| i + j)
+                    .collect();
+                let parties_stmts = [stmt_i, stmt_j];
+                let mut cur_proofs =
+                    prove(parties_stmts.iter(), stmt, F::two(), F::three(), F::four());
+                let proof_j = cur_proofs.pop().unwrap();
+                let proof_i = cur_proofs.pop().unwrap();
+                proofs.get_mut(&pi).unwrap().insert(pj, proof_i);
+                proofs.get_mut(&pj).unwrap().insert(pi, proof_j);
+            }
+        }
+        proofs.into_iter().for_each(|(pid, proofs)| {
+            engine.send(proofs, pid);
+        })
+    }
     let (alphas, wide_alphas, gammas, wide_gammas, alphas_output_wires, gammas_inputs, _) =
         compute_gammas_alphas::<PACKING, _, PF>(&alpha, circuit);
 

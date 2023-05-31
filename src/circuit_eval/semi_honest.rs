@@ -2,11 +2,17 @@ use super::bristol_fashion;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::marker::PhantomData;
-use std::ops::{Add, AddAssign};
+use std::ops::{Add, AddAssign, Mul};
+use std::sync::Arc;
 
+use crate::commitment::{self, StandardCommitReveal};
+use crate::zkfliop::ni::{obtain_check_value, verify_check_value, ZkFliopProof};
+use crate::zkfliop::{self, PowersIterator};
 use aes_prng::AesRng;
 use async_trait::async_trait;
 use bitvec::vec::BitVec;
+use blake3::{Hasher, OUT_LEN};
+use futures::future::try_join_all;
 use log::info;
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rayon::ThreadPoolBuilder;
@@ -200,6 +206,14 @@ pub trait OfflineSemiHonestCorrelation<CF: FieldElement>:
     fn get_personal_circuit_input_wires_masks(&self) -> &[CF];
     fn get_circuit_input_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<CF>;
     fn get_circuit_output_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<CF>;
+    fn hash_correlation(&self) -> [u8; OUT_LEN];
+    fn get_pairwise_triples(
+        &self,
+        circuit: &ParsedCircuit,
+    ) -> (
+        HashMap<PartyId, Vec<((usize, usize), RegularBeaverTriple<CF>)>>,
+        HashMap<PartyId, Vec<((usize, usize), WideBeaverTriple<CF>)>>,
+    );
     fn get_gates_input_wires_masks(
         &self,
         circuit: &ParsedCircuit,
@@ -215,6 +229,14 @@ pub trait OfflineSemiHonestCorrelation<CF: FieldElement>:
     ) -> (Vec<CF>, Vec<CF>, Vec<(PartyId, Self)>);
     /// This method may optionally be called in a pre-online phase to same computation time in the online phase itself.
     fn pre_online_phase_preparation(&mut self, circuit: &ParsedCircuit);
+    async fn verify_correlation<VF: FieldElement>(
+        &self,
+        engine: &mut impl MultiPartyEngine,
+        circuit: &ParsedCircuit,
+        proof: &HashMap<PartyId, Arc<ZkFliopProof<VF>>>,
+    ) -> bool
+    where
+        GF2: Mul<VF, Output = VF>;
     /// This method is called in the online phase to obtain the semi honest correlation.
     async fn get_multiparty_beaver_triples(
         &mut self,
@@ -249,6 +271,57 @@ pub struct PcgBasedPairwiseBooleanCorrelation<
     _d: PhantomData<D>,
 }
 
+pub fn construct_statement_from_bts<const N: usize, PF: PackedField<GF2, N>, VF: FieldElement>(
+    regular_bts: &[((usize, usize), RegularBeaverTriple<PF>)],
+    wide_bts: &[((usize, usize), WideBeaverTriple<PF>)],
+    coin: VF,
+) -> Vec<VF>
+where
+    GF2: Mul<VF, Output = VF>,
+{
+    let len = 1 + 2 * N * (regular_bts.len() + wide_bts.len() * 128);
+    const MINIMAL_STATEMENT_SIZE: usize = 5;
+    let len = if len < MINIMAL_STATEMENT_SIZE {
+        MINIMAL_STATEMENT_SIZE
+    } else {
+        1 + (len - 1).next_power_of_two()
+    };
+    let mut v = Vec::with_capacity(len);
+    v.push(VF::zero());
+    let mut sum = VF::zero();
+    let mut powers = PowersIterator::new(coin);
+    for (_, bt) in regular_bts {
+        for i in 0..N {
+            let pow = powers.next().unwrap();
+            let zero = bt.0.get_element(i) * pow;
+            let one = bt.1.get_element(i) * VF::one();
+            sum += bt.2.get_element(i) * pow;
+            v.push(zero);
+            v.push(one);
+        }
+    }
+    for (_, wbt) in wide_bts {
+        for i in 0..N {
+            let mut zero = VF::zero();
+            let mut one = VF::zero();
+            for j in 0..128 {
+                let pow = powers.next().unwrap();
+                zero += pow;
+                one += wbt.1[j].get_element(i) * pow;
+                sum += wbt.2[j].get_element(i) * pow;
+            }
+            zero = wbt.0.get_element(i) * zero;
+            v.push(zero);
+            v.push(one);
+        }
+    }
+    while v.len() < len {
+        v.push(VF::zero());
+    }
+    assert_eq!(len, v.len());
+    v[0] = sum;
+    v
+}
 #[async_trait]
 impl<
         const N: usize,
@@ -264,12 +337,87 @@ impl<
     fn get_circuit_input_wires_masks_shares(&self, circuit: &ParsedCircuit) -> Vec<F> {
         input_wires_masks_from_seed(self.shares_seed, circuit)
     }
+    fn hash_correlation(&self) -> [u8; OUT_LEN] {
+        let mut hasher = Hasher::new();
+        for (_, k) in self.pcg_keys.iter() {
+            let s = bincode::serialize(k).unwrap();
+            hasher.update(&s);
+        }
+        *hasher.finalize().as_bytes()
+    }
+    fn get_pairwise_triples(
+        &self,
+        circuit: &ParsedCircuit,
+    ) -> (
+        HashMap<PartyId, Vec<((usize, usize), RegularBeaverTriple<F>)>>,
+        HashMap<PartyId, Vec<((usize, usize), WideBeaverTriple<F>)>>,
+    ) {
+        let (reg_bts, wide_bts) =
+            expand_pairwise_beaver_triples::<N, F, _>(circuit, &self.pcg_keys);
+        let reg_bts: HashMap<_, _> = reg_bts.into_iter().collect();
+        let wide_bts: HashMap<_, _> = wide_bts.into_iter().collect();
+        (reg_bts, wide_bts)
+    }
     fn pre_online_phase_preparation(&mut self, circuit: &ParsedCircuit) {
-        let (m, wm) = expand_pairwise_beaver_triples::<N, F, PS>(circuit, &mut self.pcg_keys);
+        let (m, wm) = expand_pairwise_beaver_triples::<N, F, PS>(circuit, &self.pcg_keys);
         self.regular_expanded_pcg_keys = Some(m);
         self.wide_expanded_pcg_keys = Some(wm);
     }
 
+    async fn verify_correlation<VF: FieldElement>(
+        &self,
+        engine: &mut impl MultiPartyEngine,
+        circuit: &ParsedCircuit,
+        proof: &HashMap<PartyId, Arc<ZkFliopProof<VF>>>,
+    ) -> bool
+    where
+        GF2: Mul<VF, Output = VF>,
+    {
+        let my_pid = engine.my_party_id();
+        let (regular_bts, wide_bts) =
+            expand_pairwise_beaver_triples::<N, F, _>(circuit, &self.pcg_keys);
+        let hash_correlation = self.hash_correlation();
+        let hash_correlation: [u8; 16] = core::array::from_fn(|i| hash_correlation[i]);
+        let mut rng = AesRng::from_seed(hash_correlation);
+        let my_random_share = VF::random(&mut rng);
+        let v =
+            StandardCommitReveal::commit(engine.sub_protocol(&"COMMIT_REVEAL"), my_random_share)
+                .await
+                .reveal()
+                .await;
+        let coin: VF = v.values().copied().sum::<VF>() + my_random_share;
+        let handles: Vec<_> = regular_bts
+            .into_iter()
+            .zip(wide_bts.into_iter())
+            .map(|((pid, bts), (wpid, wbts))| {
+                assert_eq!(pid, wpid);
+                let pids = if pid > my_pid {
+                    vec![my_pid, pid]
+                } else {
+                    vec![pid, my_pid]
+                };
+                let min_pid = pids[0];
+                let max_pid = pids[1];
+                let pids: Arc<Box<[PartyId]>> = Arc::new(pids.into());
+                let engine = engine
+                    .sub_protocol_with(format!("verify_triples_{}_{}", min_pid, max_pid), pids);
+                let proof = proof.get(&pid).unwrap().clone();
+                let coin = coin.clone();
+                tokio::spawn(async move {
+                    let statement_share = construct_statement_from_bts(&bts, &wbts, coin);
+                    let (flag, check_vals) = obtain_check_value(
+                        statement_share,
+                        proof,
+                        VF::two(),
+                        VF::three(),
+                        VF::four(),
+                    );
+                    verify_check_value(engine, flag, check_vals).await
+                })
+            })
+            .collect();
+        try_join_all(handles).await.unwrap().into_iter().all(|v| v)
+    }
     // Only called by the dealer anyway.
     fn get_gates_input_wires_masks(
         &self,

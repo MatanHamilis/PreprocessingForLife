@@ -1,4 +1,4 @@
-use std::{collections::HashMap, marker::PhantomData, ops::Mul};
+use std::{collections::HashMap, marker::PhantomData, ops::Mul, sync::Arc};
 
 use aes_prng::AesRng;
 use log::info;
@@ -9,7 +9,7 @@ use tokio::time::Instant;
 use crate::{
     commitment::OfflineCommitment,
     engine::MultiPartyEngine,
-    fields::{FieldElement, PackedField},
+    fields::{FieldElement, PackedField, GF2},
     zkfliop, PartyId,
 };
 
@@ -22,9 +22,8 @@ use super::{
 #[derive(Serialize, Deserialize)]
 pub struct MaliciousSecurityOffline<
     const PACKING: usize,
-    PF: PackedField<CF, PACKING>,
-    CF: FieldElement + Mul<F, Output = F>,
-    F: FieldElement + From<CF>,
+    PF: PackedField<GF2, PACKING>,
+    F: FieldElement + From<GF2>,
     SHO: OfflineSemiHonestCorrelation<PF>,
 > {
     #[serde(bound = "")]
@@ -32,15 +31,16 @@ pub struct MaliciousSecurityOffline<
     output_wire_mask_commitments: OfflineCommitment,
     #[serde(bound = "")]
     offline_verification_material: OfflineCircuitVerify<F>,
-    _phantom: PhantomData<(CF, PF)>,
+    _phantom: PhantomData<PF>,
 }
 impl<
         const PACKING: usize,
-        PF: PackedField<CF, PACKING>,
-        CF: FieldElement + Mul<F, Output = F>,
-        F: FieldElement + From<CF>,
+        PF: PackedField<GF2, PACKING>,
+        F: FieldElement + From<GF2>,
         SHO: OfflineSemiHonestCorrelation<PF>,
-    > MaliciousSecurityOffline<PACKING, PF, CF, F, SHO>
+    > MaliciousSecurityOffline<PACKING, PF, F, SHO>
+where
+    GF2: Mul<F, Output = F>,
 {
     pub async fn malicious_security_offline_dealer<E: MultiPartyEngine, C: AsRef<ParsedCircuit>>(
         engine: &mut E,
@@ -50,6 +50,7 @@ impl<
         circuit: C,
         party_input_length: &HashMap<PartyId, (usize, usize)>,
         dealer: &SHO::Dealer,
+        is_authenticated: bool,
     ) {
         let my_id = engine.my_party_id();
         let mut parties: Vec<_> = engine
@@ -77,27 +78,61 @@ impl<
             &input_wire_masks,
             &output_wire_masks,
             &offline_correlations,
+            is_authenticated,
         )
         .await;
 
-        OfflineCommitment::offline_commit(engine, &output_wire_masks).await;
+        OfflineCommitment::offline_commit(
+            &mut engine.sub_protocol("commitment"),
+            &output_wire_masks,
+        )
+        .await;
     }
     pub async fn malicious_security_offline_party(
         engine: &mut impl MultiPartyEngine,
         dealer_id: PartyId,
         circuit: impl AsRef<ParsedCircuit>,
-    ) -> MaliciousSecurityOffline<PACKING, PF, CF, F, SHO> {
+        is_authenticated: bool,
+    ) -> MaliciousSecurityOffline<PACKING, PF, F, SHO> {
         let proof_statement_length = statement_length::<PACKING>(circuit.as_ref());
         let (_, round_count) = zkfliop::compute_round_count_and_m(proof_statement_length);
         let semi_honest_offline_correlation: SHO = engine.recv_from(dealer_id).await.unwrap();
-        let offline_verification_material = verify::offline_verify_parties::<F>(
+        let (offline_verification_material, proofs_triples) = verify::offline_verify_parties::<F>(
             engine.sub_protocol("offline verify"),
             dealer_id,
             round_count,
+            is_authenticated,
         )
         .await;
-        let output_wire_mask_commitments =
-            OfflineCommitment::offline_obtain_commit(engine, dealer_id).await;
+        let output_wire_mask_commitments = OfflineCommitment::offline_obtain_commit(
+            &mut engine.sub_protocol("commitment"),
+            dealer_id,
+        )
+        .await;
+        if is_authenticated {
+            println!("Verifying triples...");
+            let proofs = proofs_triples
+                .unwrap()
+                .into_iter()
+                .map(|(pid, proof)| (pid, Arc::new(proof)))
+                .collect();
+            let peers: Vec<PartyId> = engine
+                .party_ids()
+                .iter()
+                .copied()
+                .filter(|v| v != &dealer_id)
+                .collect();
+            let peers = Arc::new(peers.into());
+            let triples_verdict = semi_honest_offline_correlation
+                .verify_correlation(
+                    &mut engine.sub_protocol_with("verify triples", peers),
+                    circuit.as_ref(),
+                    &proofs,
+                )
+                .await;
+            assert!(triples_verdict);
+            println!("Triples OK!");
+        }
         MaliciousSecurityOffline {
             semi_honest_offline_correlation,
             output_wire_mask_commitments,
@@ -109,7 +144,7 @@ impl<
         self,
         _: &mut E,
         circuit: C,
-    ) -> PreOnlineMaterial<PACKING, PF, CF, F, C, SHO> {
+    ) -> PreOnlineMaterial<PACKING, PF, F, C, SHO> {
         // In this phase we expand the compressed correlations, right before the online phase.
         let Self {
             mut semi_honest_offline_correlation,
@@ -135,16 +170,14 @@ impl<
             offline_verification_material,
             semi_honest_offline_correlation,
             my_input_mask,
-            _phantom: PhantomData,
         }
     }
 }
 
 pub struct PreOnlineMaterial<
     const PACKING: usize,
-    PF: PackedField<CF, PACKING>,
-    CF: FieldElement,
-    F: FieldElement + From<CF>,
+    PF: PackedField<GF2, PACKING>,
+    F: FieldElement + From<GF2>,
     C: AsRef<ParsedCircuit>,
     SHO: OfflineSemiHonestCorrelation<PF>,
 > {
@@ -155,17 +188,17 @@ pub struct PreOnlineMaterial<
     my_input_mask: Vec<PF>,
     semi_honest_offline_correlation: SHO,
     offline_verification_material: OfflineCircuitVerify<F>,
-    _phantom: PhantomData<CF>,
 }
 
 impl<
         const PACKING: usize,
-        PF: PackedField<CF, PACKING>,
-        CF: FieldElement + Mul<F, Output = F>,
-        F: FieldElement + From<CF>,
+        PF: PackedField<GF2, PACKING>,
+        F: FieldElement + From<GF2>,
         C: AsRef<ParsedCircuit>,
         SHO: OfflineSemiHonestCorrelation<PF>,
-    > PreOnlineMaterial<PACKING, PF, CF, F, C, SHO>
+    > PreOnlineMaterial<PACKING, PF, F, C, SHO>
+where
+    GF2: Mul<F, Output = F>,
 {
     pub async fn online_malicious_computation<FC: FieldContainer<PF>>(
         &mut self,
@@ -184,7 +217,6 @@ impl<
             input_wire_mask_shares,
             my_input_mask,
             semi_honest_offline_correlation,
-            _phantom: _,
         } = self;
         let timer = Instant::now();
         let (regular_multi_party_beaver_triples, wide_multi_party_beaver_triples) =
@@ -279,6 +311,7 @@ mod tests {
         circuit: ParsedCircuit,
         input: Vec<PF>,
         dealer: Arc<D>,
+        is_authenticated: bool,
     ) -> Vec<PF> {
         let mut local_eval_output = semi_honest::local_eval_circuit(&circuit, &input);
         local_eval_output.drain(0..local_eval_output.len() - circuit.output_wire_count);
@@ -324,7 +357,6 @@ mod tests {
                 MaliciousSecurityOffline::<
                     PACKING,
                     PF,
-                    GF2,
                     GF128,
                     PcgBasedPairwiseBooleanCorrelation<PACKING, PF, _, _>,
                 >::malicious_security_offline_dealer(
@@ -335,6 +367,7 @@ mod tests {
                     circuit_arc_clone,
                     &input_lengths,
                     dealer.as_ref(),
+                    is_authenticated,
                 )
                 .await;
             }
@@ -348,20 +381,15 @@ mod tests {
                     let res = MaliciousSecurityOffline::<
                         PACKING,
                         PF,
-                        GF2,
                         GF128,
                         PcgBasedPairwiseBooleanCorrelation<PACKING, PF, _, D>,
                     >::malicious_security_offline_party(
-                        &mut e, DEALER_ID, circuit_clone_arc
+                        &mut e, DEALER_ID, circuit_clone_arc, true
                     )
                     .await;
-                    Result::<
-                        (
-                            PartyId,
-                            MaliciousSecurityOffline<PACKING, PF, GF2, GF128, _>,
-                        ),
-                        (),
-                    >::Ok((pid, res))
+                    Result::<(PartyId, MaliciousSecurityOffline<PACKING, PF, GF128, _>), ()>::Ok((
+                        pid, res,
+                    ))
                 }
             })
             .collect();
@@ -390,7 +418,7 @@ mod tests {
                         let pre_online_material = offline_material
                             .into_pre_online_material(&mut engine, circuit)
                             .await;
-                        Result::<(PartyId, PreOnlineMaterial<PACKING, PF, _, _, _, _>), ()>::Ok((
+                        Result::<(PartyId, PreOnlineMaterial<PACKING, PF, _, _, _>), ()>::Ok((
                             pid,
                             pre_online_material,
                         ))
@@ -460,6 +488,7 @@ mod tests {
             parsed_circuit,
             input,
             Arc::new(dealer),
+            true,
         )
         .await;
     }
@@ -474,6 +503,7 @@ mod tests {
             parsed_circuit,
             input,
             Arc::new(dealer),
+            true,
         )
         .await;
     }
@@ -499,6 +529,7 @@ mod tests {
             parsed_circuit,
             input,
             Arc::new(dealer),
+            true,
         )
         .await;
     }
@@ -522,6 +553,7 @@ mod tests {
                 circuit,
                 input,
                 Arc::new(dealer),
+                true,
             )
             .await;
         });
