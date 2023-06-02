@@ -553,6 +553,7 @@ pub async fn verify_parties<
     output_wire_masked_values: &[PF],
     circuit: &ParsedCircuit,
     offline_material: &OfflineCircuitVerify<F>,
+    auth_dealer: bool,
 ) -> bool {
     let thread_pool = ThreadPoolBuilder::new().build().unwrap();
     let my_id = engine.my_party_id();
@@ -651,6 +652,21 @@ pub async fn verify_parties<
         Some(&wide_masks_shares),
         circuit,
     );
+    let dealer_statement = if auth_dealer {
+        Some(construct_statement(
+            None,
+            Some(*s_i),
+            &gammas,
+            &wide_gammas,
+            None,
+            None,
+            Some(&regular_masks_shares),
+            Some(&wide_masks_shares),
+            circuit,
+        ))
+    } else {
+        None
+    };
     let verify_statement = Arc::new(construct_statement(
         None,
         None,
@@ -677,6 +693,7 @@ pub async fn verify_parties<
             two,
             three,
             four,
+            None,
         )
         .await;
         info!("\t\tVerify - Proving took: {}", timer.elapsed().as_millis());

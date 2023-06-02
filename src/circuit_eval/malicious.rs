@@ -208,6 +208,7 @@ where
         three: F,
         four: F,
         parties_input_pos_and_lengths: &HashMap<PartyId, (usize, usize)>,
+        is_verified_dealer: bool,
     ) -> Option<Vec<PF>> {
         let Self {
             circuit,
@@ -255,6 +256,7 @@ where
             &masked_outputs,
             circuit.as_ref(),
             offline_verification_material,
+            is_verified_dealer,
         )
         .await
         {
@@ -443,6 +445,7 @@ mod tests {
                         three,
                         four,
                         &input_lengths,
+                        is_authenticated,
                     )
                     .await
                     .ok_or(());

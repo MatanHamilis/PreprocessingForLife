@@ -6,7 +6,6 @@ use crate::{
 use log::info;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
 
 pub mod ni;
 
@@ -271,6 +270,7 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     two: F,
     three: F,
     four: F,
+    mut auth_statement: Option<Vec<F>>,
 ) {
     let OfflineProver {
         proof_masks,
@@ -281,6 +281,7 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     let last_round_challenge = round_challenges.last().unwrap();
     // Init
     let (_, round_count) = compute_round_count_and_m(z.len());
+    let mut b_tilde = Vec::with_capacity(round_count);
     info!("Proving: round count {}", round_count);
     // Rounds
     for (_, (round_challenge, masks)) in round_challenges
@@ -305,6 +306,27 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
         z[0] = multi_eval_at_point(&mut z, &proof, r, two);
         let z_len = z.len();
         z = &mut z[..=z_len / 2];
+        if auth_statement.is_some() {
+            // Perform the same computation as the dealer.
+            let mut z_tilde = auth_statement.unwrap();
+            b_tilde.push(z_tilde[0] - masks[0] - masks[1]);
+            let z_second_half =
+                unsafe { std::slice::from_raw_parts(z_tilde[z_len / 2 + 1..].as_ptr(), z_len / 2) };
+            z_tilde[1..=z_len / 2]
+                .par_iter_mut()
+                .zip(z_second_half.par_iter())
+                .for_each(|(f_zero, f_one)| {
+                    let slope_i = *f_one - *f_zero;
+                    *f_zero += slope_i * r;
+                });
+            let q_r = interpolate(
+                &[(F::zero(), masks[0]), (F::one(), masks[1]), (two, masks[2])],
+                r,
+            );
+            z_tilde[0] = q_r;
+            z_tilde.drain(z_len / 2 + 1..);
+            auth_statement = Some(z_tilde);
+        }
     }
     // last round
     debug_assert_eq!(z.len(), 5);
@@ -339,10 +361,62 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
         q[4] - proof_masks_last_round[4],
     ];
     engine.broadcast(last_round_proof);
-    let _: F = last_round_challenge.online_decommit(&mut engine).await;
-
+    let r: F = last_round_challenge.online_decommit(&mut engine).await;
     // Decision
-    let _: (Vec<F>, F, F, F, F) = final_msg.online_decommit(&mut engine).await;
+    let (betas, b_tilde_check_dealer, f_0_tilde_dealer, f_1_tilde_dealer, q_tilde_dealer): (
+        Vec<F>,
+        F,
+        F,
+        F,
+        F,
+    ) = final_msg.online_decommit(&mut engine).await;
+    if auth_statement.is_some() {
+        let z_tilde = auth_statement.unwrap();
+        debug_assert_eq!(z_tilde.len(), 5);
+        let mut f_0_tilde = [
+            (F::zero(), z_tilde[1]),
+            (F::one(), z_tilde[3]),
+            (two, s_tilde.0),
+            (r, F::zero()),
+        ];
+        let mut f_1_tilde = [
+            (F::zero(), z_tilde[2]),
+            (F::one(), z_tilde[4]),
+            (two, s_tilde.1),
+            (r, F::zero()),
+        ];
+        let mut q_tilde = [
+            (F::zero(), proof_masks_last_round[0]),
+            (F::one(), proof_masks_last_round[1]),
+            (two, proof_masks_last_round[2]),
+            (three, proof_masks_last_round[3]),
+            (four, proof_masks_last_round[4]),
+            (r, F::zero()),
+        ];
+        f_0_tilde[3].1 = interpolate(&f_0_tilde[0..3], f_0_tilde[3].0);
+        f_1_tilde[3].1 = interpolate(&f_1_tilde[0..3], f_1_tilde[3].0);
+        q_tilde[5].1 = interpolate(&q_tilde[0..5], q_tilde[5].0);
+        b_tilde.push(z_tilde[0] - q_tilde[0].1 - q_tilde[1].1);
+
+        // Decision
+        debug_assert_eq!(betas.len(), b_tilde.len());
+        let b_tilde_check = betas
+            .iter()
+            .zip(b_tilde.iter())
+            .map(|(a, b)| *a * *b)
+            .fold(F::zero(), |acc, cur| acc + cur);
+        let final_value = (
+            betas,
+            b_tilde_check,
+            f_0_tilde[3].1,
+            f_1_tilde[3].1,
+            q_tilde[5].1,
+        );
+        assert_eq!(final_value.2, f_0_tilde_dealer);
+        assert_eq!(final_value.3, f_1_tilde_dealer);
+        assert_eq!(final_value.4, q_tilde_dealer);
+        assert_eq!(b_tilde_check, b_tilde_check_dealer);
+    }
 }
 
 pub async fn verifier<F: FieldElement>(
@@ -539,6 +613,7 @@ mod test {
                 two,
                 three,
                 four,
+                Some(dealer_input),
             )
             .await
         });
