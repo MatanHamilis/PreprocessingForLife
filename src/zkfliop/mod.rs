@@ -1,8 +1,9 @@
 use crate::{
-    commitment::OfflineCommitment,
+    commitment::{CommmitShare, OfflineCommitment},
     engine::{MultiPartyEngine, PartyId},
     fields::FieldElement,
 };
+use aes_prng::AesRng;
 use log::info;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -118,32 +119,38 @@ pub async fn verifier_offline<E: MultiPartyEngine>(
     }
 }
 
-pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
-    mut engine: E,
+pub fn dealer<F: FieldElement>(
     mut z_tilde: &mut [F],
-    prover_id: PartyId,
-    two: F,
-    three: F,
-    four: F,
-) {
+    num_verifiers: usize,
+) -> (OfflineProver<F>, Vec<OfflineVerifier>) {
     // Init
     debug_assert!(z_tilde.iter().skip(1).step_by(2).all(|v| v.is_zero()));
     let (_, round_count) = compute_round_count_and_m(z_tilde.len());
     let mut b_tilde = Vec::with_capacity(round_count);
-    let mut rng = E::rng();
+    let mut rng = AesRng::from_random_seed();
     let total_proof_mask_len =
         INTERNAL_ROUND_PROOF_LENGTH * (round_count - 1) + LAST_ROUND_PROOF_LENGTH;
     let proof_masks: Vec<_> = (0..total_proof_mask_len)
         .map(|_| F::random(&mut rng))
         .collect();
     let s_tilde = (F::random(&mut rng), F::random(&mut rng));
-    engine.send((&proof_masks, s_tilde), prover_id);
 
     // Rounds
+    let mut round_challenges_shares = vec![Vec::with_capacity(round_count); num_verifiers + 1];
     for round_id in 1..round_count {
         let z_len = z_tilde.len();
         let r = F::random(&mut rng);
-        OfflineCommitment::offline_commit(&mut engine, &r).await;
+        let (challenge_commit_shares, commitment) =
+            OfflineCommitment::commit(&r, num_verifiers + 1);
+        round_challenges_shares
+            .iter_mut()
+            .zip(challenge_commit_shares.into_iter())
+            .for_each(|(v, commit_share)| {
+                v.push(OfflineCommitment {
+                    commit_share,
+                    commitment,
+                });
+            });
         let q_base = (round_id - 1) * INTERNAL_ROUND_PROOF_LENGTH;
         let (q_0_tilde, q_1_tilde, q_2_tilde) = (
             proof_masks[q_base],
@@ -164,7 +171,7 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
             &[
                 (F::zero(), q_0_tilde),
                 (F::one(), q_1_tilde),
-                (two, q_2_tilde),
+                (F::two(), q_2_tilde),
             ],
             r,
         );
@@ -174,26 +181,35 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
     // last round
     debug_assert_eq!(z_tilde.len(), 5);
     let r = F::random(&mut rng);
-    OfflineCommitment::offline_commit(&mut engine, &r).await;
+    let (challenge_commit_shares, commitment) = OfflineCommitment::commit(&r, num_verifiers + 1);
+    round_challenges_shares
+        .iter_mut()
+        .zip(challenge_commit_shares.into_iter())
+        .for_each(|(v, commit_share)| {
+            v.push(OfflineCommitment {
+                commit_share,
+                commitment,
+            });
+        });
     let last_round_masks = &proof_masks[proof_masks.len() - LAST_ROUND_PROOF_LENGTH..];
     let mut f_0_tilde = [
         (F::zero(), z_tilde[1]),
         (F::one(), z_tilde[3]),
-        (two, s_tilde.0),
+        (F::two(), s_tilde.0),
         (r, F::zero()),
     ];
     let mut f_1_tilde = [
         (F::zero(), z_tilde[2]),
         (F::one(), z_tilde[4]),
-        (two, s_tilde.1),
+        (F::two(), s_tilde.1),
         (r, F::zero()),
     ];
     let mut q_tilde = [
         (F::zero(), last_round_masks[0]),
         (F::one(), last_round_masks[1]),
-        (two, last_round_masks[2]),
-        (three, last_round_masks[3]),
-        (four, last_round_masks[4]),
+        (F::two(), last_round_masks[2]),
+        (F::three(), last_round_masks[3]),
+        (F::four(), last_round_masks[4]),
         (r, F::zero()),
     ];
     f_0_tilde[3].1 = interpolate(&f_0_tilde[0..3], f_0_tilde[3].0);
@@ -216,7 +232,29 @@ pub async fn dealer<F: FieldElement, E: MultiPartyEngine>(
         f_1_tilde[3].1,
         q_tilde[5].1,
     );
-    OfflineCommitment::offline_commit(&mut engine, &final_value).await;
+    let (mut last_value_commitments, commitment) =
+        OfflineCommitment::commit(&final_value, num_verifiers + 1);
+    let prover = OfflineProver {
+        final_msg: OfflineCommitment {
+            commit_share: last_value_commitments.pop().unwrap(),
+            commitment,
+        },
+        proof_masks,
+        s_tilde,
+        round_challenges: round_challenges_shares.pop().unwrap(),
+    };
+    let verifiers = round_challenges_shares
+        .into_iter()
+        .zip(last_value_commitments.into_iter())
+        .map(|(challenge, last_val)| OfflineVerifier {
+            round_challenges: challenge,
+            final_msg: OfflineCommitment {
+                commit_share: last_val,
+                commitment,
+            },
+        })
+        .collect();
+    (prover, verifiers)
 }
 
 fn make_round_proof<F: FieldElement>(z: &[F], two: F) -> [F; 3] {
@@ -267,9 +305,6 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     mut engine: E,
     mut z: &mut [F],
     offline_material: &OfflineProver<F>,
-    two: F,
-    three: F,
-    four: F,
     mut auth_statement: Option<Vec<F>>,
 ) {
     let OfflineProver {
@@ -291,7 +326,7 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
         .enumerate()
     {
         // Computation
-        let proof = make_round_proof(z, two);
+        let proof = make_round_proof(z, F::two());
         let masked_proof = (
             proof[0] - masks[0],
             proof[1] - masks[1],
@@ -303,7 +338,7 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
         let r: F = round_challenge.online_decommit(&mut engine).await;
 
         // Query
-        z[0] = multi_eval_at_point(&mut z, &proof, r, two);
+        z[0] = multi_eval_at_point(&mut z, &proof, r, F::two());
         let z_len = z.len();
         z = &mut z[..=z_len / 2];
         if auth_statement.is_some() {
@@ -320,7 +355,11 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
                     *f_zero += slope_i * r;
                 });
             let q_r = interpolate(
-                &[(F::zero(), masks[0]), (F::one(), masks[1]), (two, masks[2])],
+                &[
+                    (F::zero(), masks[0]),
+                    (F::one(), masks[1]),
+                    (F::two(), masks[2]),
+                ],
                 r,
             );
             z_tilde[0] = q_r;
@@ -334,21 +373,21 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     let mut f_0 = [
         (F::zero(), z[1]),
         (F::one(), z[3]),
-        (two, s_0),
-        (three, F::zero()),
-        (four, F::zero()),
+        (F::two(), s_0),
+        (F::three(), F::zero()),
+        (F::four(), F::zero()),
     ];
     let mut f_1 = [
         (F::zero(), z[2]),
         (F::one(), z[4]),
-        (two, s_1),
-        (three, F::zero()),
-        (four, F::zero()),
+        (F::two(), s_1),
+        (F::three(), F::zero()),
+        (F::four(), F::zero()),
     ];
-    f_0[3].1 = interpolate(&f_0[0..3], three);
-    f_0[4].1 = interpolate(&f_0[0..3], four);
-    f_1[3].1 = interpolate(&f_1[0..3], three);
-    f_1[4].1 = interpolate(&f_1[0..3], four);
+    f_0[3].1 = interpolate(&f_0[0..3], F::three());
+    f_0[4].1 = interpolate(&f_0[0..3], F::four());
+    f_1[3].1 = interpolate(&f_1[0..3], F::three());
+    f_1[4].1 = interpolate(&f_1[0..3], F::four());
     let proof_masks_last_round = &proof_masks[proof_masks.len() - LAST_ROUND_PROOF_LENGTH..];
     let q: [_; 5] = core::array::from_fn(|i| f_0[i].1 * f_1[i].1);
     let last_round_proof = [
@@ -376,21 +415,21 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
         let mut f_0_tilde = [
             (F::zero(), z_tilde[1]),
             (F::one(), z_tilde[3]),
-            (two, s_tilde.0),
+            (F::two(), s_tilde.0),
             (r, F::zero()),
         ];
         let mut f_1_tilde = [
             (F::zero(), z_tilde[2]),
             (F::one(), z_tilde[4]),
-            (two, s_tilde.1),
+            (F::two(), s_tilde.1),
             (r, F::zero()),
         ];
         let mut q_tilde = [
             (F::zero(), proof_masks_last_round[0]),
             (F::one(), proof_masks_last_round[1]),
-            (two, proof_masks_last_round[2]),
-            (three, proof_masks_last_round[3]),
-            (four, proof_masks_last_round[4]),
+            (F::two(), proof_masks_last_round[2]),
+            (F::three(), proof_masks_last_round[3]),
+            (F::four(), proof_masks_last_round[4]),
             (r, F::zero()),
         ];
         f_0_tilde[3].1 = interpolate(&f_0_tilde[0..3], f_0_tilde[3].0);
@@ -536,8 +575,6 @@ mod test {
         const ONLINE_PARTIES: usize = PARTIES - 1;
         let party_ids: [PartyId; PARTIES] = core::array::from_fn(|i| i as u64);
         let online_party_ids: [PartyId; ONLINE_PARTIES] = core::array::from_fn(|i| (i + 1) as u64);
-        let party_ids_set = HashSet::from_iter(party_ids.iter().copied());
-        let dealer_id = party_ids[0];
         let prover_id = party_ids[1];
         let mut two = GF128::zero();
         two.set_bit(true, 1);
@@ -547,8 +584,6 @@ mod test {
         let mut rng = thread_rng();
 
         // Offline proof preparation
-        let (router, mut engines) = LocalRouter::new(UCTag::new(&"root"), &party_ids_set);
-
         let mut dealer_input: Vec<_> = vec![GF128::zero(); Z_LEN];
         dealer_input
             .iter_mut()
@@ -556,30 +591,8 @@ mod test {
             .for_each(|v| *v = GF128::random(&mut rng));
         let mut dealer_input_clone = dealer_input.clone();
 
-        let router_handle = tokio::spawn(router.launch());
-        let dealer_handle = dealer(
-            engines.remove(&dealer_id).unwrap(),
-            &mut dealer_input_clone,
-            prover_id,
-            two,
-            three,
-            four,
-        );
+        let (prover_offline, verifiers_offline) = dealer(&mut dealer_input_clone, PARTIES - 2);
         let (_, round_count) = compute_round_count_and_m(Z_LEN);
-        let prover_handle =
-            prover_offline::<GF128>(engines.remove(&prover_id).unwrap(), round_count, dealer_id);
-        let verifiers_handle: Vec<_> = engines
-            .into_iter()
-            .map(|(pid, e)| async move {
-                Result::<(u64, OfflineVerifier), ()>::Ok((
-                    pid,
-                    verifier_offline(e, round_count, dealer_id).await,
-                ))
-            })
-            .collect();
-        let (_, prover_offline, verifiers_offline) =
-            join!(dealer_handle, prover_handle, join_all(verifiers_handle));
-        router_handle.await.unwrap().unwrap();
 
         // Online proof.
         let online_party_ids_set = HashSet::from_iter(online_party_ids.iter().copied());
@@ -610,31 +623,18 @@ mod test {
                 prover_exec,
                 &mut prover_input,
                 &prover_offline,
-                two,
-                three,
-                four,
                 Some(dealer_input),
             )
             .await
         });
         let verifiers_futures: Vec<_> = verifiers_offline
             .into_iter()
-            .map(|v| {
-                let (pid, offline_verifier) = v.unwrap();
-                let engine = engines.remove(&pid).unwrap();
+            .zip(engines.into_iter())
+            .map(|(v, (pid, engine))| {
                 let input = verifier_input.clone();
                 async move {
                     let mut input = input;
-                    verifier(
-                        engine,
-                        &mut input,
-                        prover_id,
-                        &offline_verifier,
-                        two,
-                        three,
-                        four,
-                    )
-                    .await;
+                    verifier(engine, &mut input, prover_id, &v, two, three, four).await;
                     Result::<(), ()>::Ok(())
                 }
             })

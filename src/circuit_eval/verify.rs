@@ -481,58 +481,6 @@ pub struct OfflineCircuitVerify<F: FieldElement> {
     #[serde(bound = "")]
     prover_offline_material: OfflineProver<F>,
 }
-pub async fn offline_verify_parties<F: FieldElement>(
-    mut engine: impl MultiPartyEngine,
-    dealer_id: PartyId,
-    round_count: usize,
-    is_authenticated: bool,
-) -> (
-    OfflineCircuitVerify<F>,
-    Option<HashMap<PartyId, ZkFliopProof<F>>>,
-) {
-    let s_i: F = engine.recv_from(dealer_id).await.unwrap();
-    let proofs = if is_authenticated {
-        let proofs: HashMap<PartyId, ZkFliopProof<F>> = engine.recv_from(dealer_id).await.unwrap();
-        Some(proofs)
-    } else {
-        None
-    };
-    let alpha_omega_commitment =
-        OfflineCommitment::offline_obtain_commit(&mut engine, dealer_id).await;
-    let s_commitment = OfflineCommitment::offline_obtain_commit(&mut engine, dealer_id).await;
-
-    // Material for single zkFLIOP instances.
-    let parties = engine.party_ids().to_vec();
-    let my_id = engine.my_party_id();
-    let prover_offline_material =
-        prover_offline::<F>(engine.sub_protocol(my_id), round_count, dealer_id);
-    let verifiers_offline_material: Vec<_> = parties
-        .into_iter()
-        .filter(|prover_id| prover_id != &dealer_id && prover_id != &my_id)
-        .map(|prover_id| {
-            let engine_current = engine.sub_protocol(prover_id);
-            async move {
-                let verifier = verifier_offline(engine_current, round_count, dealer_id).await;
-                Result::<(PartyId, OfflineVerifier), ()>::Ok((prover_id, verifier))
-            }
-        })
-        .collect();
-    let verifiers_offline_material = try_join_all(verifiers_offline_material);
-    let (verifiers_offline_material, prover_offline_material) =
-        join!(verifiers_offline_material, prover_offline_material);
-    let verifiers_offline_material = verifiers_offline_material.unwrap();
-
-    (
-        OfflineCircuitVerify {
-            s_i,
-            alpha_omega_commitment,
-            verifiers_offline_material,
-            prover_offline_material,
-            s_commitment,
-        },
-        proofs,
-    )
-}
 
 pub async fn verify_parties<
     const PACKING: usize,
@@ -690,10 +638,7 @@ pub async fn verify_parties<
             sub_engine,
             &mut proof_statement,
             &prover_offline_material,
-            two,
-            three,
-            four,
-            None,
+            dealer_statement,
         )
         .await;
         info!("\t\tVerify - Proving took: {}", timer.elapsed().as_millis());
@@ -748,40 +693,35 @@ pub async fn verify_parties<
     return p.is_zero();
 }
 
-pub async fn offline_verify_dealer<
+pub fn offline_verify_dealer<
     const PACKING: usize,
     PF: PackedField<GF2, PACKING>,
     F: FieldElement + From<GF2>,
-    E: MultiPartyEngine,
     SHO: OfflineSemiHonestCorrelation<PF>,
 >(
-    mut engine: E,
-    two: F,
-    three: F,
-    four: F,
     circuit: &ParsedCircuit,
     total_input_wires_masks: &[PF],
     total_output_wires_masks: &[PF],
     sho: &[(PartyId, SHO)],
     is_authenticated: bool,
-) where
+) -> HashMap<
+    PartyId,
+    (
+        OfflineCircuitVerify<F>,
+        Option<HashMap<PartyId, ZkFliopProof<F>>>,
+    ),
+>
+where
     GF2: Mul<F, Output = F>,
 {
-    let mut rng = E::rng();
+    let mut rng = AesRng::from_random_seed();
     let alpha = F::random(&mut rng);
-    let dealer_id = engine.my_party_id();
-    let parties: Vec<PartyId> = engine
-        .party_ids()
-        .iter()
-        .copied()
-        .filter(|i| *i != dealer_id)
-        .collect();
+    let parties: Vec<PartyId> = sho.iter().map(|v| v.0).collect();
     // Send s_i
     let si_s: HashMap<PartyId, F> = parties
         .iter()
         .map(|pid| {
             let si = F::random(&mut rng);
-            engine.send(si, *pid);
             (*pid, si)
         })
         .collect();
@@ -857,6 +797,125 @@ pub async fn offline_verify_dealer<
         // per_party_input_and_output_wires_masks.insert(pid, (input_wires_masks, output_wires_masks));
     }
 
+    let (alphas, wide_alphas, gammas, wide_gammas, alphas_output_wires, gammas_inputs, _) =
+        compute_gammas_alphas::<PACKING, _, PF>(&alpha, circuit);
+
+    // Compute Omega
+    let regular_gates_input_wire_masks: HashMap<_, _> =
+        total_gate_input_masks.iter().copied().collect();
+    let wide_gates_input_wire_masks: HashMap<_, _> =
+        wide_total_gate_input_masks.iter().copied().collect();
+    let mu = F::random(&mut rng);
+    let alpha_r = dot_product_alpha::<PACKING, _, _, PF>(
+        &alphas,
+        &wide_alphas,
+        &alphas_output_wires,
+        &regular_gates_input_wire_masks,
+        &wide_gates_input_wire_masks,
+        total_output_wires_masks,
+    );
+
+    let sigma_gamma_l_r_l = dot_product_gamma(
+        &gammas,
+        &wide_gammas,
+        &regular_gates_input_wire_masks,
+        &wide_gates_input_wire_masks,
+        &gammas_inputs,
+        &total_input_wires_masks,
+    );
+    let omega = alpha_r + sigma_gamma_l_r_l;
+    let omega_hat = omega - mu;
+    let regular_gammas_rc = Arc::new(gammas);
+    let wide_gammas_rc = Arc::new(wide_gammas);
+
+    let (mut alpha_omega_commits, alpha_omega_hash) =
+        OfflineCommitment::commit(&(alpha, omega_hat), parties.len());
+    let s = mu - si_s.values().copied().sum();
+    let (mut s_commit, s_hash) = OfflineCommitment::commit(&s, parties.len());
+    let parties_num = parties.len();
+    let mut parties_verifiers: HashMap<_, _> = parties
+        .iter()
+        .map(|p| (*p, Vec::with_capacity(parties_num - 1)))
+        .collect();
+    let mut offline_verifiers: HashMap<_, _> = parties
+        .iter()
+        .copied()
+        .map(|prover_id| {
+            let (regular_gate_masks, wide_gate_masks) =
+                per_party_gate_input_wires_masks.remove(&prover_id).unwrap();
+            let si = *si_s.get(&prover_id).unwrap();
+            let regular_gamma_rc = regular_gammas_rc.clone();
+            let wide_gammas_rc = wide_gammas_rc.clone();
+            let regular_gammas = regular_gamma_rc.as_ref();
+            let wide_gammas = wide_gammas_rc.as_ref();
+            let regular_mask_shares: HashMap<_, _> = regular_gate_masks
+                .into_iter()
+                .map(|((l, g), m)| {
+                    let m = match m {
+                        RegularMask(a, b) => RegularBeaverTriple(a, b, PF::zero()),
+                    };
+                    ((l, g), m)
+                })
+                .collect();
+            let wide_mask_shares: HashMap<_, _> = wide_gate_masks
+                .into_iter()
+                .map(|((l, g), m)| {
+                    let m = match m {
+                        WideMask(a, wb) => WideBeaverTriple(a, wb, [PF::zero(); 128]),
+                    };
+                    ((l, g), m)
+                })
+                .collect();
+            let mut z_tilde = construct_statement(
+                None,
+                Some(si),
+                &regular_gammas,
+                &wide_gammas,
+                None,
+                None,
+                Some(&regular_mask_shares),
+                Some(&wide_mask_shares),
+                circuit,
+            );
+            let (prover_correlation, verifiers_correlation) = dealer(&mut z_tilde, parties_num - 1);
+            parties
+                .iter()
+                .filter(|v| *v != &prover_id)
+                .zip(verifiers_correlation.into_iter())
+                .for_each(|(pid, verifier_corr)| {
+                    parties_verifiers
+                        .get_mut(pid)
+                        .unwrap()
+                        .push((prover_id, verifier_corr))
+                });
+            (
+                prover_id,
+                (
+                    OfflineCircuitVerify {
+                        s_i: si,
+                        alpha_omega_commitment: OfflineCommitment {
+                            commit_share: alpha_omega_commits.pop().unwrap(),
+                            commitment: alpha_omega_hash,
+                        },
+                        s_commitment: OfflineCommitment {
+                            commit_share: s_commit.pop().unwrap(),
+                            commitment: s_hash,
+                        },
+                        verifiers_offline_material: Vec::new(),
+                        prover_offline_material: prover_correlation,
+                    },
+                    None,
+                ),
+            )
+        })
+        .collect();
+    parties_verifiers.into_iter().for_each(|(pid, verifiers)| {
+        offline_verifiers
+            .get_mut(&pid)
+            .unwrap()
+            .0
+            .verifiers_offline_material = verifiers;
+    });
     if is_authenticated {
         let pairwise_triples: HashMap<_, _> = sho
             .iter()
@@ -902,88 +961,8 @@ pub async fn offline_verify_dealer<
             }
         }
         proofs.into_iter().for_each(|(pid, proofs)| {
-            engine.send(proofs, pid);
+            offline_verifiers.get_mut(&pid).unwrap().1 = Some(proofs);
         })
-    }
-    let (alphas, wide_alphas, gammas, wide_gammas, alphas_output_wires, gammas_inputs, _) =
-        compute_gammas_alphas::<PACKING, _, PF>(&alpha, circuit);
-
-    // Compute Omega
-    let regular_gates_input_wire_masks: HashMap<_, _> =
-        total_gate_input_masks.iter().copied().collect();
-    let wide_gates_input_wire_masks: HashMap<_, _> =
-        wide_total_gate_input_masks.iter().copied().collect();
-    let mu = F::random(&mut rng);
-    let alpha_r = dot_product_alpha::<PACKING, _, _, PF>(
-        &alphas,
-        &wide_alphas,
-        &alphas_output_wires,
-        &regular_gates_input_wire_masks,
-        &wide_gates_input_wire_masks,
-        total_output_wires_masks,
-    );
-
-    let sigma_gamma_l_r_l = dot_product_gamma(
-        &gammas,
-        &wide_gammas,
-        &regular_gates_input_wire_masks,
-        &wide_gates_input_wire_masks,
-        &gammas_inputs,
-        &total_input_wires_masks,
-    );
-    let omega = alpha_r + sigma_gamma_l_r_l;
-    let omega_hat = omega - mu;
-    let regular_gammas_rc = Arc::new(gammas);
-    let wide_gammas_rc = Arc::new(wide_gammas);
-
-    OfflineCommitment::offline_commit(&mut engine, &(alpha, omega_hat)).await;
-    let s = mu - si_s.values().copied().sum();
-    OfflineCommitment::offline_commit(&mut engine, &s).await;
-    let dealer_offline_futures: Vec<_> = parties
-        .into_iter()
-        .map(|prover_id| {
-            let (regular_gate_masks, wide_gate_masks) =
-                per_party_gate_input_wires_masks.remove(&prover_id).unwrap();
-            let si = *si_s.get(&prover_id).unwrap();
-            let regular_gamma_rc = regular_gammas_rc.clone();
-            let wide_gammas_rc = wide_gammas_rc.clone();
-            let engine = engine.sub_protocol(prover_id);
-            async move {
-                let regular_gammas = regular_gamma_rc.as_ref();
-                let wide_gammas = wide_gammas_rc.as_ref();
-                let regular_mask_shares: HashMap<_, _> = regular_gate_masks
-                    .into_iter()
-                    .map(|((l, g), m)| {
-                        let m = match m {
-                            RegularMask(a, b) => RegularBeaverTriple(a, b, PF::zero()),
-                        };
-                        ((l, g), m)
-                    })
-                    .collect();
-                let wide_mask_shares: HashMap<_, _> = wide_gate_masks
-                    .into_iter()
-                    .map(|((l, g), m)| {
-                        let m = match m {
-                            WideMask(a, wb) => WideBeaverTriple(a, wb, [PF::zero(); 128]),
-                        };
-                        ((l, g), m)
-                    })
-                    .collect();
-                let mut z_tilde = construct_statement(
-                    None,
-                    Some(si),
-                    &regular_gammas,
-                    &wide_gammas,
-                    None,
-                    None,
-                    Some(&regular_mask_shares),
-                    Some(&wide_mask_shares),
-                    circuit,
-                );
-                dealer(engine, &mut z_tilde, prover_id, two, three, four).await;
-                Result::<(), ()>::Ok(())
-            }
-        })
-        .collect();
-    try_join_all(dealer_offline_futures).await.unwrap();
+    };
+    offline_verifiers
 }

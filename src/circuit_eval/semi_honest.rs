@@ -233,7 +233,7 @@ pub trait OfflineSemiHonestCorrelation<CF: FieldElement>:
         &self,
         engine: &mut impl MultiPartyEngine,
         circuit: &ParsedCircuit,
-        proof: &HashMap<PartyId, Arc<ZkFliopProof<VF>>>,
+        proof: &HashMap<PartyId, ZkFliopProof<VF>>,
     ) -> bool
     where
         GF2: Mul<VF, Output = VF>;
@@ -368,7 +368,7 @@ impl<
         &self,
         engine: &mut impl MultiPartyEngine,
         circuit: &ParsedCircuit,
-        proof: &HashMap<PartyId, Arc<ZkFliopProof<VF>>>,
+        proof: &HashMap<PartyId, ZkFliopProof<VF>>,
     ) -> bool
     where
         GF2: Mul<VF, Output = VF>,
@@ -401,19 +401,14 @@ impl<
                 let pids: Arc<Box<[PartyId]>> = Arc::new(pids.into());
                 let engine = engine
                     .sub_protocol_with(format!("verify_triples_{}_{}", min_pid, max_pid), pids);
-                let proof = proof.get(&pid).unwrap().clone();
+                let proof = proof.get(&pid).unwrap();
                 let coin = coin.clone();
-                tokio::spawn(async move {
+                async move {
                     let statement_share = construct_statement_from_bts(&bts, &wbts, coin);
-                    let (flag, check_vals) = obtain_check_value(
-                        statement_share,
-                        proof,
-                        VF::two(),
-                        VF::three(),
-                        VF::four(),
-                    );
-                    verify_check_value(engine, flag, check_vals).await
-                })
+                    let (flag, check_vals) = obtain_check_value(statement_share, proof);
+                    let output = verify_check_value(engine, flag, check_vals).await;
+                    Result::<bool, ()>::Ok(output)
+                }
             })
             .collect();
         try_join_all(handles).await.unwrap().into_iter().all(|v| v)

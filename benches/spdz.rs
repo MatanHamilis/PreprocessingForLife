@@ -9,6 +9,7 @@ use std::{
 use aes_prng::AesRng;
 use criterion::{criterion_group, criterion_main, Criterion};
 use futures::future::try_join_all;
+use log::info;
 use silent_party::{
     circuit_eval::{
         spdz::{online_spdz, spdz_deal},
@@ -27,18 +28,18 @@ async fn set_up_routers_for_parties(
     HashMap<PartyId, NetworkRouter>,
     HashMap<PartyId, impl MultiPartyEngine>,
 ) {
-    let addresses = Arc::new(HashMap::from_iter(party_ids.iter().map(|i| {
-        (
-            *i,
-            SocketAddrV4::new(Ipv4Addr::LOCALHOST, base_port + *i as u16),
-        )
-    })));
     let mut routers = vec![];
     let parties_count = party_ids.len();
     for &id in party_ids {
-        let personal_peers = addresses.clone();
+        let addresses = HashMap::from_iter(party_ids.iter().filter(|i| *i > &id).map(|i| {
+            (
+                *i,
+                SocketAddrV4::new(Ipv4Addr::LOCALHOST, base_port + *i as u16),
+            )
+        }));
         routers.push(async move {
-            let personal_port = personal_peers.get(&id).unwrap().port();
+            let personal_port = base_port + id as u16;
+            let personal_peers = addresses;
             NetworkRouter::new(
                 id,
                 &personal_peers,
@@ -169,6 +170,9 @@ fn bench_spdz_circuit<const N: usize, PF: PackedField<GF2, N>>(
     });
 }
 pub fn bench_spdz(c: &mut Criterion) {
+    pretty_env_logger::formatted_builder()
+        .filter_level(log::LevelFilter::Info)
+        .init();
     let path = Path::new("circuits/aes_128.txt");
     let parsed_circuit = silent_party::circuit_eval::circuit_from_file(path).unwrap();
     bench_spdz_circuit(c, parsed_circuit, vec![PackedGF2::one(); 256])

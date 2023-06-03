@@ -176,12 +176,8 @@ pub fn prove<'a, F: FieldElement>(
 }
 pub fn obtain_check_value<F: FieldElement>(
     mut statement_share: Vec<F>,
-    proof: impl AsRef<ZkFliopProof<F>>,
-    two: F,
-    three: F,
-    four: F,
+    proof: &ZkFliopProof<F>,
 ) -> (bool, [F; 4]) {
-    let proof = proof.as_ref();
     let mut statement_hash = hash_statement(&statement_share);
     let commit_idx = proof.commit_idx;
     let (_, round_count) = compute_round_count_and_m(statement_share.len());
@@ -211,7 +207,7 @@ pub fn obtain_check_value<F: FieldElement>(
                 let slope_i = *f_one - *f_zero;
                 *f_zero += r * slope_i;
             });
-        let q_r = interpolate(&[(F::zero(), q_0), (F::one(), q_1), (two, q_2)], r);
+        let q_r = interpolate(&[(F::zero(), q_0), (F::one(), q_1), (F::two(), q_2)], r);
         z[0] = q_r;
         z = &mut z[..=z_len / 2];
     }
@@ -229,21 +225,21 @@ pub fn obtain_check_value<F: FieldElement>(
     let mut f_0_hat = [
         (F::zero(), z[1]),
         (F::one(), z[3]),
-        (two, last_round_proof[0]),
+        (F::two(), last_round_proof[0]),
         (r, F::zero()),
     ];
     let mut f_1_hat = [
         (F::zero(), z[2]),
         (F::one(), z[4]),
-        (two, last_round_proof[1]),
+        (F::two(), last_round_proof[1]),
         (r, F::zero()),
     ];
     let mut q_hat = [
         (F::zero(), last_round_proof[2]),
         (F::one(), last_round_proof[3]),
-        (two, last_round_proof[4]),
-        (three, last_round_proof[5]),
-        (four, last_round_proof[6]),
+        (F::two(), last_round_proof[4]),
+        (F::three(), last_round_proof[5]),
+        (F::four(), last_round_proof[6]),
         (r, F::zero()),
     ];
     f_0_hat[3].1 = interpolate(&f_0_hat[0..3], f_0_hat[3].0);
@@ -323,8 +319,7 @@ mod test {
             .zip(proofs.into_iter())
             .zip(engines.into_iter())
             .map(|((share, proof), (_, engine))| async move {
-                let (is_commit_ok, input) =
-                    obtain_check_value(share, Arc::new(proof), F::two(), F::three(), F::four());
+                let (is_commit_ok, input) = obtain_check_value(share, &proof);
                 Result::<bool, ()>::Ok(verify_check_value(engine, is_commit_ok, input).await)
             })
             .collect();

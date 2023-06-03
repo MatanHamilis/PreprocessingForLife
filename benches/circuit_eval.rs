@@ -11,6 +11,7 @@ use aes_prng::AesRng;
 use criterion::{criterion_group, criterion_main, Criterion};
 use futures::future::try_join_all;
 use log::info;
+use pretty_env_logger::env_logger::Logger;
 use rand::thread_rng;
 use rayon::prelude::*;
 use silent_party::{
@@ -232,6 +233,7 @@ fn bench_malicious_circuit<
     parties: usize,
     base_port: u16,
     pcg_dealer: Arc<D>,
+    is_authenticated: bool,
 ) {
     let mut two = GF64::zero();
     two.set_bit(true, 1);
@@ -288,7 +290,6 @@ fn bench_malicious_circuit<
                         MaliciousSecurityOffline::<
                             PACKING,
                             PF,
-                            GF2,
                             GF64,
                             PcgBasedPairwiseBooleanCorrelation<PACKING, PF, PS, D>,
                         >::malicious_security_offline_dealer(
@@ -299,6 +300,7 @@ fn bench_malicious_circuit<
                             circuit_arc_clone,
                             &input_lengths,
                             dealer.as_ref(),
+                            is_authenticated,
                         )
                         .await;
                         info!("Dealer:\t took: {}ms", time.elapsed().as_millis());
@@ -313,17 +315,17 @@ fn bench_malicious_circuit<
                             let res = MaliciousSecurityOffline::<
                                 PACKING,
                                 PF,
-                                GF2,
                                 GF64,
                                 PcgBasedPairwiseBooleanCorrelation<PACKING, PF, PS, D>,
                             >::malicious_security_offline_party(
                                 &mut e,
                                 dealer_id,
                                 circuit_clone_arc,
+                                is_authenticated,
                             )
                             .await;
                             Result::<
-                                (PartyId, MaliciousSecurityOffline<PACKING, PF, GF2, GF64, _>),
+                                (PartyId, MaliciousSecurityOffline<PACKING, PF,  GF64, _>),
                                 (),
                             >::Ok((pid, res))
                         }
@@ -354,9 +356,10 @@ fn bench_malicious_circuit<
                             let pre_online_material = offline_material
                                 .into_pre_online_material(&mut engine, circuit)
                                 .await;
-                            Result::<(PartyId, PreOnlineMaterial<PACKING, PF, _, _, _, _>), ()>::Ok(
-                                (pid, pre_online_material),
-                            )
+                            Result::<(PartyId, PreOnlineMaterial<PACKING, PF, _, _, _>), ()>::Ok((
+                                pid,
+                                pre_online_material,
+                            ))
                         }
                     },
                 );
@@ -378,6 +381,7 @@ fn bench_malicious_circuit<
                                 three,
                                 four,
                                 &input_lengths,
+                                is_authenticated,
                             )
                             .await
                             .ok_or(());
@@ -444,6 +448,10 @@ pub fn bench_2p_semi_honest(c: &mut Criterion) {
     );
 }
 pub fn bench_2p_malicious(c: &mut Criterion) {
+    let is_authenticated = false;
+    pretty_env_logger::formatted_builder()
+        .filter_level(log::LevelFilter::Info)
+        .init();
     let p = PackedGF2::one();
     info!(
         "Packed GF2 serialized size: {}",
@@ -468,6 +476,7 @@ pub fn bench_2p_malicious(c: &mut Criterion) {
         2,
         3000,
         dealer.clone(),
+        is_authenticated,
     );
     bench_malicious_circuit::<
         { PackedGF2::BITS },
@@ -483,6 +492,7 @@ pub fn bench_2p_malicious(c: &mut Criterion) {
         2,
         3000,
         dealer.clone(),
+        is_authenticated,
     );
     bench_malicious_circuit::<
         { PackedGF2::BITS },
@@ -498,6 +508,7 @@ pub fn bench_2p_malicious(c: &mut Criterion) {
         2,
         3000,
         dealer.clone(),
+        is_authenticated,
     );
     bench_malicious_circuit::<
         { PackedGF2::BITS },
@@ -513,6 +524,7 @@ pub fn bench_2p_malicious(c: &mut Criterion) {
         2,
         3000,
         dealer.clone(),
+        is_authenticated,
     );
     let input = vec![GF2::one(); circuit.input_wire_count];
     bench_malicious_circuit::<
@@ -529,6 +541,7 @@ pub fn bench_2p_malicious(c: &mut Criterion) {
         2,
         3000,
         dealer.clone(),
+        is_authenticated,
     );
 }
 criterion_group!(benches, bench_2p_malicious, bench_2p_semi_honest);

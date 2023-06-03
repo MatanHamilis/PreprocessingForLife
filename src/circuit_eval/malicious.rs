@@ -10,7 +10,8 @@ use crate::{
     commitment::OfflineCommitment,
     engine::MultiPartyEngine,
     fields::{FieldElement, PackedField, GF2},
-    zkfliop, PartyId,
+    zkfliop::{self, ni::ZkFliopProof},
+    PartyId,
 };
 
 use super::{
@@ -31,6 +32,8 @@ pub struct MaliciousSecurityOffline<
     output_wire_mask_commitments: OfflineCommitment,
     #[serde(bound = "")]
     offline_verification_material: OfflineCircuitVerify<F>,
+    #[serde(bound = "")]
+    dealer_verification_material: Option<HashMap<PartyId, ZkFliopProof<F>>>,
     _phantom: PhantomData<PF>,
 }
 impl<
@@ -42,103 +45,73 @@ impl<
 where
     GF2: Mul<F, Output = F>,
 {
-    pub async fn malicious_security_offline_dealer<E: MultiPartyEngine, C: AsRef<ParsedCircuit>>(
-        engine: &mut E,
-        two: F,
-        three: F,
-        four: F,
-        circuit: C,
+    pub fn malicious_security_offline_dealer(
+        circuit: &ParsedCircuit,
         party_input_length: &HashMap<PartyId, (usize, usize)>,
         dealer: &SHO::Dealer,
         is_authenticated: bool,
-    ) {
-        let my_id = engine.my_party_id();
-        let mut parties: Vec<_> = engine
-            .party_ids()
-            .iter()
-            .copied()
-            .filter(|p| p != &my_id)
-            .collect();
-        parties.sort();
-
+    ) -> HashMap<PartyId, MaliciousSecurityOffline<PACKING, PF, F, SHO>> {
         // Correlated Randomness for Semi-Honest
         let mut aes_rng = AesRng::from_random_seed();
+        let parties_num = party_input_length.len();
         let (input_wire_masks, output_wire_masks, offline_correlations) =
-            SHO::deal(&mut aes_rng, party_input_length, circuit.as_ref(), dealer);
-        for (p, oc) in offline_correlations.iter() {
-            engine.send(oc, *p);
-        }
+            SHO::deal(&mut aes_rng, party_input_length, circuit, dealer);
         // Correlated random for Verify
-        verify::offline_verify_dealer(
-            engine.sub_protocol("offline verify"),
-            two,
-            three,
-            four,
-            circuit.as_ref(),
+        let mut verifier_correlations = verify::offline_verify_dealer(
+            circuit,
             &input_wire_masks,
             &output_wire_masks,
             &offline_correlations,
             is_authenticated,
-        )
-        .await;
+        );
 
-        OfflineCommitment::offline_commit(
-            &mut engine.sub_protocol("commitment"),
-            &output_wire_masks,
-        )
-        .await;
+        let (mut output_wires_share, output_wires_commitment) =
+            OfflineCommitment::commit(&output_wire_masks, parties_num);
+        offline_correlations
+            .into_iter()
+            .map(|(pid, sho)| {
+                let (verify, dealer_verify) = verifier_correlations.remove(&pid).unwrap();
+                (
+                    pid,
+                    MaliciousSecurityOffline {
+                        semi_honest_offline_correlation: sho,
+                        output_wire_mask_commitments: OfflineCommitment {
+                            commit_share: output_wires_share.pop().unwrap(),
+                            commitment: output_wires_commitment,
+                        },
+                        offline_verification_material: verify,
+                        dealer_verification_material: dealer_verify,
+                        _phantom: PhantomData::<PF>,
+                    },
+                )
+            })
+            .collect()
     }
     pub async fn malicious_security_offline_party(
         engine: &mut impl MultiPartyEngine,
-        dealer_id: PartyId,
         circuit: impl AsRef<ParsedCircuit>,
+        correlation: &MaliciousSecurityOffline<PACKING, PF, F, SHO>,
         is_authenticated: bool,
-    ) -> MaliciousSecurityOffline<PACKING, PF, F, SHO> {
+    ) -> bool {
+        if !is_authenticated {
+            return true;
+        }
         let proof_statement_length = statement_length::<PACKING>(circuit.as_ref());
-        let (_, round_count) = zkfliop::compute_round_count_and_m(proof_statement_length);
-        let semi_honest_offline_correlation: SHO = engine.recv_from(dealer_id).await.unwrap();
-        let (offline_verification_material, proofs_triples) = verify::offline_verify_parties::<F>(
-            engine.sub_protocol("offline verify"),
-            dealer_id,
-            round_count,
-            is_authenticated,
-        )
-        .await;
-        let output_wire_mask_commitments = OfflineCommitment::offline_obtain_commit(
-            &mut engine.sub_protocol("commitment"),
-            dealer_id,
-        )
-        .await;
-        if is_authenticated {
-            println!("Verifying triples...");
-            let proofs = proofs_triples
-                .unwrap()
-                .into_iter()
-                .map(|(pid, proof)| (pid, Arc::new(proof)))
-                .collect();
-            let peers: Vec<PartyId> = engine
-                .party_ids()
-                .iter()
-                .copied()
-                .filter(|v| v != &dealer_id)
-                .collect();
-            let peers = Arc::new(peers.into());
-            let triples_verdict = semi_honest_offline_correlation
-                .verify_correlation(
-                    &mut engine.sub_protocol_with("verify triples", peers),
-                    circuit.as_ref(),
-                    &proofs,
-                )
-                .await;
-            assert!(triples_verdict);
-            println!("Triples OK!");
-        }
-        MaliciousSecurityOffline {
-            semi_honest_offline_correlation,
-            output_wire_mask_commitments,
-            offline_verification_material,
-            _phantom: PhantomData,
-        }
+        println!("Verifying triples...");
+        let proofs = correlation.dealer_verification_material.as_ref().unwrap();
+        let peers: Vec<PartyId> = engine.party_ids().iter().copied().collect();
+        let peers = Arc::new(peers.into());
+        let semi_honest_offline_correlation = &correlation.semi_honest_offline_correlation;
+        let triples_verdict = semi_honest_offline_correlation
+            .verify_correlation(
+                &mut engine.sub_protocol_with("verify triples", peers),
+                circuit.as_ref(),
+                proofs,
+            )
+            .await;
+        assert!(triples_verdict);
+        println!("Triples OK!");
+        return triples_verdict;
     }
     pub async fn into_pre_online_material<E: MultiPartyEngine, C: AsRef<ParsedCircuit>>(
         self,
@@ -150,6 +123,7 @@ where
             mut semi_honest_offline_correlation,
             output_wire_mask_commitments,
             offline_verification_material,
+            dealer_verification_material: _,
             _phantom: _,
         } = self;
         let output_wire_mask_shares =
@@ -285,6 +259,7 @@ mod tests {
 
     use futures::future::try_join_all;
     use log::info;
+    use semi_honest::OfflineSemiHonestCorrelation;
     use tokio::{join, runtime, time::Instant};
 
     use super::MaliciousSecurityOffline;
@@ -328,7 +303,6 @@ mod tests {
         // Offline
         let offline_party_ids: [PartyId; PARTIES + 1] =
             core::array::from_fn(|i| (i + 1) as PartyId);
-        let offline_parties_set = HashSet::from_iter(offline_party_ids.iter().copied());
         let default_input_length = input.len() / PARTIES;
         let addition_threshold = input.len() % PARTIES;
         let mut inputs = HashMap::with_capacity(PARTIES);
@@ -346,76 +320,58 @@ mod tests {
                 (i, (used_input - my_input_len, my_input_len))
             })
             .collect();
-        let (offline_router, mut offline_engines) =
-            LocalRouter::new(UCTag::new(&"ROOT_TAG"), &offline_parties_set);
-        let circuit_arc = Arc::new(circuit);
-        let input_lengths_arc = Arc::new(input_lengths);
-        let dealer_handle = {
-            let circuit_arc_clone = circuit_arc.clone();
-            let mut dealer_engine = offline_engines.remove(&DEALER_ID).unwrap();
-            let input_lengths = input_lengths_arc.clone();
-            let dealer = dealer.clone();
-            async move {
-                MaliciousSecurityOffline::<
-                    PACKING,
-                    PF,
-                    GF128,
-                    PcgBasedPairwiseBooleanCorrelation<PACKING, PF, _, _>,
-                >::malicious_security_offline_dealer(
-                    &mut dealer_engine,
-                    two,
-                    three,
-                    four,
-                    circuit_arc_clone,
-                    &input_lengths,
-                    dealer.as_ref(),
-                    is_authenticated,
-                )
-                .await;
-            }
-        };
-
-        let parties_handles: Vec<_> = offline_engines
-            .into_iter()
-            .map(|(pid, mut e)| {
-                let circuit_clone_arc = circuit_arc.clone();
-                async move {
-                    let res = MaliciousSecurityOffline::<
-                        PACKING,
-                        PF,
-                        GF128,
-                        PcgBasedPairwiseBooleanCorrelation<PACKING, PF, _, D>,
-                    >::malicious_security_offline_party(
-                        &mut e, DEALER_ID, circuit_clone_arc, true
-                    )
-                    .await;
-                    Result::<(PartyId, MaliciousSecurityOffline<PACKING, PF, GF128, _>), ()>::Ok((
-                        pid, res,
-                    ))
-                }
-            })
-            .collect();
-
-        let parties_handles = try_join_all(parties_handles);
-        let router_handle = tokio::spawn(offline_router.launch());
-        let (_, parties_offline_material, router_output) =
-            join!(dealer_handle, parties_handles, router_handle);
-        router_output.unwrap().unwrap();
-        let parties_offline_material = parties_offline_material.unwrap();
-
-        // Pre Online
+        let mut parties_offline_material = MaliciousSecurityOffline::<
+            PACKING,
+            PF,
+            GF128,
+            PcgBasedPairwiseBooleanCorrelation<PACKING, PF, _, _>,
+        >::malicious_security_offline_dealer(
+            &circuit,
+            &input_lengths,
+            dealer.as_ref(),
+            is_authenticated,
+        );
+        let input_lengths = Arc::new(input_lengths);
+        let circuit = Arc::new(circuit);
+        // Pre Online & Verify Correlation
         let online_party_ids: [PartyId; PARTIES] = core::array::from_fn(|i| (i + 1) as PartyId);
         let online_parties_set = HashSet::from_iter(online_party_ids.iter().copied());
         let (online_router, mut online_engines) =
             LocalRouter::new(UCTag::new(&"ROOT_TAG"), &online_parties_set);
         let router_handle = tokio::spawn(online_router.launch());
 
+        let verification_handles: Vec<_> = parties_offline_material
+            .iter_mut()
+            .map(|(pid, material)| {
+                let mut engine = online_engines
+                    .get(&pid)
+                    .unwrap()
+                    .sub_protocol("verify_corr");
+                let circuit = circuit.clone();
+                async move {
+                    let res = MaliciousSecurityOffline::malicious_security_offline_party(
+                        &mut engine,
+                        circuit,
+                        material,
+                        is_authenticated,
+                    )
+                    .await;
+                    Result::<bool, ()>::Ok(res)
+                }
+            })
+            .collect();
+        assert!(try_join_all(verification_handles)
+            .await
+            .unwrap()
+            .into_iter()
+            .all(|v| v));
+
         let pre_online_handles =
             parties_offline_material
                 .into_iter()
                 .map(|(pid, offline_material)| {
                     let mut engine = online_engines.get(&pid).unwrap().sub_protocol("PRE-ONLINE");
-                    let circuit = circuit_arc.clone();
+                    let circuit = circuit.clone();
                     async move {
                         let pre_online_material = offline_material
                             .into_pre_online_material(&mut engine, circuit)
@@ -434,7 +390,7 @@ mod tests {
         let online_handles = pre_online_handles.into_iter().map(|(pid, mut pre)| {
             let input = inputs.remove(&pid).unwrap();
             let mut engine = online_engines.remove(&pid).unwrap();
-            let input_lengths = input_lengths_arc.clone();
+            let input_lengths = input_lengths.clone();
             tokio::spawn(async move {
                 let start = Instant::now();
                 let o = pre
