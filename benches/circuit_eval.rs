@@ -253,17 +253,14 @@ fn bench_malicious_circuit<
             let dealer = pcg_dealer.clone();
             async move {
                 // Offline
-                let dealer_id: PartyId = parties as PartyId + 1;
-                let offline_party_ids: Vec<_> = (0..=parties).map(|i| (i + 1) as PartyId).collect();
-                let offline_parties_set = HashSet::from_iter(offline_party_ids.iter().copied());
+                let online_party_ids: Vec<_> = (0..parties).map(|i| (i + 1) as PartyId).collect();
                 let default_input_length = input.len() / parties;
                 let addition_threshold = input.len() % parties;
                 let mut inputs = HashMap::with_capacity(parties);
                 let mut used_input = 0;
-                let input_lengths: HashMap<_, _> = offline_party_ids
+                let input_lengths: HashMap<_, _> = online_party_ids
                     .iter()
                     .copied()
-                    .filter(|i| i != &dealer_id)
                     .enumerate()
                     .map(|(idx, i)| {
                         let my_input_len =
@@ -274,71 +271,22 @@ fn bench_malicious_circuit<
                         (i, (used_input - my_input_len, my_input_len))
                     })
                     .collect();
-                let (routers, mut engines) =
-                    set_up_routers_for_parties(&offline_parties_set, base_port).await;
-                let router_handles: Vec<_> = routers
-                    .into_iter()
-                    .map(|(_, r)| tokio::spawn(r.launch()))
-                    .collect();
-                let input_lengths_arc = Arc::new(input_lengths);
-                let dealer_handle = {
-                    let circuit_arc_clone = circuit.clone();
-                    let mut dealer_engine = engines.remove(&dealer_id).unwrap();
-                    let input_lengths = input_lengths_arc.clone();
-                    async move {
-                        let time = Instant::now();
-                        MaliciousSecurityOffline::<
-                            PACKING,
-                            PF,
-                            GF64,
-                            PcgBasedPairwiseBooleanCorrelation<PACKING, PF, PS, D>,
-                        >::malicious_security_offline_dealer(
-                            &mut dealer_engine,
-                            two,
-                            three,
-                            four,
-                            circuit_arc_clone,
-                            &input_lengths,
-                            dealer.as_ref(),
-                            is_authenticated,
-                        )
-                        .await;
-                        info!("Dealer:\t took: {}ms", time.elapsed().as_millis());
-                    }
-                };
-
-                let parties_handles: Vec<_> = engines
-                    .into_iter()
-                    .map(|(pid, mut e)| {
-                        let circuit_clone_arc = circuit.clone();
-                        async move {
-                            let res = MaliciousSecurityOffline::<
-                                PACKING,
-                                PF,
-                                GF64,
-                                PcgBasedPairwiseBooleanCorrelation<PACKING, PF, PS, D>,
-                            >::malicious_security_offline_party(
-                                &mut e,
-                                dealer_id,
-                                circuit_clone_arc,
-                                is_authenticated,
-                            )
-                            .await;
-                            Result::<
-                                (PartyId, MaliciousSecurityOffline<PACKING, PF,  GF64, _>),
-                                (),
-                            >::Ok((pid, res))
-                        }
-                    })
-                    .collect();
-
-                let parties_handles = try_join_all(parties_handles);
-                let (_, parties_offline_material, router_output) =
-                    join!(dealer_handle, parties_handles, try_join_all(router_handles));
-                router_output.unwrap();
-                let parties_offline_material = parties_offline_material.unwrap();
+                let time = Instant::now();
+                let parties_offline_material = MaliciousSecurityOffline::<
+                    PACKING,
+                    PF,
+                    GF64,
+                    PcgBasedPairwiseBooleanCorrelation<PACKING, PF, PS, D>,
+                >::malicious_security_offline_dealer(
+                    &circuit,
+                    &input_lengths,
+                    dealer.as_ref(),
+                    is_authenticated,
+                );
+                info!("Dealer:\t took: {}ms", time.elapsed().as_millis());
 
                 // Pre Online
+                let input_lengths_arc = Arc::new(input_lengths);
                 let online_party_ids: Vec<_> = (0..parties).map(|i| (i + 1) as PartyId).collect();
                 let online_parties_set = HashSet::from_iter(online_party_ids.iter().copied());
                 let (routers, mut engines) =

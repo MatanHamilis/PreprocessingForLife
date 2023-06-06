@@ -285,7 +285,7 @@ pub async fn online_spdz<
     debug_assert_eq!(total_input_pos, circuit.input_wire_count);
 
     // Input preparation
-
+    let time = Instant::now();
     let (my_input_start, my_input_len) = input_pos[&my_id];
     assert_eq!(my_input_len, input.len());
     wires[..circuit.input_wire_count].copy_from_slice(&auth_input);
@@ -313,6 +313,7 @@ pub async fn online_spdz<
                 w.add_public_value_into(o, &mac_share, is_first);
             })
     }
+    info!("Input preparation time: {}", time.elapsed().as_millis());
     // Semi-honest Computation
 
     let mut open_triples_iter = triples.iter().enumerate();
@@ -320,6 +321,7 @@ pub async fn online_spdz<
     let mut msgs = Vec::new();
     let mut gates = Vec::new();
     let mut proof_values = Vec::new();
+    let time = Instant::now();
     for layer in circuit.gates.iter() {
         msgs.clear();
         gates.clear();
@@ -378,10 +380,12 @@ pub async fn online_spdz<
                     wires[input[0]].mul_compute(&wires[input[1]], opening.0, opening.1, bt);
             })
     }
+    info!("Semi Honest Time: {}", time.elapsed().as_millis());
     let challenge: [u8; 16] = check_seed.online_decommit(engine).await;
     let mut rng = AesRng::from_seed(challenge);
 
     // Verify Openings
+    let time = Instant::now();
     let check_value: VF = proof_values
         .iter()
         .map(|p| p.iter().map(|pp| *pp * VF::random(&mut rng)).sum())
@@ -404,7 +408,9 @@ pub async fn online_spdz<
     }
     assert!(sum.is_zero());
 
+    info!("Verification Time: {}", time.elapsed().as_millis());
     // Output
+    let time = Instant::now();
     let output_wires = &mut wires[circuit.input_wire_count + circuit.internal_wire_count..];
     let mut output_wires_vals: Vec<_> = output_wires.iter().map(|v| v.value).collect();
     engine.broadcast(&output_wires_vals);
@@ -415,8 +421,10 @@ pub async fn online_spdz<
             .zip(v.iter())
             .for_each(|(o, v)| *o += *v);
     }
+    info!("Output Obtaining Time: {}", time.elapsed().as_millis());
 
     // Verify output
+    let time = Instant::now();
     proof_values.clear();
     output_wires
         .iter()
@@ -447,6 +455,7 @@ pub async fn online_spdz<
         sum += decomm;
     }
     assert!(sum.is_zero());
+    info!("Output Verification Time: {}", time.elapsed().as_millis());
     output_wires_vals
 }
 

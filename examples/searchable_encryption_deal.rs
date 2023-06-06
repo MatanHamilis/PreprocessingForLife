@@ -53,7 +53,7 @@ fn build_searching_circuit() -> ParsedCircuit {
     author,
     version,
     about,
-    long_about = "Searchable Encryption with Palindrome checking"
+    long_about = "Searchable Encryption"
 )]
 struct Cli {
     #[command(flatten)]
@@ -68,15 +68,15 @@ struct Cli {
 enum Role {
     /// Role of the dealer.
     Dealer {
-        #[arg(default_value_t = 45678)]
-        listen_port: u16,
+        #[arg(default_value = "./client_correlation.bin")]
+        client_correlation: String,
+        #[arg(default_value = "./server_correlation.bin")]
+        server_correlation: String,
     },
     /// Role of a non-dealer party
     Party {
         /// The path to store the generated correlation.
         correlation_storage_path: PathBuf,
-        #[command(flatten)]
-        party_args: PartyArgs,
         /// Info on connecting to the other party.
         #[command(subcommand)]
         party: Party,
