@@ -8,6 +8,7 @@ use std::{
 };
 
 use aes_prng::AesRng;
+use core_affinity::CoreId;
 use criterion::{criterion_group, criterion_main, Criterion};
 use futures::future::try_join_all;
 use log::info;
@@ -32,6 +33,34 @@ use tokio::join;
 
 const ROOT_TAG: &str = "ROOT_TAG";
 
+async fn set_up_router_for_party(
+    id: PartyId,
+    party_ids: &HashSet<PartyId>,
+    base_port: u16,
+) -> (NetworkRouter, impl MultiPartyEngine) {
+    let parties_count = party_ids.len();
+    let addresses = HashMap::from_iter(party_ids.iter().filter(|i| *i > &id).map(|i| {
+        (
+            *i,
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, base_port + *i as u16),
+        )
+    }));
+    async move {
+        let personal_port = base_port + id as u16;
+        let personal_peers = addresses;
+        NetworkRouter::new(
+            id,
+            &personal_peers,
+            UCTag::new(&ROOT_TAG),
+            parties_count,
+            personal_port,
+        )
+        .await
+        .ok_or(())
+    }
+    .await
+    .unwrap()
+}
 async fn set_up_routers_for_parties(
     party_ids: &HashSet<PartyId>,
     base_port: u16,
@@ -239,123 +268,150 @@ fn bench_malicious_circuit<
     two.set_bit(true, 1);
     let three = two + GF64::one();
     let four = two * two;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_stack_size(32 * 1024 * 1024)
-        .build()
-        .unwrap();
-    let circuit = Arc::new(circuit);
+    let input = input.clone();
+    let dealer = pcg_dealer.clone();
     let input = Arc::new(input);
-    c.bench_function(format!("{} semi malicious online", id).as_str(), |b| {
-        b.to_async(&runtime).iter_custom(|_| {
-            let circuit = circuit.clone();
-            let input = input.clone();
-            let dealer = pcg_dealer.clone();
-            async move {
-                // Offline
-                let online_party_ids: Vec<_> = (0..parties).map(|i| (i + 1) as PartyId).collect();
-                let default_input_length = input.len() / parties;
-                let addition_threshold = input.len() % parties;
-                let mut inputs = HashMap::with_capacity(parties);
-                let mut used_input = 0;
-                let input_lengths: HashMap<_, _> = online_party_ids
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .map(|(idx, i)| {
-                        let my_input_len =
-                            default_input_length + (idx < addition_threshold) as usize;
-                        let my_input = input[used_input..used_input + my_input_len].to_vec();
-                        inputs.insert(i, my_input);
-                        used_input += my_input_len;
-                        (i, (used_input - my_input_len, my_input_len))
-                    })
-                    .collect();
-                let time = Instant::now();
-                let parties_offline_material = MaliciousSecurityOffline::<
-                    PACKING,
-                    PF,
-                    GF64,
-                    PcgBasedPairwiseBooleanCorrelation<PACKING, PF, PS, D>,
-                >::malicious_security_offline_dealer(
-                    &circuit,
-                    &input_lengths,
-                    dealer.as_ref(),
-                    is_authenticated,
-                );
-                info!("Dealer:\t took: {}ms", time.elapsed().as_millis());
 
-                // Pre Online
-                let input_lengths_arc = Arc::new(input_lengths);
-                let online_party_ids: Vec<_> = (0..parties).map(|i| (i + 1) as PartyId).collect();
-                let online_parties_set = HashSet::from_iter(online_party_ids.iter().copied());
-                let (routers, mut engines) =
-                    set_up_routers_for_parties(&online_parties_set, base_port).await;
-                let router_handles: Vec<_> = routers
-                    .into_iter()
-                    .map(|(_, r)| tokio::spawn(r.launch()))
-                    .collect();
-
-                let pre_online_handles = parties_offline_material.into_iter().map(
-                    |(pid, offline_material)| {
-                        let mut engine = engines.get(&pid).unwrap().sub_protocol("PRE-ONLINE");
-                        let circuit = circuit.clone();
-                        async move {
-                            let pre_online_material = offline_material
-                                .into_pre_online_material(&mut engine, circuit)
-                                .await;
-                            Result::<(PartyId, PreOnlineMaterial<PACKING, PF, _, _, _>), ()>::Ok((
-                                pid,
-                                pre_online_material,
-                            ))
-                        }
-                    },
-                );
-
-                let pre_online_handles = try_join_all(pre_online_handles).await.unwrap();
-
-                // Online
-                let online_handles = pre_online_handles.into_iter().map(|(pid, mut pre)| {
-                    let input = inputs.remove(&pid).unwrap();
-                    let mut engine = engines.remove(&pid).unwrap();
-                    let input_lengths = input_lengths_arc.clone();
-                    tokio::spawn(async move {
-                        let start = Instant::now();
-                        let o = pre
-                            .online_malicious_computation::<FC>(
-                                &mut engine,
-                                input,
-                                two,
-                                three,
-                                four,
-                                &input_lengths,
-                                is_authenticated,
-                            )
-                            .await
-                            .ok_or(());
-                        info!("Malicious eval took: {}ms", start.elapsed().as_millis());
-                        o
-                    })
-                });
-                let start = Instant::now();
-                let mut online_outputs: Vec<_> = try_join_all(online_handles)
-                    .await
-                    .unwrap()
-                    .into_iter()
-                    .map(|v| v.unwrap())
-                    .collect();
-                let output = start.elapsed();
-                info!("Running took: {}", output.as_millis());
-                let total_bytes: usize = try_join_all(router_handles)
-                    .await
-                    .unwrap()
-                    .into_iter()
-                    .sum();
-                info!("Total bytes:{}", total_bytes);
-                output
-            }
+    // Offline
+    let online_party_ids: Vec<_> = (0..parties).map(|i| (i + 1) as PartyId).collect();
+    let default_input_length = input.len() / parties;
+    let addition_threshold = input.len() % parties;
+    let mut inputs = HashMap::with_capacity(parties);
+    let mut used_input = 0;
+    let input_lengths: HashMap<_, _> = online_party_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(idx, i)| {
+            let my_input_len = default_input_length + (idx < addition_threshold) as usize;
+            let my_input = input[used_input..used_input + my_input_len].to_vec();
+            inputs.insert(i, my_input);
+            used_input += my_input_len;
+            (i, (used_input - my_input_len, my_input_len))
         })
-    });
+        .collect();
+    let time = Instant::now();
+    let mut parties_offline_material = MaliciousSecurityOffline::<
+        PACKING,
+        PF,
+        GF64,
+        PcgBasedPairwiseBooleanCorrelation<PACKING, PF, PS, D>,
+    >::malicious_security_offline_dealer(
+        &circuit,
+        &input_lengths,
+        dealer.as_ref(),
+        is_authenticated,
+    );
+    info!("Dealer:\t took: {}ms", time.elapsed().as_millis());
+    let online_party_ids: Vec<_> = (0..parties).map(|i| (i + 1) as PartyId).collect();
+    let online_parties_set = Arc::new(HashSet::from_iter(online_party_ids.iter().copied()));
+
+    let circuit = Arc::new(circuit);
+    let mut inputs = inputs;
+    let input_lengths = Arc::new(input_lengths);
+    let mut handles = Vec::with_capacity(parties);
+    for pid in online_party_ids.iter().copied() {
+        let circuit = circuit.clone();
+        let input = inputs.remove(&pid).unwrap();
+        let input_lengths = input_lengths.clone();
+        let offline_material = parties_offline_material.remove(&pid).unwrap();
+        let is_authenticated = is_authenticated.clone();
+        let online_parties_set = online_parties_set.clone();
+        handles.push(std::thread::spawn(move || {
+            core_affinity::set_for_current(CoreId {
+                id: pid as usize + 1,
+            });
+            let offline_material = offline_material;
+            party_run::<PACKING, _, FC, _, _>(
+                pid,
+                online_parties_set,
+                circuit,
+                input,
+                input_lengths,
+                is_authenticated,
+                &offline_material,
+                base_port,
+            );
+        }));
+    }
+    handles.into_iter().for_each(|h| h.join().unwrap());
+    info!("Done!");
+    // c.bench_function(format!("{} semi malicious online", id).as_str(), |b| {
+    //     let runtime = tokio::runtime::Builder::new_multi_thread()
+    //         .worker_threads(4)
+    //         .enable_all()
+    //         .thread_stack_size(32 * 1024 * 1024)
+    //         .build()
+    //         .unwrap();
+    //     b.iter_custom(|_| {
+    //         let input_lengths = input_lengths.clone();
+    //         let circuit = circuit.clone();
+    //         let inputs = inputs.clone();
+    //         let parties_offline_material = parties_offline_material.clone();
+    //     })
+    // });
+}
+pub fn party_run<
+    const PACKING: usize,
+    PF: PackedField<GF2, PACKING>,
+    FC: FieldContainer<PF>,
+    PS: PackedSenderCorrelationGenerator + 'static,
+    D: PackedKeysDealer<PS> + 'static,
+>(
+    party_id: PartyId,
+    party_ids: Arc<HashSet<PartyId>>,
+    circuit: impl AsRef<ParsedCircuit>,
+    input: Vec<PF>,
+    input_lengths: Arc<HashMap<PartyId, (usize, usize)>>,
+    is_authenticated: bool,
+    offline_material: &MaliciousSecurityOffline<
+        PACKING,
+        PF,
+        GF64,
+        PcgBasedPairwiseBooleanCorrelation<PACKING, PF, PS, D>,
+    >,
+    base_port: u16,
+) -> Result<Vec<PF>, ()> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (router, mut engine) =
+                set_up_router_for_party(party_id, party_ids.as_ref(), base_port).await;
+            // Pre Online
+            let router_handle = tokio::spawn(router.launch());
+
+            let mut pre = {
+                let mut engine = engine.sub_protocol("PRE-ONLINE");
+                offline_material
+                    .into_pre_online_material(&mut engine, circuit)
+                    .await
+            };
+
+            // Online
+            let (output, duration) = {
+                let start = Instant::now();
+                let o = pre
+                    .online_malicious_computation::<FC>(
+                        &mut engine,
+                        &input,
+                        GF64::two(),
+                        GF64::three(),
+                        GF64::four(),
+                        &input_lengths,
+                        is_authenticated,
+                    )
+                    .await
+                    .ok_or(());
+                let duration = start.elapsed();
+                (o, duration)
+            };
+            info!("Running took: {}", duration.as_millis());
+            let total_bytes: usize = router_handle.await.unwrap();
+            info!("Total bytes:{}", total_bytes);
+            output
+        })
 }
 pub fn bench_2p_semi_honest(c: &mut Criterion) {
     let path = Path::new("circuits/aes_128.txt");

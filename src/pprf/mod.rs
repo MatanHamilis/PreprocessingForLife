@@ -8,7 +8,7 @@ use crate::{
     pseudorandom::prg::{double_prg_field, double_prg_many_inplace, fill_prg},
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Copy)]
 pub struct PackedPprfSender {
     pub seed: GF128,
     pub depth: usize,
@@ -92,7 +92,7 @@ pub async fn distributed_pprf_sender(
     Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PackedPprfReceiver {
     pub punctured_index: usize,
     pub subtree_seeds: Vec<GF128>,

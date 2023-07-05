@@ -20,7 +20,7 @@ use super::{
     verify::{self, statement_length, OfflineCircuitVerify},
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct MaliciousSecurityOffline<
     const PACKING: usize,
     PF: PackedField<GF2, PACKING>,
@@ -114,18 +114,18 @@ where
         return triples_verdict;
     }
     pub async fn into_pre_online_material<E: MultiPartyEngine, C: AsRef<ParsedCircuit>>(
-        self,
+        &self,
         _: &mut E,
         circuit: C,
     ) -> PreOnlineMaterial<PACKING, PF, F, C, SHO> {
         // In this phase we expand the compressed correlations, right before the online phase.
         let Self {
-            mut semi_honest_offline_correlation,
+            semi_honest_offline_correlation,
             output_wire_mask_commitments,
             offline_verification_material,
             dealer_verification_material: _,
             _phantom: _,
-        } = self;
+        } = &self;
         let output_wire_mask_shares =
             semi_honest_offline_correlation.get_circuit_output_wires_masks_shares(circuit.as_ref());
         let input_wire_mask_shares =
@@ -134,14 +134,15 @@ where
             .get_personal_circuit_input_wires_masks()
             .to_vec();
 
+        let mut semi_honest_offline_correlation = semi_honest_offline_correlation.clone();
         semi_honest_offline_correlation.pre_online_phase_preparation(circuit.as_ref());
 
         PreOnlineMaterial {
             circuit,
-            output_wire_mask_commitments,
+            output_wire_mask_commitments: output_wire_mask_commitments.clone(),
             output_wire_mask_shares,
             input_wire_mask_shares,
-            offline_verification_material,
+            offline_verification_material: offline_verification_material.clone(),
             semi_honest_offline_correlation,
             my_input_mask,
         }
@@ -177,7 +178,7 @@ where
     pub async fn online_malicious_computation<FC: FieldContainer<PF>>(
         &mut self,
         engine: &mut impl MultiPartyEngine,
-        my_input: Vec<PF>,
+        my_input: &[PF],
         two: F,
         three: F,
         four: F,
@@ -396,7 +397,7 @@ mod tests {
                 let o = pre
                     .online_malicious_computation::<FC>(
                         &mut engine,
-                        input,
+                        &input,
                         two,
                         three,
                         four,

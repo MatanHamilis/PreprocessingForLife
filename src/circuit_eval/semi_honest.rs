@@ -200,7 +200,7 @@ impl FieldContainer<PackedGF2> for PackedGF2Container {
 }
 #[async_trait]
 pub trait OfflineSemiHonestCorrelation<CF: FieldElement>:
-    Serialize + DeserializeOwned + Send + Sync
+    Serialize + DeserializeOwned + Send + Sync + Clone
 {
     type Dealer: Sync + Send;
     fn get_personal_circuit_input_wires_masks(&self) -> &[CF];
@@ -248,7 +248,7 @@ pub trait OfflineSemiHonestCorrelation<CF: FieldElement>:
     );
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(bound = "PS: Serialize + DeserializeOwned")]
 pub struct PcgBasedPairwiseBooleanCorrelation<
     const N: usize,
@@ -952,6 +952,7 @@ pub async fn multi_party_semi_honest_eval_circuit<
     let mut wires = vec![F::zero(); wires_num];
 
     let time = Instant::now();
+    info!("Starting obtain masked and shared input");
     let masked_input = obtain_masked_and_shared_input(
         engine,
         parties_input_pos_and_length,
