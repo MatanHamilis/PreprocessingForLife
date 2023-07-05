@@ -6,16 +6,19 @@ use silent_party::fields::GF64;
 use std::time::Instant;
 
 pub fn mul_benchmark(c: &mut Criterion) {
-    c.bench_function("mul_bench", |b| {
+    c.bench_function("mul_bench_custom", |b| {
         b.iter_custom(|iters| {
             let mut rng = &mut OsRng;
-            let a: Vec<_> = (0..iters).map(|_| GF128::random(&mut rng)).collect();
-            let b: Vec<_> = (0..iters).map(|_| GF128::random(&mut rng)).collect();
+            let mut a: Vec<_> = (0..iters).map(|_| GF64::random(&mut rng)).collect();
+            let b: Vec<_> = (0..iters).map(|_| GF64::random(&mut rng)).collect();
             let start = Instant::now();
             for i in 0..iters as usize {
-                black_box(a[i] * b[i]);
+                a[i] = a[i] * b[i];
             }
-            start.elapsed()
+            let end = start.elapsed();
+            black_box(a);
+            black_box(b);
+            end
         })
     });
 }
@@ -59,15 +62,17 @@ pub fn mul_benchmark_with_vec(c: &mut Criterion) {
         bench.iter_batched(
             || {
                 (
-                    vec![GF64::random(&mut rng); 1 << 20],
-                    vec![GF64::random(&mut rng); 1 << 20],
+                    vec![GF64::random(&mut rng); 1 << 25],
+                    vec![GF64::random(&mut rng); 1 << 25],
                 )
             },
             |(mut a, b)| {
+                let time = Instant::now();
                 black_box(a.iter_mut().zip(b.iter()).for_each(|(a, b)| {
                     (*a *= *b);
                 }));
                 black_box(a);
+                println!("Time: {}", time.elapsed().as_millis());
             },
             BatchSize::SmallInput,
         );

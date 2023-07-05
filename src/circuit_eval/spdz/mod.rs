@@ -1,4 +1,6 @@
-use std::{assert_eq, collections::HashMap, debug_assert, ops::Mul, print, unimplemented};
+use std::{
+    assert_eq, collections::HashMap, debug_assert, ops::Mul, print, time::Duration, unimplemented,
+};
 
 use aes_prng::AesRng;
 use blake3::{Hash, OUT_LEN};
@@ -313,7 +315,6 @@ pub async fn online_spdz<
                 w.add_public_value_into(o, &mac_share, is_first);
             })
     }
-    info!("Input preparation time: {}", time.elapsed().as_millis());
     // Semi-honest Computation
 
     let mut open_triples_iter = triples.iter().enumerate();
@@ -322,9 +323,12 @@ pub async fn online_spdz<
     let mut gates = Vec::new();
     let mut proof_values = Vec::new();
     let time = Instant::now();
+    let mut non_comm_time = Duration::new(0, 0);
+    let mut comm_time = Duration::new(0, 0);
     for layer in circuit.gates.iter() {
         msgs.clear();
         gates.clear();
+        let time = Instant::now();
         for gate in layer.iter() {
             match gate {
                 &ParsedGate::XorGate { input, output } => {
@@ -348,6 +352,8 @@ pub async fn online_spdz<
                 }
             }
         }
+        non_comm_time += time.elapsed();
+        let time = Instant::now();
         engine.broadcast(&msgs);
         for _ in 0..peers_num {
             let (peer_msg, _): (Vec<(PF, PF)>, _) = engine.recv().await.unwrap();
@@ -359,6 +365,8 @@ pub async fn online_spdz<
                     msg.1 += peer_msg.1;
                 })
         }
+        comm_time += time.elapsed();
+        let time = Instant::now();
         gates
             .iter()
             .copied()
@@ -378,18 +386,28 @@ pub async fn online_spdz<
                 proof_values.push(check_second_opening);
                 wires[*output] =
                     wires[input[0]].mul_compute(&wires[input[1]], opening.0, opening.1, bt);
-            })
+            });
+        non_comm_time += time.elapsed();
     }
+    info!("Non Communication Time: {}ms", non_comm_time.as_millis());
+    info!("Communication Time: {}ms", comm_time.as_millis());
     info!("Semi Honest Time: {}", time.elapsed().as_millis());
     let challenge: [u8; 16] = check_seed.online_decommit(engine).await;
     let mut rng = AesRng::from_seed(challenge);
 
     // Verify Openings
     let time = Instant::now();
+    info!("Proof Values Len:{}", proof_values.len());
+    info!("Proof Values [0] Len:{}", proof_values[0].len());
+    let check_value_time = Instant::now();
     let check_value: VF = proof_values
         .iter()
         .map(|p| p.iter().map(|pp| *pp * VF::random(&mut rng)).sum())
         .sum();
+    info!(
+        "Check Value Computation: {}ms",
+        check_value_time.elapsed().as_millis()
+    );
     let commitment = blake3::hash(&bincode::serialize(&check_value).unwrap());
     engine.broadcast(commitment.as_bytes());
     let mut comms = HashMap::new();

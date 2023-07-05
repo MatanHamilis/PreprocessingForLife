@@ -8,6 +8,7 @@ use std::{
     mem::MaybeUninit,
 };
 
+const WIDE_AND_WIDTH: usize = 0;
 #[derive(Clone, Copy, Debug)]
 pub enum ParsedGate {
     AndGate {
@@ -23,9 +24,9 @@ pub enum ParsedGate {
         output: usize,
     },
     WideAndGate {
-        input: [usize; 128],
+        input: [usize; WIDE_AND_WIDTH],
         input_bit: usize,
-        output: [usize; 128],
+        output: [usize; WIDE_AND_WIDTH],
     },
 }
 
@@ -282,12 +283,12 @@ fn parse_regular_gate_line(line: &str) -> Option<ParsedGate> {
             assert_eq!(129, total_input);
             assert_eq!(128, total_output);
             let common_input = line_iter.next_usize()?;
-            let mut wide_input: [MaybeUninit<usize>; 128] = MaybeUninit::uninit_array();
-            let mut wide_output: [MaybeUninit<usize>; 128] = MaybeUninit::uninit_array();
-            for i in 0..128 {
+            let mut wide_input: [MaybeUninit<usize>; WIDE_AND_WIDTH] = MaybeUninit::uninit_array();
+            let mut wide_output: [MaybeUninit<usize>; WIDE_AND_WIDTH] = MaybeUninit::uninit_array();
+            for i in 0..WIDE_AND_WIDTH {
                 wide_input[i].write(line_iter.next_usize()?);
             }
-            for i in 0..128 {
+            for i in 0..WIDE_AND_WIDTH {
                 wide_output[i].write(line_iter.next_usize()?);
             }
             let input = unsafe { std::mem::transmute(wide_input) };

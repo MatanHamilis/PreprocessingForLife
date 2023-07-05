@@ -36,37 +36,88 @@ pub fn bench_mem_random(c: &mut Criterion) {
         b.iter(|| black_box((thread_rng().next_u32() as usize) & (VEC_SIZE - 1)));
     });
 }
+#[derive(Clone, Copy)]
+struct UnsafePtr<T> {
+    ptr: *mut T,
+}
+unsafe impl<T> Send for UnsafePtr<T> {}
+
 pub fn bench_mem_strides(c: &mut Criterion) {
-    const ITERS: usize = 10;
+    const STRIDE: usize = 1024;
+    const ITERS: usize = (1 << 30) / (STRIDE * 8 * 2);
     c.bench_function("mem_strides_64", |b| {
-        const VEC_SIZE: usize = 1 << 22;
-        let mut v = vec![[0u64; 8]; VEC_SIZE];
+        const VEC_SIZE: usize = 1 << 19;
+        let mut v = vec![[0u64; STRIDE]; VEC_SIZE];
         for (i, v_item) in v.iter_mut().enumerate() {
             for j in 0..v_item.len() {
                 v_item[j] = j as u64;
             }
         }
-        let mut rng = AesRng::from_random_seed();
+        let v_ptr = UnsafePtr {
+            ptr: unsafe { v.as_mut_ptr() },
+        };
+        let v_len = v.len();
         b.iter(|| {
-            for _ in 0..ITERS {
-                let a = v[rng.next_u32() as usize & (VEC_SIZE - 1)];
-                black_box(a);
-            }
+            rayon::join(
+                move || {
+                    let mut buf = [0u64; STRIDE];
+                    let c = 113usize;
+                    let d = 291;
+                    let mut idx = 1usize;
+                    let ptr = v_ptr;
+                    let v_slice = unsafe { std::slice::from_raw_parts_mut(ptr.ptr, v_len) };
+                    for _ in 0..ITERS {
+                        {
+                            for i in 0..STRIDE {
+                                let a = v_slice[idx & (VEC_SIZE - 1)][i];
+                                black_box(a);
+                                // buf[i] ^= a;
+                            }
+                            idx = idx * c + d;
+                        }
+                    }
+                    black_box(buf);
+                },
+                move || {
+                    let mut buf = [0u64; STRIDE];
+                    let c = 118usize;
+                    let d = 295;
+                    let mut idx = 1usize;
+                    let ptr = v_ptr;
+                    let v_slice = unsafe { std::slice::from_raw_parts_mut(ptr.ptr, v_len) };
+                    for _ in 0..ITERS {
+                        {
+                            for i in 0..STRIDE {
+                                let a = v_slice[idx & (VEC_SIZE - 1)][i];
+                                black_box(a);
+                                // buf[i] ^= a;
+                            }
+                            idx = idx * c + d;
+                        };
+                    }
+                    black_box(buf);
+                },
+            );
         });
     });
     c.bench_function("mem_strides_128", |b| {
         const VEC_SIZE: usize = 1 << 19;
-        let mut v = vec![[0u64; 80]; VEC_SIZE];
+        let mut v = vec![[0u64; STRIDE]; VEC_SIZE];
         for (i, v_item) in v.iter_mut().enumerate() {
             for j in 0..v_item.len() {
                 v_item[j] = j as u64;
             }
         }
-        let mut rng = AesRng::from_random_seed();
+        let d = 5;
+        let c = 312;
+        let mut last = 1usize;
         b.iter(|| {
-            for _ in 0..ITERS / 10 {
-                let a = v[rng.next_u32() as usize & (VEC_SIZE - 1)];
-                black_box(a);
+            for _ in 0..ITERS * 2 {
+                last = d * last + c;
+                for i in 0..STRIDE {
+                    let a = v[last & (VEC_SIZE - 1)][i];
+                    black_box(a);
+                }
             }
         });
     });
@@ -80,5 +131,28 @@ pub fn bench_mem_strides(c: &mut Criterion) {
         b.iter(|| black_box((thread_rng().next_u64() as usize) & (VEC_SIZE - 1)));
     });
 }
-criterion_group!(benches, bench_mem_random, bench_mem_strides);
+fn bench_xor(c: &mut Criterion) {
+    c.bench_function("xor_local", |bencher| {
+        let a = 1234u64;
+        let b = 5667u64;
+        let iters = 1 << 30;
+        bencher.iter(|| {
+            for i in 0..iters / (8 * 16) {
+                black_box(a ^ b);
+                black_box(a ^ b);
+                black_box(a ^ b);
+                black_box(a ^ b);
+                black_box(a ^ b);
+                black_box(a ^ b);
+                black_box(a ^ b);
+                black_box(a ^ b);
+                black_box(a ^ b);
+                black_box(a ^ b);
+                black_box(a ^ b);
+                black_box(a ^ b);
+            }
+        })
+    });
+}
+criterion_group!(benches, bench_mem_random, bench_mem_strides, bench_xor);
 criterion_main!(benches);
