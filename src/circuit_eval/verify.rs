@@ -21,7 +21,7 @@ use crate::{
     engine::{MultiPartyEngine, PartyId},
     fields::{FieldElement, PackedField},
     pcg::{RegularBeaverTriple, WideBeaverTriple},
-    zkfliop::{self, dealer, prover_offline, verifier_offline, OfflineProver, OfflineVerifier},
+    zkfliop::{self, dealer, OfflineProver, OfflineVerifier},
 };
 
 use super::{

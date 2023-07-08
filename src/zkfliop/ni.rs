@@ -11,7 +11,7 @@ use crate::{
     zkfliop::{interpolate, PowersIterator},
 };
 
-use super::{compute_round_count_and_m, make_round_proof, multi_eval_at_point};
+use super::{compute_round_count, make_round_proof, multi_eval_at_point};
 
 fn compute_new_hash<F: FieldElement>(
     current_hash: &[u8; OUT_LEN],
@@ -63,7 +63,7 @@ fn random_oracle(commits: &[[u8; OUT_LEN]]) -> impl RngCore + CryptoRng {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ZkFliopProof<F: FieldElement> {
     #[serde(bound = "")]
-    proof_shares: Vec<[F; 3]>,
+    proof_shares: Vec<Vec<F>>,
     commit_blinders: Vec<[u8; 16]>,
     commit_idx: usize,
     commits: Vec<Vec<[u8; OUT_LEN]>>,
@@ -80,7 +80,7 @@ impl<F: FieldElement> ZkFliopProof<F> {
             commit_idx,
         }
     }
-    fn push_proof_shares(&mut self, proof_shares: [F; 3]) {
+    fn push_proof_shares(&mut self, proof_shares: Vec<F>) {
         self.proof_shares.push(proof_shares);
     }
     fn push_blinders(&mut self, blinder: [u8; 16]) {
@@ -96,11 +96,12 @@ pub fn prove<'a, F: FieldElement>(
     two: F,
     three: F,
     four: F,
+    log_folding_factor: usize,
 ) -> Vec<ZkFliopProof<F>> {
     let mut parties_shares_hashes: Vec<_> = parties_statements.map(|v| hash_statement(v)).collect();
     let verifiers_num = parties_shares_hashes.len();
     let mut z = &mut statement[..];
-    let (_, round_count) = compute_round_count_and_m(z.len());
+    let round_count = compute_round_count(z.len(), log_folding_factor);
     let mut output: Vec<ZkFliopProof<F>> = (0..verifiers_num)
         .map(|i| ZkFliopProof::new(round_count, i))
         .collect();
@@ -180,7 +181,7 @@ pub fn obtain_check_value<F: FieldElement>(
 ) -> (bool, [F; 4]) {
     let mut statement_hash = hash_statement(&statement_share);
     let commit_idx = proof.commit_idx;
-    let (_, round_count) = compute_round_count_and_m(statement_share.len());
+    let (_, round_count) = compute_round_count(statement_share.len());
 
     let mut checks_vector = Vec::with_capacity(round_count);
     let mut z = &mut statement_share[..];

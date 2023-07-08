@@ -82,6 +82,19 @@ pub trait FieldElement:
     fn four() -> Self {
         Self::two() * Self::two()
     }
+    fn number(mut number: u32) -> Self {
+        let mut pow = Self::one();
+        let two = Self::two();
+        let mut output = Self::zero();
+        while number != 0 {
+            if number & 1 == 1 {
+                output += pow;
+            }
+            pow *= two;
+            number >>= 1;
+        }
+        output
+    }
 }
 
 pub trait PackedField<F: FieldElement, const PACKING: usize>: FieldElement {
