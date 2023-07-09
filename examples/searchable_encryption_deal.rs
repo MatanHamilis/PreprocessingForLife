@@ -102,15 +102,15 @@ struct PartyArgs {
 #[derive(Clone, Subcommand)]
 enum Party {
     /// Role of the first participating party
-    Alice {
+    Server {
         /// The port on which to accept Bobs connection.
         #[arg(default_value_t = 45679)]
-        listen_bob_port: u16,
+        listen_port: u16,
     },
     /// Role of the second participating party
-    Bob {
+    Client {
         /// The ip and port of Alice.
-        alice: SocketAddrV4,
+        server_address: SocketAddrV4,
     },
 }
 
@@ -125,7 +125,7 @@ fn role_to_party_id(role: &Role) -> PartyId {
             party,
             party_args,
         } => match party {
-            Party::Alice { listen_bob_port: _ } => ALICE_ID,
+            Party::Server { listen_port: _ } => ALICE_ID,
             _ => BOB_ID,
         },
         _ => DEALER_ID,
@@ -140,7 +140,7 @@ fn role_to_listen_port(role: &Role) -> u16 {
             party,
             party_args,
         } => match party {
-            Party::Alice { listen_bob_port } => *listen_bob_port,
+            Party::Server { listen_port: listen_bob_port } => *listen_bob_port,
             _ => 0,
         },
     }
@@ -176,7 +176,7 @@ fn role_to_peers(role: &Role) -> HashMap<PartyId, SocketAddrV4> {
                 let dealer_info = party_args.dealer_info.clone().unwrap();
                 peer_info.push((DEALER_ID, dealer_info));
             }
-            if let Party::Bob { alice } = party {
+            if let Party::Client { server_address: alice } = party {
                 peer_info.push((ALICE_ID, *alice));
             }
             HashMap::from_iter(peer_info.into_iter())

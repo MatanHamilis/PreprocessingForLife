@@ -5,7 +5,7 @@
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(generic_const_exprs)]
 
-pub mod circuit_eval;
+// pub mod circuit_eval;
 pub mod commitment;
 pub mod engine;
 pub mod fields;

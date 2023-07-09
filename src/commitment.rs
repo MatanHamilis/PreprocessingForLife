@@ -102,7 +102,7 @@ impl OfflineCommitment {
             .copied()
             .filter(|v| v != &my_id)
             .collect();
-        let mut seeds = HashMap::with_capacity(peers.len() - 1);
+        let mut seeds = HashMap::with_capacity(peers.len());
         let mut v = Option::<(Box<[u8]>, PartyId)>::None;
         let self_len = self.commit_share.len();
         engine.broadcast(&self.commit_share);
