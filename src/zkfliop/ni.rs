@@ -45,10 +45,15 @@ fn commit_and_obtain_challenge<const PROOF_LEN: usize, F: FieldElement>(
 }
 pub fn hash_statement<F: FieldElement>(statement_share: &[F]) -> [u8; OUT_LEN] {
     let mut hasher = blake3::Hasher::new();
-    for v in statement_share {
-        v.hash(&mut hasher);
-    }
-    *hasher.finalize().as_bytes()
+    let size_in_bytes = std::mem::size_of::<F>();
+    let statement_share_size_in_bytes = statement_share.len() * size_in_bytes;
+    let statement_share_u8_slice = unsafe {
+        std::slice::from_raw_parts(
+            statement_share.as_ptr() as *const u8,
+            statement_share_size_in_bytes,
+        )
+    };
+    *blake3::hash(statement_share_u8_slice).as_bytes()
 }
 
 fn random_oracle(commits: &[[u8; OUT_LEN]]) -> impl RngCore + CryptoRng {

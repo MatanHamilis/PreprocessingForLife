@@ -70,3 +70,8 @@ harness = false
 [[bench]]
 name = "parallel"
 harness = false
+
+
+[[bench]]
+name = "zkfliop"
+harness = false

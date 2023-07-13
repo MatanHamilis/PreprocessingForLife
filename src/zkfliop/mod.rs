@@ -94,47 +94,120 @@ struct EvalCtx<F: FieldElement> {
     prefix_buf: Vec<F>,
     suffix_buf: Vec<F>,
     denoms: Vec<F>,
+    eval_points: usize,
+    coeffs: Vec<F>,
 }
 impl<F: FieldElement> EvalCtx<F> {
-    fn new(points: usize) -> Self {
-        let numbers: Vec<_> = (0..points).map(|i| F::number(i as u32)).collect();
-        let suffix_buf = vec![F::zero(); points];
-        let prefix_buf = vec![F::zero(); points];
-        let denoms: Vec<_> = (0..points)
+    fn new(interpolation_points: usize, eval_points: usize) -> Self {
+        let numbers: Vec<_> = (0..interpolation_points)
+            .map(|i| F::number(i as u32))
+            .collect();
+        let suffix_buf = vec![F::zero(); interpolation_points * eval_points];
+        let prefix_buf = vec![F::zero(); interpolation_points * eval_points];
+        let denoms: Vec<_> = (0..interpolation_points)
             .map(|i| {
-                ((0..i).chain(i + 1..points))
+                ((0..i).chain(i + 1..interpolation_points))
                     .map(|j| numbers[i] - numbers[j])
                     .fold(F::one(), |cur, acc| cur * acc)
             })
             .collect();
+        let coeffs = vec![F::zero(); interpolation_points * eval_points];
         Self {
             numbers,
             prefix_buf,
             suffix_buf,
             denoms,
+            eval_points,
+            coeffs,
         }
     }
-    fn prepare_at_point(&mut self, at: F) {
-        let l = self.denoms.len();
+    fn prepare_at_points(&mut self, at: &[F]) {
+        assert_eq!(at.len(), self.eval_points);
+        let M = self.denoms.len();
         // buffer prefixes [i] = (at - evals[0].0)....(at - evals[i-1].0).
         // buffer suffexies [i] = (at - evals[i+1].0)....(at - evals[l-1].0).
-        self.prefix_buf[0] = F::one();
-        self.suffix_buf[l - 1] = F::one();
-        for i in 0..(l - 1) {
-            self.prefix_buf[i + 1] = self.prefix_buf[i] * (at - self.numbers[i]);
-            self.suffix_buf[l - i - 2] =
-                self.suffix_buf[l - i - 1] * (at - self.numbers[l - i - 1]);
-        }
+        self.prefix_buf
+            .chunks_exact_mut(M)
+            .zip(self.suffix_buf.chunks_exact_mut(M))
+            .zip(at.iter())
+            .for_each(|((prefix_chunk, suffix_chunk), eval_point)| {
+                prefix_chunk[0] = F::one();
+                suffix_chunk[M - 1] = F::one();
+                for i in 0..(M - 1) {
+                    prefix_chunk[i + 1] = prefix_chunk[i] * (*eval_point - self.numbers[i]);
+                    suffix_chunk[M - i - 2] =
+                        suffix_chunk[M - i - 1] * (*eval_point - self.numbers[M - i - 1]);
+                }
+            });
+        self.prefix_buf
+            .chunks_exact(M)
+            .zip(self.suffix_buf.chunks_exact(M))
+            .enumerate()
+            .for_each(|(chunk_idx, (prefix_buf, suffix_buf))| {
+                (0..prefix_buf.len()).for_each(|in_chunk_idx| {
+                    self.coeffs[in_chunk_idx * self.eval_points + chunk_idx] =
+                        prefix_buf[in_chunk_idx] * suffix_buf[in_chunk_idx]
+                            / self.denoms[in_chunk_idx];
+                })
+            });
+        //ventually self.coeffs is ordered such that first we have Lagrange Coefficients for interpolation of all eval points that should be multiplied by the first interpolated point and so on..
+    }
+    fn interpolate_single_point(&self, evals: &[F], output: &mut [F]) {
+        let M = self.denoms.len();
+        let L = evals.len() / M;
+        assert_eq!(output.len(), L);
+        assert_eq!(evals.len(), L * M);
     }
     // Denoms are independent of evaluation point and therefore can be preprocessed.
-    fn interpolate<'a>(&self, mut evals: impl Iterator<Item = &'a F>) -> F {
-        let mut sum = F::zero();
-        let l = self.denoms.len();
-        for i in 0..l {
-            let cur_nom = self.prefix_buf[i] * self.suffix_buf[i];
-            sum += cur_nom * *evals.next().unwrap() / self.denoms[i];
+    fn interpolate_with_g<'a>(&self, evals: &[F], output: &mut [F]) {
+        let M = self.denoms.len();
+        output.iter_mut().for_each(|v| *v = F::zero());
+        let L = evals.len() / M;
+        assert_eq!(output.len(), self.eval_points);
+        assert_eq!(evals.len(), L * M);
+        // output[i*self.eval_points + j]=interpolation of i-th polynomial at point j.
+        // The first 'eval_count' elements are evals at 0, next 'eval_count' elements are evals at 1, etc...
+        // we take each coefficient
+        // The statement is structured as follows:
+        //
+        //                   evals of 0                         evals of 1                      evals of M-1
+        // | output | f_0(0) | f_1(0) |...| f_L-1(0)| f_0(1) | f_1(1) |...|f_L-1(1) |...| f_0(M-1) |...| f_L-1(M-1)
+        //
+        // If we rearrange it in a matrix we get (besides the first element)
+        //
+        //
+        // f_0(0)   f_1(0)  ... f_L-1(0)
+        // f_0(1)   f_1(1)  ... f_L-1(1)
+        //  ..         ..   ...    ..
+        // f_0(M-1) f_1(M-1)... f_L-1(M-1)
+        //
+        // We wish to multiply the matrix ,A from the right by the lagrange coefficient matrix.
+        // So that each polynomial f_i will be evaluated at additional points.
+        // Each time we take a block of M polynomials and eval their outputs.
+        // If the number of polynomials fill the cache line this should be good for utilizing memory.
+        // For every chunk of M polynomials we evaluation all of them on a set of `eval_points` points.
+        // First M will be evals at first point, next will be evals of second point etc...
+        // Since M is even we can make partial computation out of it.
+        let mut interpolation_buf = vec![F::zero(); M * self.eval_points];
+        for poly_chunk_base in (0..L).step_by(M) {
+            interpolation_buf.iter_mut().for_each(|v| *v = F::zero());
+            let poly_chunk_size = usize::min(L, poly_chunk_base + M) - poly_chunk_base;
+            for evalled in 0..M {
+                let in_coeff_idx = evalled * L + poly_chunk_base;
+                for eval_point in 0..self.eval_points {
+                    for p in 0..poly_chunk_size {
+                        interpolation_buf[eval_point * M + p] += evals[in_coeff_idx + p]
+                            * self.coeffs[eval_point + evalled * self.eval_points];
+                    }
+                }
+            }
+            output
+                .iter_mut()
+                .zip(interpolation_buf.chunks(M))
+                .for_each(|(o, chunk)| {
+                    *o += g(&chunk[0..poly_chunk_size]);
+                });
         }
-        sum
     }
 }
 pub fn dealer<F: FieldElement>(
@@ -362,6 +435,8 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     offline_material: &OfflineProver<F>,
     mut auth_statement: Option<Vec<F>>,
     log_folding_factor: usize,
+    eval_ctx_for_challenge_m_points: &mut EvalCtx<F>,
+    eval_ctx_for_challenge_2m_minus_one_points: &mut EvalCtx<F>,
 ) {
     let OfflineProver {
         proof_masks,
