@@ -31,10 +31,7 @@ pub(crate) fn diff_arrays<const LENGTH: usize, F: std::ops::Sub<F, Output = F> +
 ) -> [F; LENGTH] {
     core::array::from_fn(|i| a[i] - b[i])
 }
-pub(crate) fn diff_assign_arrays<const LENGTH: usize, F: std::ops::SubAssign<F> + Copy>(
-    a: &mut [F; LENGTH],
-    b: &[F; LENGTH],
-) {
+pub(crate) fn diff_assign_arrays<F: std::ops::SubAssign<F> + Copy>(a: &mut [F], b: &[F]) {
     a.iter_mut().zip(b.iter()).for_each(|(ai, bi)| *ai -= *bi);
 }
 

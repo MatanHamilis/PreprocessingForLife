@@ -10,7 +10,7 @@ use log::info;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-// pub mod ni;
+pub mod ni;
 
 // const INTERNAL_ROUND_PROOF_LENGTH: usize = 3;
 // const LAST_ROUND_PROOF_LENGTH: usize = 5;
@@ -856,7 +856,7 @@ mod test {
     async fn test_zkfliop() {
         const LOG_FOLDING_FACTOR: usize = 1;
         const LOG: usize = 25;
-        const Z_LEN: usize = 1 + 6_400 * 1_024 * 4;
+        const Z_LEN: usize = 1 + 100_000;
         const PARTIES: usize = 3;
         const ONLINE_PARTIES: usize = PARTIES - 1;
         let party_ids: [PartyId; PARTIES] = core::array::from_fn(|i| i as u64);

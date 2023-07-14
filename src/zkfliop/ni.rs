@@ -8,10 +8,10 @@ use crate::{
     add_assign_arrays, diff_assign_arrays,
     engine::MultiPartyEngine,
     fields::FieldElement,
-    zkfliop::{interpolate, PowersIterator},
+    zkfliop::{internal_round_proof_length, last_round_proof_length, PowersIterator},
 };
 
-use super::{compute_round_count, make_round_proof, multi_eval_at_point};
+use super::{compute_round_count, make_round_proof, multi_eval_at_point, ProverCtx, VerifierCtx};
 
 fn compute_new_hash<F: FieldElement>(
     current_hash: &[u8; OUT_LEN],
@@ -25,9 +25,9 @@ fn compute_new_hash<F: FieldElement>(
     }
     *hasher.finalize().as_bytes()
 }
-fn commit_and_obtain_challenge<const PROOF_LEN: usize, F: FieldElement>(
+fn commit_and_obtain_challenge<F: FieldElement>(
     parties_transcript_hashes: &mut [[u8; OUT_LEN]],
-    proof_shares: &[[F; PROOF_LEN]],
+    proof_shares: &[Vec<F>],
     mut rng: impl CryptoRng + RngCore,
 ) -> (F, Vec<[u8; 16]>) {
     let blinding_factors: Vec<_> = parties_transcript_hashes
@@ -73,15 +73,15 @@ pub struct ZkFliopProof<F: FieldElement> {
     commit_idx: usize,
     commits: Vec<Vec<[u8; OUT_LEN]>>,
     #[serde(bound = "")]
-    last_round_proof_share: [F; 7],
+    last_round_proof_share: Vec<F>,
 }
 impl<F: FieldElement> ZkFliopProof<F> {
-    fn new(round_count: usize, commit_idx: usize) -> Self {
+    fn new(round_count: usize, commit_idx: usize, log_folding_factor: usize) -> Self {
         Self {
             proof_shares: Vec::with_capacity(round_count),
             commit_blinders: Vec::with_capacity(round_count),
             commits: Vec::with_capacity(round_count),
-            last_round_proof_share: [F::zero(); 7],
+            last_round_proof_share: vec![F::zero(); last_round_proof_length(log_folding_factor)],
             commit_idx,
         }
     }
@@ -98,74 +98,149 @@ impl<F: FieldElement> ZkFliopProof<F> {
 pub fn prove<'a, F: FieldElement>(
     parties_statements: impl Iterator<Item = &'a Vec<F>>,
     mut statement: Vec<F>,
-    two: F,
-    three: F,
-    four: F,
     log_folding_factor: usize,
+    prover_ctx: &mut ProverCtx<F>,
 ) -> Vec<ZkFliopProof<F>> {
+    let ProverCtx {
+        eval_ctx_internal_round_polys_challenge,
+        eval_ctx_internal_round_proof_challenge,
+        eval_ctx_internal_round_proof_gen,
+        eval_ctx_last_round_proof_gen,
+        eval_ctx_auth_polys,
+        eval_ctx_auth_proof,
+    } = prover_ctx;
     let mut parties_shares_hashes: Vec<_> = parties_statements.map(|v| hash_statement(v)).collect();
+    let M = 1 << log_folding_factor;
     let verifiers_num = parties_shares_hashes.len();
     let mut z = &mut statement[..];
     let round_count = compute_round_count(z.len(), log_folding_factor);
     let mut output: Vec<ZkFliopProof<F>> = (0..verifiers_num)
-        .map(|i| ZkFliopProof::new(round_count, i))
+        .map(|i| ZkFliopProof::new(round_count, i, log_folding_factor))
         .collect();
     let mut rng = AesRng::from_random_seed();
+    let internal_round_proof_len = internal_round_proof_length(log_folding_factor);
     for _ in 1..round_count {
-        let round_proof = make_round_proof(z, two);
-        let mut proof_shares = Vec::with_capacity(verifiers_num);
-        let mut last_masks = round_proof;
+        let round_proof =
+            make_round_proof(z, log_folding_factor, eval_ctx_internal_round_proof_gen);
+        let mut proof_shares: Vec<Vec<F>> = Vec::with_capacity(verifiers_num);
+        let mut last_masks = round_proof.clone();
         for _ in 0..verifiers_num - 1 {
-            proof_shares.push(core::array::from_fn(|_| F::random(&mut rng)));
+            proof_shares.push(
+                (0..internal_round_proof_len)
+                    .map(|_| F::random(&mut rng))
+                    .collect(),
+            );
             diff_assign_arrays(&mut last_masks, proof_shares.last().unwrap());
         }
         proof_shares.push(last_masks);
         let (challenge, blinders) =
             commit_and_obtain_challenge(&mut parties_shares_hashes[..], &proof_shares, &mut rng);
+        eval_ctx_internal_round_polys_challenge.prepare_at_points(std::slice::from_ref(&challenge));
+        eval_ctx_internal_round_proof_challenge.prepare_at_points(std::slice::from_ref(&challenge));
         for ((p, blinder), proof_share) in output
             .iter_mut()
             .zip(blinders.into_iter())
-            .zip(proof_shares.iter())
+            .zip(proof_shares.into_iter())
         {
             p.push_blinders(blinder);
-            p.push_proof_shares(*proof_share);
+            p.push_proof_shares(proof_share);
             p.push_commits(parties_shares_hashes.clone());
         }
-        z[0] = multi_eval_at_point(z, &round_proof, challenge, two);
+        z[0] = multi_eval_at_point(
+            z,
+            &round_proof,
+            challenge,
+            log_folding_factor,
+            eval_ctx_internal_round_polys_challenge,
+            eval_ctx_internal_round_proof_challenge,
+        );
         let z_len = z.len();
-        z = &mut z[..=z_len / 2];
+        let L = (z_len - 1) / M;
+        let next_round_size = ((L + 2 * M - 1) / (2 * M)) * (2 * M);
+        for i in L..next_round_size {
+            z[i + 1] = F::zero();
+        }
+        z = &mut z[..=next_round_size];
     }
-    debug_assert_eq!(z.len(), 5);
-    let s_0: F = F::random(&mut rng);
-    let s_1: F = F::random(&mut rng);
-    let mut f_0 = [
-        (F::zero(), z[1]),
-        (F::one(), z[3]),
-        (two, s_0),
-        (three, F::zero()),
-        (four, F::zero()),
-    ];
-    let mut f_1 = [
-        (F::zero(), z[2]),
-        (F::one(), z[4]),
-        (two, s_1),
-        (three, F::zero()),
-        (four, F::zero()),
-    ];
-    f_0[3].1 = interpolate(&f_0[0..3], three);
-    f_0[4].1 = interpolate(&f_0[0..3], four);
-    f_1[3].1 = interpolate(&f_1[0..3], three);
-    f_1[4].1 = interpolate(&f_1[0..3], four);
-    let q: [_; 5] = core::array::from_fn(|i| f_0[i].1 * f_1[i].1);
-    let mut last_proof_share = [s_0, s_1, q[0], q[1], q[2], q[3], q[4]];
+    let M = 1 << log_folding_factor;
+    debug_assert_eq!(z.len(), 1 + 2 * M);
+    let mut last_round_proof = Vec::with_capacity(last_round_proof_length(log_folding_factor));
+    let (s_0, s_1) = (F::random(&mut rng), F::random(&mut rng));
+    last_round_proof.push(s_0);
+    last_round_proof.push(s_1);
+    for i in 0..M {
+        last_round_proof.push(z[1 + 2 * i] * z[2 + 2 * i]);
+    }
+    last_round_proof.push(s_0 * s_1);
+    // let mut eval_ctx_m_plus_one_points = EvalCtx::<F>::new(M + 1);
+    let last_round_buf: Vec<_> = z[1..].iter().chain([s_0, s_1].iter()).copied().collect();
+    // We have both polynomials evaluated on points 0..M-1.
+    // The zk blinders are evaluations at point M.
+    // p(x) = g(f_0(x),f_1(x)) is of deg 2*M so we need 2*M+1 evaluations of it.
+    // We need to evaluate therefore each f_i on M+1..2*M which is 2*M
+    // evaluations overall.
+    let mut last_round_interpolation_output = vec![F::zero(); 2 * M];
+    eval_ctx_last_round_proof_gen
+        .interpolate(&last_round_buf, &mut last_round_interpolation_output);
+    last_round_interpolation_output
+        .chunks_exact(2)
+        .for_each(|c| last_round_proof.push(c[0] * c[1]));
     let mut last_proof_shares: Vec<_> = (1..verifiers_num)
         .map(|_| {
-            let proof_share = core::array::from_fn(|_| F::random(&mut rng));
-            diff_assign_arrays(&mut last_proof_share, &proof_share);
+            let proof_share: Vec<_> = (0..last_round_proof.len())
+                .map(|_| F::random(&mut rng))
+                .collect();
+            diff_assign_arrays(&mut last_round_proof, &proof_share);
             proof_share
         })
         .collect();
-    last_proof_shares.push(last_proof_share);
+    last_proof_shares.push(last_round_proof);
+    // last_round_proof
+    //     .iter_mut()
+    //     .zip(proof_masks_last_round.iter())
+    //     .for_each(|(p, a)| *p -= *a);
+    // engine.broadcast(last_round_proof);
+    // let r: F = last_round_challenge.online_decommit(&mut engine).await;
+    // // Decision
+    // let (betas, b_tilde_check_dealer, f_0_tilde_dealer, f_1_tilde_dealer, q_tilde_dealer): (
+    //     Vec<F>,
+    //     F,
+    //     F,
+    //     F,
+    //     F,
+    // ) = final_msg.online_decommit(&mut engine).await;
+    // /////////////////////
+    // debug_assert_eq!(z.len(), 5);
+    // let s_0: F = F::random(&mut rng);
+    // let s_1: F = F::random(&mut rng);
+    // let mut f_0 = [
+    //     (F::zero(), z[1]),
+    //     (F::one(), z[3]),
+    //     (two, s_0),
+    //     (three, F::zero()),
+    //     (four, F::zero()),
+    // ];
+    // let mut f_1 = [
+    //     (F::zero(), z[2]),
+    //     (F::one(), z[4]),
+    //     (two, s_1),
+    //     (three, F::zero()),
+    //     (four, F::zero()),
+    // ];
+    // f_0[3].1 = interpolate(&f_0[0..3], three);
+    // f_0[4].1 = interpolate(&f_0[0..3], four);
+    // f_1[3].1 = interpolate(&f_1[0..3], three);
+    // f_1[4].1 = interpolate(&f_1[0..3], four);
+    // let q: [_; 5] = core::array::from_fn(|i| f_0[i].1 * f_1[i].1);
+    // let mut last_proof_share = [s_0, s_1, q[0], q[1], q[2], q[3], q[4]];
+    // let mut last_proof_shares: Vec<_> = (1..verifiers_num)
+    //     .map(|_| {
+    //         let proof_share = core::array::from_fn(|_| F::random(&mut rng));
+    //         diff_assign_arrays(&mut last_proof_share, &proof_share);
+    //         proof_share
+    //     })
+    //     .collect();
+    // last_proof_shares.push(last_proof_share);
 
     let (_, blinders) =
         commit_and_obtain_challenge(&mut parties_shares_hashes[..], &last_proof_shares, &mut rng);
@@ -183,43 +258,51 @@ pub fn prove<'a, F: FieldElement>(
 pub fn obtain_check_value<F: FieldElement>(
     mut statement_share: Vec<F>,
     proof: &ZkFliopProof<F>,
+    log_folding_factor: usize,
+    verifier_ctx: &mut VerifierCtx<F>,
 ) -> (bool, [F; 4]) {
+    let VerifierCtx {
+        eval_ctx_internal_round_proof,
+        eval_ctx_internal_round_polys,
+        eval_ctx_last_round_polys,
+        eval_ctx_last_round_proof,
+    } = verifier_ctx;
     let mut statement_hash = hash_statement(&statement_share);
     let commit_idx = proof.commit_idx;
-    let (_, round_count) = compute_round_count(statement_share.len());
+    let round_count = compute_round_count(statement_share.len(), log_folding_factor);
 
     let mut checks_vector = Vec::with_capacity(round_count);
     let mut z = &mut statement_share[..];
     let mut bool = true;
+    let M = 1 << log_folding_factor;
     // Rounds
-    for ((proof_share @ &[q_0, q_1, q_2], blinder), commits) in proof
+    for ((proof_share, blinder), commits) in proof
         .proof_shares
         .iter()
         .zip(proof.commit_blinders.iter())
         .zip(proof.commits.iter())
     {
         let z_len = z.len();
+        let L = (z_len - 1) / M;
         statement_hash = compute_new_hash(&statement_hash, blinder, proof_share);
         let commit_to_check = commits[commit_idx];
         bool &= statement_hash == commit_to_check;
         let r: F = F::random(random_oracle(commits));
-        checks_vector.push(z[0] - q_0 - q_1);
-        let z_second_half =
-            unsafe { std::slice::from_raw_parts(z[z_len / 2 + 1..].as_ptr(), z_len / 2) };
-        z[1..=z_len / 2]
-            .par_iter_mut()
-            .zip(z_second_half.par_iter())
-            .for_each(|(f_zero, f_one)| {
-                let slope_i = *f_one - *f_zero;
-                *f_zero += r * slope_i;
-            });
-        let q_r = interpolate(&[(F::zero(), q_0), (F::one(), q_1), (F::two(), q_2)], r);
-        z[0] = q_r;
-        z = &mut z[..=z_len / 2];
+        eval_ctx_internal_round_polys.prepare_at_points(std::slice::from_ref(&r));
+        eval_ctx_internal_round_proof.prepare_at_points(std::slice::from_ref(&r));
+        checks_vector.push(z[0] - proof_share.iter().take(M).copied().sum::<F>());
+        let z_output = unsafe { std::slice::from_raw_parts_mut(z[1..1 + L].as_mut_ptr(), L) };
+        eval_ctx_internal_round_polys.interpolate(&z[1..], z_output);
+        let next_round_size = ((L + 2 * M - 1) / (2 * M)) * (2 * M);
+        for i in L..next_round_size {
+            z[i + 1] = F::zero();
+        }
+        eval_ctx_internal_round_proof.interpolate(&proof_share, &mut z[0..1]);
+        z = &mut z[..=next_round_size];
     }
     //last_round
-    debug_assert_eq!(z.len(), 5);
-    let last_round_proof: [F; 7] = proof.last_round_proof_share;
+    debug_assert_eq!(z.len(), 1 + 2 * M);
+    let last_round_proof = &proof.last_round_proof_share;
     let last_round_blinder = proof.commit_blinders.last().unwrap();
     let last_round_commits = proof.commits.last().unwrap();
     let commit_to_check = last_round_commits[commit_idx];
@@ -227,36 +310,25 @@ pub fn obtain_check_value<F: FieldElement>(
     bool &= statement_hash == commit_to_check;
     let mut rng = random_oracle(&last_round_commits);
     let r: F = F::random(&mut rng);
+    eval_ctx_last_round_polys.prepare_at_points(std::slice::from_ref(&r));
+    eval_ctx_last_round_proof.prepare_at_points(std::slice::from_ref(&r));
     let alpha = F::random(&mut rng);
-    let mut f_0_hat = [
-        (F::zero(), z[1]),
-        (F::one(), z[3]),
-        (F::two(), last_round_proof[0]),
-        (r, F::zero()),
-    ];
-    let mut f_1_hat = [
-        (F::zero(), z[2]),
-        (F::one(), z[4]),
-        (F::two(), last_round_proof[1]),
-        (r, F::zero()),
-    ];
-    let mut q_hat = [
-        (F::zero(), last_round_proof[2]),
-        (F::one(), last_round_proof[3]),
-        (F::two(), last_round_proof[4]),
-        (F::three(), last_round_proof[5]),
-        (F::four(), last_round_proof[6]),
-        (r, F::zero()),
-    ];
-    f_0_hat[3].1 = interpolate(&f_0_hat[0..3], f_0_hat[3].0);
-    f_1_hat[3].1 = interpolate(&f_1_hat[0..3], f_1_hat[3].0);
-    q_hat[5].1 = interpolate(&q_hat[0..5], q_hat[5].0);
-    checks_vector.push(z[0] - q_hat[0].1 - q_hat[1].1);
+    let interpolation_buf: Vec<F> = z[1..]
+        .iter()
+        .chain(&last_round_proof[0..2])
+        .copied()
+        .collect();
+    let mut f_hat_r = [F::zero(); 2];
+    eval_ctx_last_round_polys.interpolate(&interpolation_buf, &mut f_hat_r);
+    let mut q_hat_r = F::zero();
+    eval_ctx_last_round_proof
+        .interpolate(&last_round_proof[2..], std::slice::from_mut(&mut q_hat_r));
+    checks_vector.push(z[0] - last_round_proof[2..2 + M].iter().copied().sum());
     let check_value: F = PowersIterator::new(alpha)
         .zip(checks_vector)
         .map(|(a, b)| a * b)
         .sum();
-    (bool, [f_0_hat[3].1, f_1_hat[3].1, q_hat[5].1, check_value])
+    (bool, [f_hat_r[0], f_hat_r[1], q_hat_r, check_value])
 }
 
 pub async fn verify_check_value<F: FieldElement>(
@@ -288,15 +360,20 @@ mod test {
     use crate::{
         engine::LocalRouter,
         fields::{FieldElement, GF64},
+        zkfliop::{ProverCtx, VerifierCtx},
         UCTag,
     };
 
     use super::{obtain_check_value, prove, verify_check_value};
 
-    async fn test_nizk_fliop<F: FieldElement>(statement: &[F], parties: u64) {
+    async fn test_nizk_fliop<F: FieldElement>(
+        statement: &[F],
+        verifiers: u64,
+        log_folding_factor: usize,
+    ) {
         let mut last_vec = statement.to_vec();
         let mut rng = AesRng::from_random_seed();
-        let mut shares: Vec<Vec<F>> = (0..parties - 1)
+        let mut shares: Vec<Vec<F>> = (0..verifiers - 1)
             .map(|_| {
                 last_vec
                     .iter_mut()
@@ -309,14 +386,17 @@ mod test {
             })
             .collect();
         shares.push(last_vec);
+        let mut prover_ctx = ProverCtx::<F>::new(log_folding_factor);
+        let mut verifier_ctx: Vec<_> = (0..verifiers)
+            .map(|_| VerifierCtx::<F>::new(log_folding_factor))
+            .collect();
         let proofs = prove(
             shares.iter(),
             statement.to_vec(),
-            F::two(),
-            F::three(),
-            F::four(),
+            log_folding_factor,
+            &mut prover_ctx,
         );
-        let party_ids: Vec<_> = (1..=parties as u64).collect();
+        let party_ids: Vec<_> = (1..=verifiers as u64).collect();
         let party_ids_set: HashSet<u64> = HashSet::from_iter(party_ids.iter().copied());
         let (router, engines) = LocalRouter::new(UCTag::new(&"ROOT_TAG"), &party_ids_set);
         let handle = tokio::spawn(router.launch());
@@ -324,10 +404,14 @@ mod test {
             .into_iter()
             .zip(proofs.into_iter())
             .zip(engines.into_iter())
-            .map(|((share, proof), (_, engine))| async move {
-                let (is_commit_ok, input) = obtain_check_value(share, &proof);
-                Result::<bool, ()>::Ok(verify_check_value(engine, is_commit_ok, input).await)
-            })
+            .zip(verifier_ctx.into_iter())
+            .map(
+                |(((share, proof), (_, engine)), mut verifier_ctx)| async move {
+                    let (is_commit_ok, input) =
+                        obtain_check_value(share, &proof, log_folding_factor, &mut verifier_ctx);
+                    Result::<bool, ()>::Ok(verify_check_value(engine, is_commit_ok, input).await)
+                },
+            )
             .collect();
         let v = try_join_all(handles).await.unwrap();
         handle.await.unwrap().unwrap();
@@ -353,19 +437,23 @@ mod test {
         let x = GF64::random(thread_rng());
         let y = GF64::random(thread_rng());
         let statement = [x * y, x, y, GF64::zero(), GF64::zero()];
-        test_nizk_fliop(&statement[..], 2).await;
+        let log_folding_factor = 1;
+        test_nizk_fliop(&statement[..], 2, log_folding_factor).await;
     }
 
     #[tokio::test]
     async fn test_one_layer_fliop() {
-        test_nizk_fliop(&get_statement::<GF64>(4), 2).await;
+        let log_folding_factor = 1;
+        test_nizk_fliop(&get_statement::<GF64>(4), 2, log_folding_factor).await;
     }
     #[tokio::test]
     async fn test_large_fliop() {
-        test_nizk_fliop(&get_statement::<GF64>(1 << 10), 2).await;
+        let log_folding_factor = 3;
+        test_nizk_fliop(&get_statement::<GF64>(1 << 10), 2, log_folding_factor).await;
     }
     #[tokio::test]
     async fn test_large_fliop_five_verifiers() {
-        test_nizk_fliop(&get_statement::<GF64>(1 << 10), 5).await;
+        let log_folding_factor = 3;
+        test_nizk_fliop(&get_statement::<GF64>(1 << 10), 5, log_folding_factor).await;
     }
 }
