@@ -3,17 +3,18 @@ use std::{
 };
 
 use aes_prng::AesRng;
-use blake3::{Hash, OUT_LEN};
+use blake3::{Hash, Hasher, OUT_LEN};
 use log::info;
 use rand::Rng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use tokio::time::Instant;
 
 use crate::{
-    circuit_eval::bristol_fashion::ParsedGate,
-    commitment::OfflineCommitment,
+    circuit_eval::{bristol_fashion::ParsedGate, RegularMask},
+    commitment::{OfflineCommitment, StandardCommitReveal},
     engine::MultiPartyEngine,
     fields::{FieldElement, PackedField, GF2},
+    zkfliop::{self, g, ni::ZkFliopProof, PowersIterator, ProverCtx, VerifierCtx},
     PartyId,
 };
 
@@ -30,6 +31,9 @@ where
 impl<const N: usize, PF: PackedField<GF2, N>, VF: FieldElement + Mul<GF2, Output = VF>>
     AuthenticatedValue<N, PF, VF>
 {
+    pub fn hash(&self, hasher: &mut Hasher) {
+        hasher.update(self.value.as_bytes());
+    }
     fn random(
         value: &PF,
         mac_key: &VF,
@@ -125,7 +129,11 @@ pub struct AuthenticatedBeaverTriple<
 impl<const N: usize, F: PackedField<GF2, N>, VF: FieldElement + Mul<GF2, Output = VF>>
     AuthenticatedBeaverTriple<N, F, VF>
 {
-    fn random(mut rng: impl CryptoRng + RngCore, mac_key: &VF, parties_count: usize) -> Vec<Self> {
+    fn random(
+        mut rng: impl CryptoRng + RngCore,
+        mac_key: &VF,
+        parties_count: usize,
+    ) -> impl Iterator<Item = Self> {
         let a = F::random(&mut rng);
         let b = F::random(&mut rng);
         let ab = a * b;
@@ -136,7 +144,6 @@ impl<const N: usize, F: PackedField<GF2, N>, VF: FieldElement + Mul<GF2, Output 
             .zip(vb.into_iter())
             .zip(vab.into_iter())
             .map(|((vai, vbi), vabi)| AuthenticatedBeaverTriple(vai, vbi, vabi))
-            .collect()
     }
 }
 pub struct SpdzCorrelation<
@@ -149,6 +156,65 @@ pub struct SpdzCorrelation<
     check_seed: OfflineCommitment,
     personal_input_masks: Vec<PF>,
     triples: Vec<AuthenticatedBeaverTriple<N, PF, VF>>,
+    triples_proof: Option<ZkFliopProof<VF>>,
+}
+pub fn hash_triples<
+    const N: usize,
+    PF: PackedField<GF2, N>,
+    VF: FieldElement + Mul<GF2, Output = VF>,
+>(
+    triples: &[AuthenticatedBeaverTriple<N, PF, VF>],
+) -> VF {
+    let mut hasher = blake3::Hasher::new();
+    for triple in triples.iter() {
+        triple.0.hash(&mut hasher);
+    }
+    let output_bytes = *hasher.finalize().as_bytes();
+    let seed = core::array::from_fn(|i| output_bytes[i]);
+    let aes_rng = AesRng::from_seed(seed);
+    VF::random(aes_rng)
+}
+pub fn build_statement<
+    const N: usize,
+    PF: PackedField<GF2, N>,
+    VF: FieldElement + Mul<GF2, Output = VF>,
+>(
+    statement: &mut [VF],
+    powers: &mut PowersIterator<VF>,
+    triples: &[AuthenticatedBeaverTriple<N, PF, VF>],
+    mac_share: VF,
+) {
+    let check_value = statement[1..]
+        .chunks_exact_mut(4 * N)
+        .zip(triples.iter())
+        .map(|(chunk, triple)| {
+            chunk
+                .chunks_exact_mut(4)
+                .enumerate()
+                .map(|(i, chunk)| {
+                    let a = triple.0.value.get_element(i);
+                    let va = triple.0.mac[i];
+                    let b = triple.1.value.get_element(i);
+                    let vb = triple.1.mac[i];
+                    let ab = triple.2.value.get_element(i);
+                    let vab = triple.2.mac[i];
+                    let coeffs: [VF; 4] = core::array::from_fn(|_| powers.next().unwrap());
+                    // first equation: a*b = ab
+                    chunk[0] = VF::one() * a;
+                    chunk[1] = coeffs[0] * b;
+                    // second equation: va = mac * a
+                    // third equation: vb = mac * b
+                    // fourth equation: vab = mac * ab
+                    chunk[2] = mac_share;
+                    chunk[3] = (coeffs[1] * a + coeffs[2] * b + coeffs[3] * ab);
+
+                    // sums for check
+                    coeffs[0] * ab + coeffs[1] * va + coeffs[2] * vb + coeffs[3] * vab
+                })
+                .sum()
+        })
+        .sum::<VF>();
+    statement[0] = check_value;
 }
 pub fn spdz_deal<
     const N: usize,
@@ -157,6 +223,7 @@ pub fn spdz_deal<
 >(
     circuit: &ParsedCircuit,
     input_pos: &HashMap<PartyId, (usize, usize)>,
+    prover_ctx: &mut ProverCtx<VF>,
 ) -> HashMap<PartyId, SpdzCorrelation<N, PF, VF>> {
     let time = Instant::now();
     let party_count = input_pos.len();
@@ -230,22 +297,54 @@ pub fn spdz_deal<
     (0..total_triples_count).for_each(|_| {
         let triples = AuthenticatedBeaverTriple::random(&mut rng, &mac, party_count);
         triples
-            .into_iter()
             .zip(party_triples.values_mut())
             .for_each(|(bt, v)| v.push(bt));
     });
     debug_assert_eq!(macs.values().copied().sum::<VF>(), mac);
-    let o = input_pos
+    let alpha: VF = party_triples.values().map(|v| hash_triples(v)).sum();
+    let parties_statements: Vec<(PartyId, _)> = input_pos
         .keys()
         .map(|pid| {
+            let mut party_statement = Vec::with_capacity(1 + 4 * N * total_triples_count);
+            unsafe { party_statement.set_len(1 + 4 * N * total_triples_count) };
+            let mut powers = PowersIterator::new(alpha);
+            let party_triples = party_triples.get(pid).unwrap();
+            let mac_share = macs.get(pid).unwrap();
+            build_statement(&mut party_statement, &mut powers, party_triples, *mac_share);
+            (*pid, party_statement)
+        })
+        .collect();
+    let mut joint_statement = parties_statements[0].1.clone();
+    for i in 1..party_count {
+        let statement = &parties_statements[i].1;
+        statement
+            .iter()
+            .zip(joint_statement.iter_mut())
+            .for_each(|(i, o)| {
+                *o += *i;
+            });
+    }
+    assert_eq!(joint_statement[0], g(&joint_statement[1..]));
+    let proof = zkfliop::ni::prove(
+        parties_statements.iter().map(|v| &v.1),
+        joint_statement,
+        prover_ctx,
+    );
+
+    let o = parties_statements
+        .iter()
+        .map(|v| v.0)
+        .zip(proof.into_iter())
+        .map(|(pid, proof)| {
             (
-                *pid,
+                pid,
                 SpdzCorrelation {
-                    mac_share: macs.remove(pid).unwrap(),
-                    auth_input: random_input_shares.remove(pid).unwrap(),
-                    personal_input_masks: per_party_input.remove(pid).unwrap(),
-                    check_seed: check_seeds.remove(pid).unwrap(),
-                    triples: party_triples.remove(pid).unwrap(),
+                    mac_share: macs.remove(&pid).unwrap(),
+                    auth_input: random_input_shares.remove(&pid).unwrap(),
+                    personal_input_masks: per_party_input.remove(&pid).unwrap(),
+                    check_seed: check_seeds.remove(&pid).unwrap(),
+                    triples: party_triples.remove(&pid).unwrap(),
+                    triples_proof: Some(proof),
                 },
             )
         })
@@ -253,10 +352,55 @@ pub fn spdz_deal<
     info!("SPDZ Dealer took: {}ms", time.elapsed().as_millis());
     o
 }
+pub async fn offline_spdz_verify<
+    const N: usize,
+    PF: PackedField<GF2, N>,
+    VF: FieldElement + Mul<GF2, Output = VF>,
+>(
+    engine: &mut impl MultiPartyEngine,
+    correlation: &SpdzCorrelation<N, PF, VF>,
+    verifier_ctx: &mut VerifierCtx<VF>,
+) {
+    let SpdzCorrelation {
+        mac_share,
+        auth_input,
+        check_seed,
+        personal_input_masks,
+        triples,
+        triples_proof,
+    } = correlation;
+    if triples_proof.is_none() {
+        return;
+    }
+    let proof = triples_proof.as_ref().unwrap();
+    let coin_share = hash_triples(&triples);
+    let coin: VF = StandardCommitReveal::commit(engine.sub_protocol("commit coin"), coin_share)
+        .await
+        .reveal()
+        .await
+        .into_iter()
+        .map(|v| v.1)
+        .sum::<VF>()
+        + coin_share;
+    let mut statement = Vec::with_capacity(1 + 4 * N * triples.len());
+    unsafe { statement.set_len(1 + 4 * N * triples.len()) };
+    let mut powers = PowersIterator::new(coin);
+    build_statement(&mut statement, &mut powers, triples, *mac_share);
+    let check_value = zkfliop::ni::obtain_check_value(statement, proof, verifier_ctx);
+    assert!(
+        zkfliop::ni::verify_check_value(
+            engine.sub_protocol("verify"),
+            check_value.0,
+            check_value.1
+        )
+        .await
+    );
+}
 pub async fn online_spdz<
     const N: usize,
     PF: PackedField<GF2, N>,
     VF: FieldElement + Mul<GF2, Output = VF>,
+    CF: FieldContainer<PF>,
 >(
     engine: &mut impl MultiPartyEngine,
     circuit: &ParsedCircuit,
@@ -270,6 +414,7 @@ pub async fn online_spdz<
         check_seed,
         personal_input_masks,
         triples,
+        triples_proof,
     } = correlation;
     let my_id = engine.my_party_id();
     let is_first = engine.party_ids()[0] == my_id;
@@ -325,8 +470,14 @@ pub async fn online_spdz<
     let time = Instant::now();
     let mut non_comm_time = Duration::new(0, 0);
     let mut comm_time = Duration::new(0, 0);
-    for layer in circuit.gates.iter() {
+    let max_layer_size = circuit.gates.iter().fold(0, |acc, cur| {
+        let non_linear_gates_in_layer = cur.iter().filter(|cur| !cur.is_linear()).count();
+        usize::max(acc, non_linear_gates_in_layer)
+    });
+    let mut container = CF::new_with_capacity(max_layer_size);
+    for (layer_idx, layer) in circuit.gates.iter().enumerate() {
         msgs.clear();
+        container.clear();
         gates.clear();
         let time = Instant::now();
         for gate in layer.iter() {
@@ -340,6 +491,7 @@ pub async fn online_spdz<
                 ParsedGate::AndGate { input, output } => {
                     let bt = open_triples_iter.next().unwrap();
                     let (xa, yb) = wires[input[0]].mul_open(&wires[input[1]], bt.1);
+                    container.push(RegularMask(xa, yb));
                     msgs.push((xa, yb));
                     gates.push((input, output))
                 }
@@ -354,12 +506,13 @@ pub async fn online_spdz<
         }
         non_comm_time += time.elapsed();
         let time = Instant::now();
-        engine.broadcast(&msgs);
+        engine.broadcast(&container);
         for _ in 0..peers_num {
-            let (peer_msg, _): (Vec<(PF, PF)>, _) = engine.recv().await.unwrap();
+            let (peer_msg, _): (CF, _) = engine.recv().await.unwrap();
+            let (peer_msg, _) = peer_msg.to_vec();
             assert_eq!(msgs.len(), peer_msg.len());
             msgs.iter_mut()
-                .zip(peer_msg.into_iter())
+                .zip(peer_msg.iter())
                 .for_each(|(msg, peer_msg)| {
                     msg.0 += peer_msg.0;
                     msg.1 += peer_msg.1;
@@ -490,17 +643,21 @@ mod tests {
     use tokio::join;
 
     use crate::{
-        circuit_eval::{parse_bristol, semi_honest::local_eval_circuit, ParsedCircuit},
-        engine::{LocalRouter, NetworkRouter},
+        circuit_eval::{
+            parse_bristol, semi_honest::local_eval_circuit, spdz::offline_spdz_verify,
+            ParsedCircuit,
+        },
+        engine::{LocalRouter, MultiPartyEngine, NetworkRouter},
         fields::{FieldElement, PackedField, PackedGF2, GF2, GF64},
+        zkfliop::{ProverCtx, VerifierCtx},
         PartyId, UCTag,
     };
 
     use super::{online_spdz, spdz_deal};
     fn spdz_test_circuit<const N: usize, PF: PackedField<GF2, N>>(
         circuit: ParsedCircuit,
-        party_count: usize,
         input: Vec<PF>,
+        log_folding_factor: usize,
     ) {
         let circuit = Arc::new(circuit);
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -518,21 +675,45 @@ mod tests {
                 ),
             ),
         ]);
+        // Make CTXs
+        let mut prover_ctx = ProverCtx::new(log_folding_factor);
+        let mut verifier_ctxs: Vec<_> = (0..2)
+            .map(|_| VerifierCtx::<GF64>::new(log_folding_factor))
+            .collect();
+
         let local_value = local_eval_circuit(circuit.as_ref(), &input);
         let first_pos = input_pos[&party_ids[0]];
         let input_first: Vec<_> = input[first_pos.0..first_pos.0 + first_pos.1].to_vec();
         let second_pos = input_pos[&party_ids[1]];
         let input_second: Vec<_> = input[second_pos.0..second_pos.0 + second_pos.1].to_vec();
-        let mut corr = spdz_deal::<N, PF, GF64>(circuit.as_ref(), &input_pos);
+        let mut corr = spdz_deal::<N, PF, GF64>(circuit.as_ref(), &input_pos, &mut prover_ctx);
         let parties_set = HashSet::from_iter(party_ids);
         let (router, mut execs) = LocalRouter::new(UCTag::new(&"ROOT TAG"), &parties_set);
         let router_handle = runtime.spawn(router.launch());
         let first_party = execs.remove(&party_ids[0]).unwrap();
         let second_party = execs.remove(&party_ids[1]).unwrap();
+
+        // Verify correlations
+        let mut corr_first = corr.remove(&party_ids[0]).unwrap();
+        let mut corr_second = corr.remove(&party_ids[1]).unwrap();
+        let mut first_ctx = verifier_ctxs.pop().unwrap();
+        let mut second_ctx = verifier_ctxs.pop().unwrap();
+        let mut first_verify_engine = first_party.sub_protocol("verify");
+        let mut second_verify_engine = second_party.sub_protocol("verify");
+        let first_verify = runtime.spawn(async move {
+            offline_spdz_verify(&mut first_verify_engine, &corr_first, &mut first_ctx).await;
+            corr_first
+        });
+        let second_verify = runtime.spawn(async move {
+            offline_spdz_verify(&mut second_verify_engine, &corr_second, &mut second_ctx).await;
+            corr_second
+        });
+        let v = runtime.block_on(async { join!(first_verify, second_verify) });
+        corr_first = v.0.unwrap();
+        corr_second = v.1.unwrap();
+
         let first_party_circuit = circuit.clone();
         let second_party_circuit = circuit.clone();
-        let corr_first = corr.remove(&party_ids[0]).unwrap();
-        let corr_second = corr.remove(&party_ids[1]).unwrap();
         let input_pos_first = Arc::new(input_pos);
         let input_pos_second = input_pos_first.clone();
         let first_party_handle = runtime.spawn(async move {
@@ -581,7 +762,7 @@ mod tests {
         let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
             .expect("Failed to parse");
 
-        spdz_test_circuit::<{ GF2::BITS }, GF2>(parsed_circuit, 2, vec![GF2::zero(), GF2::zero()]);
+        spdz_test_circuit::<{ GF2::BITS }, GF2>(parsed_circuit, vec![GF2::zero(), GF2::zero()], 1);
     }
     #[test]
     fn spdz_test() {
@@ -590,8 +771,8 @@ mod tests {
         let parsed_circuit = super::super::circuit_from_file(path).unwrap();
         spdz_test_circuit::<{ PackedGF2::BITS }, PackedGF2>(
             parsed_circuit,
-            PARTY_COUNT,
             vec![PackedGF2::one(); 256],
+            2,
         );
     }
 }

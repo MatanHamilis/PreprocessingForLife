@@ -75,3 +75,6 @@ harness = false
 [[bench]]
 name = "zkfliop"
 harness = false
+[[bench]]
+name = "mersenne_vs_bin"
+harness = false

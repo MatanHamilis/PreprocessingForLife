@@ -9,6 +9,8 @@ pub use self::semi_honest::{
 };
 
 use log::{error, info};
+pub use verify::DealerCtx;
+pub use verify::FliopCtx;
 mod bristol_fashion;
 mod malicious;
 mod semi_honest;

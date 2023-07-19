@@ -4,7 +4,7 @@ use crate::{
     fields::GF2,
     zkfliop::{
         ni::{hash_statement, prove, ZkFliopProof},
-        PowersIterator,
+        PowersIterator, ProverCtx, VerifierCtx,
     },
 };
 use aes_prng::AesRng;
@@ -371,7 +371,7 @@ pub fn statement_length<const PACK: usize>(circuit: &ParsedCircuit) -> usize {
         })
         .sum();
     statement_length *= PACK;
-    let statement_length = (1 << (usize::ilog2(2 * statement_length - 1))) as usize;
+    // let statement_length = (1 << (usize::ilog2(2 * statement_length - 1))) as usize;
     usize::try_from(1 + statement_length).unwrap()
 }
 fn construct_statement<
@@ -482,6 +482,22 @@ pub struct OfflineCircuitVerify<F: FieldElement> {
     prover_offline_material: OfflineProver<F>,
 }
 
+pub struct FliopCtx<F: FieldElement> {
+    pub prover_ctx: Option<ProverCtx<F>>,
+    pub verifiers_ctx: Option<Vec<VerifierCtx<F>>>,
+}
+impl<F: FieldElement> FliopCtx<F> {
+    pub fn new(log_folding_factor: usize, verifiers_count: usize) -> Self {
+        Self {
+            prover_ctx: Some(ProverCtx::new(log_folding_factor)),
+            verifiers_ctx: Some(
+                (0..verifiers_count)
+                    .map(|_| VerifierCtx::new(log_folding_factor))
+                    .collect(),
+            ),
+        }
+    }
+}
 pub async fn verify_parties<
     const PACKING: usize,
     PF: PackedField<CF, PACKING>,
@@ -490,9 +506,6 @@ pub async fn verify_parties<
     E: MultiPartyEngine,
 >(
     engine: &mut E,
-    two: F,
-    three: F,
-    four: F,
     input_wire_masked_values: &[PF],
     regular_masked_values: &HashMap<(usize, usize), RegularMask<PF>>,
     wide_masked_values: &HashMap<(usize, usize), WideMask<PF>>,
@@ -502,6 +515,7 @@ pub async fn verify_parties<
     circuit: &ParsedCircuit,
     offline_material: &OfflineCircuitVerify<F>,
     auth_dealer: bool,
+    ctx: &mut FliopCtx<F>,
 ) -> bool {
     let thread_pool = ThreadPoolBuilder::new().build().unwrap();
     let my_id = engine.my_party_id();
@@ -585,7 +599,8 @@ pub async fn verify_parties<
     }
     let p_hat = lambda - masked_gamma_i_s.values().copied().sum() - masked_gamma_i + omega_hat;
     info!(
-        "\t\tVerify - Compute and obtain gammas: {}ms",
+        "\t\tVerify {} - Compute and obtain gammas: {}ms",
+        my_id,
         timer.elapsed().as_millis()
     );
     let timer = Instant::now();
@@ -627,9 +642,12 @@ pub async fn verify_parties<
         circuit,
     ));
     info!(
-        "\t\tVerify - Statements Construction: {}ms",
+        "\t\tVerify {} - Statements Construction: {}ms",
+        my_id,
         timer.elapsed().as_millis()
     );
+    let mut prover_ctx = ctx.prover_ctx.take().unwrap();
+    let mut verifiers_ctx = ctx.verifiers_ctx.take().unwrap();
     let sub_engine = engine.sub_protocol(my_id);
     let prover_futures = tokio::spawn(async move {
         let prover_offline_material = prover_offline_material;
@@ -639,50 +657,61 @@ pub async fn verify_parties<
             &mut proof_statement,
             &prover_offline_material,
             dealer_statement,
+            &mut prover_ctx,
         )
         .await;
-        info!("\t\tVerify - Proving took: {}", timer.elapsed().as_millis());
+        info!(
+            "\t\tVerify {} - Proving took: {}",
+            my_id,
+            timer.elapsed().as_millis()
+        );
+        Result::<_, ()>::Ok(prover_ctx)
     });
 
-    let verifiers_futures =
-        verifiers_offline_material
-            .into_iter()
-            .map(|(prover_id, offline_material)| {
+    let verifiers_futures = verifiers_offline_material
+        .into_iter()
+        .zip(verifiers_ctx.drain(..))
+        .map(|((prover_id, offline_material), mut verifier_ctx)| {
+            let timer = Instant::now();
+            let offline_material = offline_material.clone();
+            let verifier_engine = engine.sub_protocol(prover_id);
+            let verify_statement_arc = verify_statement.clone();
+            let masked_gamma_prover = *masked_gamma_i_s.get(&prover_id).unwrap();
+            let prover_id = *prover_id;
+            info!(
+                "\t\tVerify {} - Making preparations to verify: {}ms",
+                my_id,
+                timer.elapsed().as_millis()
+            );
+            tokio::spawn(async move {
+                // We only modify the first entry (the masked Gamma_i) in the verifying statement.
+                let mut z_hat = verify_statement_arc.as_ref().clone();
+                z_hat[0] = masked_gamma_prover;
                 let timer = Instant::now();
-                let offline_material = offline_material.clone();
-                let verifier_engine = engine.sub_protocol(prover_id);
-                let verify_statement_arc = verify_statement.clone();
-                let masked_gamma_prover = *masked_gamma_i_s.get(&prover_id).unwrap();
-                let prover_id = *prover_id;
+                zkfliop::verifier(
+                    verifier_engine,
+                    &mut z_hat,
+                    prover_id,
+                    &offline_material,
+                    &mut verifier_ctx,
+                )
+                .await;
                 info!(
-                    "\t\tVerify - Making preparations to verify: {}ms",
+                    "\t\tVerify {} - zkfliop verifier took: {}",
+                    my_id,
                     timer.elapsed().as_millis()
                 );
-                tokio::spawn(async move {
-                    // We only modify the first entry (the masked Gamma_i) in the verifying statement.
-                    let mut z_hat = verify_statement_arc.as_ref().clone();
-                    z_hat[0] = masked_gamma_prover;
-                    let timer = Instant::now();
-                    zkfliop::verifier(
-                        verifier_engine,
-                        &mut z_hat,
-                        prover_id,
-                        &offline_material,
-                        two,
-                        three,
-                        four,
-                    )
-                    .await;
-                    info!(
-                        "\t\tVerify - zkfliop verifier took: {}",
-                        timer.elapsed().as_millis()
-                    );
-                    Result::<(), ()>::Ok(())
-                })
-            });
+                Result::<_, ()>::Ok(verifier_ctx)
+            })
+        });
     let verifiers_futures = try_join_all(verifiers_futures);
-    let (_, verifiers_futures) = join!(prover_futures, verifiers_futures);
-    verifiers_futures.unwrap();
+    let (prover_futures, verifiers_futures) = join!(prover_futures, verifiers_futures);
+    ctx.prover_ctx = Some(prover_futures.unwrap().unwrap());
+    verifiers_futures
+        .unwrap()
+        .into_iter()
+        .for_each(|v| verifiers_ctx.push(v.unwrap()));
+    ctx.verifiers_ctx = Some(verifiers_ctx);
     let timer = Instant::now();
     let s = s_commitment.online_decommit(engine).await;
     let p = p_hat + s;
@@ -693,6 +722,18 @@ pub async fn verify_parties<
     return p.is_zero();
 }
 
+pub struct DealerCtx<F: FieldElement> {
+    prover_ctx: ProverCtx<F>,
+    verifier_ctx: VerifierCtx<F>,
+}
+impl<F: FieldElement> DealerCtx<F> {
+    pub fn new(log_folding_factor: usize) -> Self {
+        Self {
+            prover_ctx: ProverCtx::new(log_folding_factor),
+            verifier_ctx: VerifierCtx::new(log_folding_factor),
+        }
+    }
+}
 pub fn offline_verify_dealer<
     const PACKING: usize,
     PF: PackedField<GF2, PACKING>,
@@ -704,6 +745,7 @@ pub fn offline_verify_dealer<
     total_output_wires_masks: &[PF],
     sho: &[(PartyId, SHO)],
     is_authenticated: bool,
+    dealer_ctx: &mut DealerCtx<F>,
 ) -> HashMap<
     PartyId,
     (
@@ -837,6 +879,10 @@ where
         .iter()
         .map(|p| (*p, Vec::with_capacity(parties_num - 1)))
         .collect();
+    let DealerCtx {
+        prover_ctx,
+        verifier_ctx,
+    } = dealer_ctx;
     let mut offline_verifiers: HashMap<_, _> = parties
         .iter()
         .copied()
@@ -877,7 +923,8 @@ where
                 Some(&wide_mask_shares),
                 circuit,
             );
-            let (prover_correlation, verifiers_correlation) = dealer(&mut z_tilde, parties_num - 1);
+            let (prover_correlation, verifiers_correlation) =
+                dealer(&mut z_tilde, parties_num - 1, verifier_ctx);
             parties
                 .iter()
                 .filter(|v| *v != &prover_id)
@@ -952,8 +999,7 @@ where
                     .map(|(i, j)| i + j)
                     .collect();
                 let parties_stmts = [stmt_i, stmt_j];
-                let mut cur_proofs =
-                    prove(parties_stmts.iter(), stmt, F::two(), F::three(), F::four());
+                let mut cur_proofs = prove(parties_stmts.iter(), stmt, prover_ctx);
                 let proof_j = cur_proofs.pop().unwrap();
                 let proof_i = cur_proofs.pop().unwrap();
                 proofs.get_mut(&pi).unwrap().insert(pj, proof_i);

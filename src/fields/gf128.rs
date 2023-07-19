@@ -205,6 +205,9 @@ impl FieldElement for GF128 {
     fn one() -> Self {
         GF128(GF128::U64X2_ONE)
     }
+    fn as_bytes(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.0.as_array().as_ptr() as *const u8, 16) }
+    }
     fn hash(&self, hasher: &mut blake3::Hasher) {
         let bytes = unsafe {
             (self.0.as_array().as_ptr() as *const [u8; 16])

@@ -17,7 +17,7 @@ use crate::{
 use super::{
     bristol_fashion::ParsedCircuit,
     semi_honest::{self, FieldContainer, OfflineSemiHonestCorrelation},
-    verify::{self, statement_length, OfflineCircuitVerify},
+    verify::{self, statement_length, DealerCtx, FliopCtx, OfflineCircuitVerify},
 };
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -50,6 +50,7 @@ where
         party_input_length: &HashMap<PartyId, (usize, usize)>,
         dealer: &SHO::Dealer,
         is_authenticated: bool,
+        dealer_ctx: &mut DealerCtx<F>,
     ) -> HashMap<PartyId, MaliciousSecurityOffline<PACKING, PF, F, SHO>> {
         // Correlated Randomness for Semi-Honest
         let mut aes_rng = AesRng::from_random_seed();
@@ -63,6 +64,7 @@ where
             &output_wire_masks,
             &offline_correlations,
             is_authenticated,
+            dealer_ctx,
         );
 
         let (mut output_wires_share, output_wires_commitment) =
@@ -92,6 +94,7 @@ where
         circuit: impl AsRef<ParsedCircuit>,
         correlation: &MaliciousSecurityOffline<PACKING, PF, F, SHO>,
         is_authenticated: bool,
+        ctx: &mut FliopCtx<F>,
     ) -> bool {
         if !is_authenticated {
             return true;
@@ -107,6 +110,7 @@ where
                 &mut engine.sub_protocol_with("verify triples", peers),
                 circuit.as_ref(),
                 proofs,
+                ctx.verifiers_ctx.as_mut().unwrap(),
             )
             .await;
         assert!(triples_verdict);
@@ -179,11 +183,9 @@ where
         &mut self,
         engine: &mut impl MultiPartyEngine,
         my_input: &[PF],
-        two: F,
-        three: F,
-        four: F,
         parties_input_pos_and_lengths: &HashMap<PartyId, (usize, usize)>,
         is_verified_dealer: bool,
+        ctx: &mut FliopCtx<F>,
     ) -> Option<Vec<PF>> {
         let Self {
             circuit,
@@ -220,9 +222,6 @@ where
         let timer = Instant::now();
         if !verify::verify_parties(
             engine,
-            two,
-            three,
-            four,
             &masked_input_wires,
             &masked_gate_inputs,
             &wide_masked_gate_inputs,
@@ -232,12 +231,17 @@ where
             circuit.as_ref(),
             offline_verification_material,
             is_verified_dealer,
+            ctx,
         )
         .await
         {
             return None;
         }
-        info!("Verify took: {}", timer.elapsed().as_millis());
+        info!(
+            "Verify {} took: {}",
+            engine.my_party_id(),
+            timer.elapsed().as_millis()
+        );
         let timer = Instant::now();
         let output_wire_masks: Vec<PF> = output_wire_mask_commitments.online_decommit(engine).await;
         let outputs: Vec<_> = output_wire_masks
@@ -269,6 +273,7 @@ mod tests {
             bristol_fashion::{parse_bristol, ParsedCircuit},
             malicious::PreOnlineMaterial,
             semi_honest::{self, FieldContainer, GF2Container, PcgBasedPairwiseBooleanCorrelation},
+            verify::{DealerCtx, FliopCtx},
         },
         engine::{LocalRouter, MultiPartyEngine},
         fields::{FieldElement, PackedField, GF128, GF2},
@@ -290,17 +295,18 @@ mod tests {
         input: Vec<PF>,
         dealer: Arc<D>,
         is_authenticated: bool,
+        log_folding_factor: usize,
     ) -> Vec<PF> {
         let mut local_eval_output = semi_honest::local_eval_circuit(&circuit, &input);
         local_eval_output.drain(0..local_eval_output.len() - circuit.output_wire_count);
         const PARTIES: usize = 2;
         const DEALER_ID: PartyId = (PARTIES + 1) as PartyId;
 
-        let mut two = GF128::zero();
-        two.set_bit(true, 1);
-        let three = two + GF128::one();
-        let four = two * two;
-
+        // Init CTXs
+        let mut dealer_ctx = DealerCtx::new(log_folding_factor);
+        let mut parties_ctx: Vec<_> = (0..PARTIES)
+            .map(|_| FliopCtx::new(log_folding_factor, PARTIES - 1))
+            .collect();
         // Offline
         let offline_party_ids: [PartyId; PARTIES + 1] =
             core::array::from_fn(|i| (i + 1) as PartyId);
@@ -331,6 +337,7 @@ mod tests {
             &input_lengths,
             dealer.as_ref(),
             is_authenticated,
+            &mut dealer_ctx,
         );
         let input_lengths = Arc::new(input_lengths);
         let circuit = Arc::new(circuit);
@@ -343,7 +350,8 @@ mod tests {
 
         let verification_handles: Vec<_> = parties_offline_material
             .iter_mut()
-            .map(|(pid, material)| {
+            .zip(parties_ctx.drain(..))
+            .map(|((pid, material), mut ctx)| {
                 let mut engine = online_engines
                     .get(&pid)
                     .unwrap()
@@ -355,9 +363,10 @@ mod tests {
                         circuit,
                         material,
                         is_authenticated,
+                        &mut ctx,
                     )
                     .await;
-                    Result::<bool, ()>::Ok(res)
+                    Result::<(bool, FliopCtx<_>), ()>::Ok((res, ctx))
                 }
             })
             .collect();
@@ -365,7 +374,10 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .all(|v| v));
+            .all(|v| {
+                parties_ctx.push(v.1);
+                v.0
+            }));
 
         let pre_online_handles =
             parties_offline_material
@@ -388,34 +400,38 @@ mod tests {
 
         // Online
 
-        let online_handles = pre_online_handles.into_iter().map(|(pid, mut pre)| {
-            let input = inputs.remove(&pid).unwrap();
-            let mut engine = online_engines.remove(&pid).unwrap();
-            let input_lengths = input_lengths.clone();
-            tokio::spawn(async move {
-                let start = Instant::now();
-                let o = pre
-                    .online_malicious_computation::<FC>(
-                        &mut engine,
-                        &input,
-                        two,
-                        three,
-                        four,
-                        &input_lengths,
-                        is_authenticated,
-                    )
-                    .await
-                    .ok_or(());
-                info!("Malicious eval took: {}ms", start.elapsed().as_millis());
-                o
-            })
-        });
+        let online_handles = pre_online_handles
+            .into_iter()
+            .zip(parties_ctx.drain(..))
+            .map(|((pid, mut pre), mut ctx)| {
+                let input = inputs.remove(&pid).unwrap();
+                let mut engine = online_engines.remove(&pid).unwrap();
+                let input_lengths = input_lengths.clone();
+                tokio::spawn(async move {
+                    let start = Instant::now();
+                    let o = pre
+                        .online_malicious_computation::<FC>(
+                            &mut engine,
+                            &input,
+                            &input_lengths,
+                            is_authenticated,
+                            &mut ctx,
+                        )
+                        .await
+                        .ok_or(());
+                    info!("Malicious eval took: {}ms", start.elapsed().as_millis());
+                    (o, ctx)
+                })
+            });
         let start = Instant::now();
         let mut online_outputs: Vec<_> = try_join_all(online_handles)
             .await
             .unwrap()
             .into_iter()
-            .map(|v| v.unwrap())
+            .map(|v| {
+                parties_ctx.push(v.1);
+                v.0.unwrap()
+            })
             .collect();
         info!("Running took: {}", start.elapsed().as_millis());
         let first_output = online_outputs.pop().unwrap();
@@ -449,6 +465,7 @@ mod tests {
             input,
             Arc::new(dealer),
             true,
+            1,
         )
         .await;
     }
@@ -464,6 +481,7 @@ mod tests {
             input,
             Arc::new(dealer),
             true,
+            1,
         )
         .await;
     }
@@ -490,6 +508,7 @@ mod tests {
             input,
             Arc::new(dealer),
             true,
+            1,
         )
         .await;
     }
@@ -514,6 +533,7 @@ mod tests {
                 input,
                 Arc::new(dealer),
                 true,
+                2,
             )
             .await;
         });

@@ -98,7 +98,6 @@ impl<F: FieldElement> ZkFliopProof<F> {
 pub fn prove<'a, F: FieldElement>(
     parties_statements: impl Iterator<Item = &'a Vec<F>>,
     mut statement: Vec<F>,
-    log_folding_factor: usize,
     prover_ctx: &mut ProverCtx<F>,
 ) -> Vec<ZkFliopProof<F>> {
     let ProverCtx {
@@ -108,7 +107,9 @@ pub fn prove<'a, F: FieldElement>(
         eval_ctx_last_round_proof_gen,
         eval_ctx_auth_polys,
         eval_ctx_auth_proof,
+        log_folding_factor,
     } = prover_ctx;
+    let log_folding_factor = *log_folding_factor;
     let mut parties_shares_hashes: Vec<_> = parties_statements.map(|v| hash_statement(v)).collect();
     let M = 1 << log_folding_factor;
     let verifiers_num = parties_shares_hashes.len();
@@ -180,8 +181,12 @@ pub fn prove<'a, F: FieldElement>(
     // We need to evaluate therefore each f_i on M+1..2*M which is 2*M
     // evaluations overall.
     let mut last_round_interpolation_output = vec![F::zero(); 2 * M];
-    eval_ctx_last_round_proof_gen
-        .interpolate(&last_round_buf, &mut last_round_interpolation_output);
+    eval_ctx_last_round_proof_gen.interpolate(
+        &last_round_buf,
+        &mut last_round_interpolation_output,
+        0,
+        1,
+    );
     last_round_interpolation_output
         .chunks_exact(2)
         .for_each(|c| last_round_proof.push(c[0] * c[1]));
@@ -195,52 +200,6 @@ pub fn prove<'a, F: FieldElement>(
         })
         .collect();
     last_proof_shares.push(last_round_proof);
-    // last_round_proof
-    //     .iter_mut()
-    //     .zip(proof_masks_last_round.iter())
-    //     .for_each(|(p, a)| *p -= *a);
-    // engine.broadcast(last_round_proof);
-    // let r: F = last_round_challenge.online_decommit(&mut engine).await;
-    // // Decision
-    // let (betas, b_tilde_check_dealer, f_0_tilde_dealer, f_1_tilde_dealer, q_tilde_dealer): (
-    //     Vec<F>,
-    //     F,
-    //     F,
-    //     F,
-    //     F,
-    // ) = final_msg.online_decommit(&mut engine).await;
-    // /////////////////////
-    // debug_assert_eq!(z.len(), 5);
-    // let s_0: F = F::random(&mut rng);
-    // let s_1: F = F::random(&mut rng);
-    // let mut f_0 = [
-    //     (F::zero(), z[1]),
-    //     (F::one(), z[3]),
-    //     (two, s_0),
-    //     (three, F::zero()),
-    //     (four, F::zero()),
-    // ];
-    // let mut f_1 = [
-    //     (F::zero(), z[2]),
-    //     (F::one(), z[4]),
-    //     (two, s_1),
-    //     (three, F::zero()),
-    //     (four, F::zero()),
-    // ];
-    // f_0[3].1 = interpolate(&f_0[0..3], three);
-    // f_0[4].1 = interpolate(&f_0[0..3], four);
-    // f_1[3].1 = interpolate(&f_1[0..3], three);
-    // f_1[4].1 = interpolate(&f_1[0..3], four);
-    // let q: [_; 5] = core::array::from_fn(|i| f_0[i].1 * f_1[i].1);
-    // let mut last_proof_share = [s_0, s_1, q[0], q[1], q[2], q[3], q[4]];
-    // let mut last_proof_shares: Vec<_> = (1..verifiers_num)
-    //     .map(|_| {
-    //         let proof_share = core::array::from_fn(|_| F::random(&mut rng));
-    //         diff_assign_arrays(&mut last_proof_share, &proof_share);
-    //         proof_share
-    //     })
-    //     .collect();
-    // last_proof_shares.push(last_proof_share);
 
     let (_, blinders) =
         commit_and_obtain_challenge(&mut parties_shares_hashes[..], &last_proof_shares, &mut rng);
@@ -258,7 +217,6 @@ pub fn prove<'a, F: FieldElement>(
 pub fn obtain_check_value<F: FieldElement>(
     mut statement_share: Vec<F>,
     proof: &ZkFliopProof<F>,
-    log_folding_factor: usize,
     verifier_ctx: &mut VerifierCtx<F>,
 ) -> (bool, [F; 4]) {
     let VerifierCtx {
@@ -266,7 +224,9 @@ pub fn obtain_check_value<F: FieldElement>(
         eval_ctx_internal_round_polys,
         eval_ctx_last_round_polys,
         eval_ctx_last_round_proof,
+        log_folding_factor,
     } = verifier_ctx;
+    let log_folding_factor = *log_folding_factor;
     let mut statement_hash = hash_statement(&statement_share);
     let commit_idx = proof.commit_idx;
     let round_count = compute_round_count(statement_share.len(), log_folding_factor);
@@ -292,12 +252,12 @@ pub fn obtain_check_value<F: FieldElement>(
         eval_ctx_internal_round_proof.prepare_at_points(std::slice::from_ref(&r));
         checks_vector.push(z[0] - proof_share.iter().take(M).copied().sum::<F>());
         let z_output = unsafe { std::slice::from_raw_parts_mut(z[1..1 + L].as_mut_ptr(), L) };
-        eval_ctx_internal_round_polys.interpolate(&z[1..], z_output);
+        eval_ctx_internal_round_polys.interpolate(&z[1..], z_output, 0, 1);
         let next_round_size = ((L + 2 * M - 1) / (2 * M)) * (2 * M);
         for i in L..next_round_size {
             z[i + 1] = F::zero();
         }
-        eval_ctx_internal_round_proof.interpolate(&proof_share, &mut z[0..1]);
+        eval_ctx_internal_round_proof.interpolate(&proof_share, &mut z[0..1], 0, 1);
         z = &mut z[..=next_round_size];
     }
     //last_round
@@ -319,10 +279,14 @@ pub fn obtain_check_value<F: FieldElement>(
         .copied()
         .collect();
     let mut f_hat_r = [F::zero(); 2];
-    eval_ctx_last_round_polys.interpolate(&interpolation_buf, &mut f_hat_r);
+    eval_ctx_last_round_polys.interpolate(&interpolation_buf, &mut f_hat_r, 0, 1);
     let mut q_hat_r = F::zero();
-    eval_ctx_last_round_proof
-        .interpolate(&last_round_proof[2..], std::slice::from_mut(&mut q_hat_r));
+    eval_ctx_last_round_proof.interpolate(
+        &last_round_proof[2..],
+        std::slice::from_mut(&mut q_hat_r),
+        0,
+        1,
+    );
     checks_vector.push(z[0] - last_round_proof[2..2 + M].iter().copied().sum());
     let check_value: F = PowersIterator::new(alpha)
         .zip(checks_vector)
@@ -390,12 +354,7 @@ mod test {
         let mut verifier_ctx: Vec<_> = (0..verifiers)
             .map(|_| VerifierCtx::<F>::new(log_folding_factor))
             .collect();
-        let proofs = prove(
-            shares.iter(),
-            statement.to_vec(),
-            log_folding_factor,
-            &mut prover_ctx,
-        );
+        let proofs = prove(shares.iter(), statement.to_vec(), &mut prover_ctx);
         let party_ids: Vec<_> = (1..=verifiers as u64).collect();
         let party_ids_set: HashSet<u64> = HashSet::from_iter(party_ids.iter().copied());
         let (router, engines) = LocalRouter::new(UCTag::new(&"ROOT_TAG"), &party_ids_set);
@@ -408,7 +367,7 @@ mod test {
             .map(
                 |(((share, proof), (_, engine)), mut verifier_ctx)| async move {
                     let (is_commit_ok, input) =
-                        obtain_check_value(share, &proof, log_folding_factor, &mut verifier_ctx);
+                        obtain_check_value(share, &proof, &mut verifier_ctx);
                     Result::<bool, ()>::Ok(verify_check_value(engine, is_commit_ok, input).await)
                 },
             )

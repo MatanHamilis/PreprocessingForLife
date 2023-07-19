@@ -7,6 +7,7 @@ pub use gf128::GF128;
 pub use gf2::PackedGF2;
 pub use gf2::GF2;
 pub use gf64::GF64;
+pub use gf_mersenne::GFMersenne;
 use rand::CryptoRng;
 use rand::RngCore;
 use serde::de::DeserializeOwned;
@@ -15,6 +16,7 @@ use std::fmt::Debug;
 use std::iter::Sum;
 use std::ops::Neg;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
+mod gf_mersenne;
 trait MulResidue<F: FieldElement>:
     Add<Output = Self> + AddAssign + Sub<Output = Self> + SubAssign + Copy + Clone + Send + Sync + Sum
 {
@@ -71,20 +73,11 @@ pub trait FieldElement:
             Self::zero()
         }
     }
-    fn two() -> Self {
-        let mut output = Self::zero();
-        output.set_bit(true, 1);
-        output
-    }
-    fn three() -> Self {
-        Self::two() + Self::one()
-    }
-    fn four() -> Self {
-        Self::two() * Self::two()
-    }
+    fn as_bytes(&self) -> &[u8];
     fn number(mut number: u32) -> Self {
         let mut pow = Self::one();
-        let two = Self::two();
+        let mut two = Self::one();
+        two.set_bit(true, 1);
         let mut output = Self::zero();
         while number != 0 {
             if number & 1 == 1 {

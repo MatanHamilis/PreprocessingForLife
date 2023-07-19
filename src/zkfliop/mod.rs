@@ -154,7 +154,7 @@ impl<F: FieldElement> EvalCtx<F> {
             });
         //ventually self.coeffs is ordered such that first we have Lagrange Coefficients for interpolation of all eval points that should be multiplied by the first interpolated point and so on..
     }
-    fn interpolate(&mut self, evals: &[F], output: &mut [F]) {
+    fn interpolate(&mut self, evals: &[F], output: &mut [F], base: usize, step: usize) {
         let M = self.denoms.len();
         let L = evals.len() / M;
         assert_eq!(output.len(), L * self.eval_points);
@@ -170,7 +170,7 @@ impl<F: FieldElement> EvalCtx<F> {
             for evalled in 0..M {
                 let in_coeff_idx = evalled * L + poly_chunk_base;
                 for eval_point in 0..self.eval_points {
-                    for p in 0..poly_chunk_size {
+                    for p in (base..poly_chunk_size).step_by(step) {
                         self.interpolation_buf[eval_point * M + p] += evals[in_coeff_idx + p]
                             * self.coeffs[eval_point + evalled * self.eval_points];
                         // output[eval_point * L + poly_chunk_base + p] += evals[in_coeff_idx + p]
@@ -247,6 +247,7 @@ pub struct VerifierCtx<F: FieldElement> {
     eval_ctx_internal_round_polys: EvalCtx<F>,
     eval_ctx_last_round_polys: EvalCtx<F>,
     eval_ctx_last_round_proof: EvalCtx<F>,
+    log_folding_factor: usize,
 }
 impl<F: FieldElement> VerifierCtx<F> {
     pub fn new(log_folding_factor: usize) -> Self {
@@ -261,13 +262,16 @@ impl<F: FieldElement> VerifierCtx<F> {
                 1,
             ),
             eval_ctx_last_round_polys: EvalCtx::<F>::new(1 + (1 << log_folding_factor), 1),
+            log_folding_factor,
         }
+    }
+    pub fn log_folding_factor(&self) -> usize {
+        self.log_folding_factor
     }
 }
 pub fn dealer<F: FieldElement>(
     mut z_tilde: &mut [F],
     num_verifiers: usize,
-    log_folding_factor: usize,
     verifier_ctx: &mut VerifierCtx<F>,
 ) -> (OfflineProver<F>, Vec<OfflineVerifier>) {
     let VerifierCtx {
@@ -275,9 +279,10 @@ pub fn dealer<F: FieldElement>(
         eval_ctx_internal_round_polys,
         eval_ctx_last_round_polys,
         eval_ctx_last_round_proof,
+        log_folding_factor,
     } = verifier_ctx;
+    let log_folding_factor = *log_folding_factor;
     // Init
-    let time = Instant::now();
     debug_assert!(z_tilde.iter().skip(1).step_by(2).all(|v| v.is_zero()));
     let round_count = compute_round_count(z_tilde.len(), log_folding_factor);
     let mut b_tilde = Vec::with_capacity(round_count);
@@ -290,8 +295,6 @@ pub fn dealer<F: FieldElement>(
         .collect();
     // let s_tilde = (F::random(&mut rng), F::random(&mut rng));
 
-    println!("First: {}", time.elapsed().as_millis());
-    let mut time = Instant::now();
     // Rounds
     let mut round_challenges_shares = vec![Vec::with_capacity(round_count); num_verifiers + 1];
     let M = 1 << log_folding_factor;
@@ -316,7 +319,7 @@ pub fn dealer<F: FieldElement>(
         eval_ctx_internal_round_polys.prepare_at_points(std::slice::from_ref(&r));
         const CHUNK_SIZE: usize = 32;
         let z_output = unsafe { std::slice::from_raw_parts_mut(z_tilde[1..1 + L].as_mut_ptr(), L) };
-        eval_ctx_internal_round_polys.interpolate(&z_tilde[1..], z_output);
+        eval_ctx_internal_round_polys.interpolate(&z_tilde[1..], z_output, 1, 2);
 
         let next_round_size = ((L + 2 * M - 1) / (2 * M)) * (2 * M);
         // We now round up z_tilde's length to be a multiple of 2*M. This is OK for inner product.
@@ -327,10 +330,10 @@ pub fn dealer<F: FieldElement>(
         eval_ctx_internal_round_proof.interpolate(
             &proof_masks[q_base..q_base + internal_proof_length],
             &mut z_tilde[0..1],
+            0,
+            1,
         );
         z_tilde = &mut z_tilde[..=next_round_size];
-        println!("Round: {}", time.elapsed().as_millis());
-        time = Instant::now();
     }
     // last round
     debug_assert_eq!(z_tilde.len(), 1 + 2 * M);
@@ -354,14 +357,16 @@ pub fn dealer<F: FieldElement>(
     let s_tilde = [last_round_masks[0], last_round_masks[1]];
     let interpolation_buf: Vec<_> = z_tilde[1..].iter().chain(s_tilde.iter()).copied().collect();
     let mut f_tilde_r = [F::zero(); 2];
-    eval_ctx_last_round_polys.interpolate(&interpolation_buf, &mut f_tilde_r[..]);
+    eval_ctx_last_round_polys.interpolate(&interpolation_buf, &mut f_tilde_r[..], 0, 1);
     let mut g_tilde_r = F::zero();
-    eval_ctx_last_round_proof
-        .interpolate(&last_round_masks[2..], std::slice::from_mut(&mut g_tilde_r));
+    eval_ctx_last_round_proof.interpolate(
+        &last_round_masks[2..],
+        std::slice::from_mut(&mut g_tilde_r),
+        0,
+        1,
+    );
     b_tilde.push(z_tilde[0] - (0..M).map(|i| last_round_masks[2 + i]).sum());
 
-    println!("Last Round: {}", time.elapsed().as_millis());
-    time = Instant::now();
     // Decision
     let betas: Vec<_> = (0..round_count).map(|_| F::random(&mut rng)).collect();
     debug_assert_eq!(betas.len(), b_tilde.len());
@@ -392,7 +397,6 @@ pub fn dealer<F: FieldElement>(
             },
         })
         .collect();
-    println!("Decision: {}", time.elapsed().as_millis());
     (prover, verifiers)
 }
 
@@ -434,13 +438,13 @@ fn multi_eval_at_point<F: FieldElement>(
     let z_output = unsafe { std::slice::from_raw_parts_mut(z[1..1 + L].as_mut_ptr(), L) };
     const CHUNK_SIZE: usize = 32;
 
-    eval_ctx_polys.interpolate(&z[1..], z_output);
+    eval_ctx_polys.interpolate(&z[1..], z_output, 0, 1);
     let next_round_statement_size = ((L + 2 * M - 1) / (2 * M)) * (2 * M);
     for i in L..next_round_statement_size {
         z[1 + i] = F::zero();
     }
     let mut output = F::zero();
-    eval_ctx_proof.interpolate(round_proof, std::slice::from_mut(&mut output));
+    eval_ctx_proof.interpolate(round_proof, std::slice::from_mut(&mut output), 0, 1);
     output
 }
 pub struct ProverCtx<F: FieldElement> {
@@ -450,6 +454,7 @@ pub struct ProverCtx<F: FieldElement> {
     eval_ctx_last_round_proof_gen: EvalCtx<F>,
     eval_ctx_auth_polys: EvalCtx<F>,
     eval_ctx_auth_proof: EvalCtx<F>,
+    log_folding_factor: usize,
 }
 impl<F: FieldElement> ProverCtx<F> {
     pub fn new(log_folding_factor: usize) -> Self {
@@ -472,6 +477,7 @@ impl<F: FieldElement> ProverCtx<F> {
                 last_round_proof_length(log_folding_factor) - 2,
                 1,
             ),
+            log_folding_factor,
         };
         let proof_points: Vec<_> = ((1 << log_folding_factor)
             ..internal_round_proof_length(log_folding_factor))
@@ -495,7 +501,6 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     mut z: &mut [F],
     offline_material: &OfflineProver<F>,
     mut auth_statement: Option<Vec<F>>,
-    log_folding_factor: usize,
     prover_ctx: &mut ProverCtx<F>,
 ) {
     let mut time = Instant::now();
@@ -506,7 +511,9 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
         eval_ctx_last_round_proof_gen,
         eval_ctx_auth_polys,
         eval_ctx_auth_proof,
+        log_folding_factor,
     } = prover_ctx;
+    let log_folding_factor = *log_folding_factor;
     let OfflineProver {
         proof_masks,
         round_challenges,
@@ -561,14 +568,14 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
             let L = (z_len - 1) / M;
             let z_output =
                 unsafe { std::slice::from_raw_parts_mut(z_tilde[1..1 + L].as_mut_ptr(), L) };
-            eval_ctx_internal_round_polys_challenge.interpolate(&z_tilde[1..], z_output);
+            eval_ctx_internal_round_polys_challenge.interpolate(&z_tilde[1..], z_output, 0, 1);
 
             let next_round_size = ((L + 2 * M - 1) / (2 * M)) * (2 * M);
             // We now round up z_tilde's length to be a multiple of 2*M. This is OK for inner product.
             for i in L..next_round_size {
                 z_tilde[1 + i] = F::zero();
             }
-            eval_ctx_internal_round_proof_challenge.interpolate(&masks, &mut z_tilde[0..1]);
+            eval_ctx_internal_round_proof_challenge.interpolate(&masks, &mut z_tilde[0..1], 0, 1);
             z_tilde.drain(1 + next_round_statement_size..);
             auth_statement = Some(z_tilde);
         }
@@ -593,8 +600,12 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     // We need to evaluate therefore each f_i on M+1..2*M which is 2*M
     // evaluations overall.
     let mut last_round_interpolation_output = vec![F::zero(); 2 * M];
-    eval_ctx_last_round_proof_gen
-        .interpolate(&last_round_buf, &mut last_round_interpolation_output);
+    eval_ctx_last_round_proof_gen.interpolate(
+        &last_round_buf,
+        &mut last_round_interpolation_output,
+        0,
+        1,
+    );
     last_round_interpolation_output
         .chunks_exact(2)
         .for_each(|c| last_round_proof.push(c[0] * c[1]));
@@ -630,6 +641,8 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
         eval_ctx_auth_polys.interpolate(
             &interpolation_buf[..M + 1],
             std::slice::from_mut(&mut f_0_tilde_r),
+            0,
+            1,
         );
         z_tilde
             .iter()
@@ -642,11 +655,15 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
         eval_ctx_auth_polys.interpolate(
             &interpolation_buf[..M + 1],
             std::slice::from_mut(&mut f_1_tilde_r),
+            0,
+            1,
         );
         let mut g_tilde_r = F::zero();
         eval_ctx_auth_proof.interpolate(
             &proof_masks_last_round[2..],
             std::slice::from_mut(&mut g_tilde_r),
+            0,
+            1,
         );
         b_tilde.push(z_tilde[0] - (0..M).map(|i| proof_masks_last_round[2 + i]).sum());
 
@@ -680,7 +697,6 @@ pub async fn verifier<F: FieldElement>(
     mut z_hat: &mut [F],
     prover_id: PartyId,
     offline_material: &OfflineVerifier,
-    log_folding_factor: usize,
     verifier_ctx: &mut VerifierCtx<F>,
 ) {
     let VerifierCtx {
@@ -688,7 +704,9 @@ pub async fn verifier<F: FieldElement>(
         eval_ctx_internal_round_polys,
         eval_ctx_last_round_polys,
         eval_ctx_last_round_proof,
+        log_folding_factor,
     } = verifier_ctx;
+    let log_folding_factor = *log_folding_factor;
     // Init
     let round_count = compute_round_count(z_hat.len(), log_folding_factor);
     let M = 1 << log_folding_factor;
@@ -719,14 +737,14 @@ pub async fn verifier<F: FieldElement>(
         const CHUNK_SIZE: usize = 32;
         eval_ctx_internal_round_polys.prepare_at_points(std::slice::from_ref(&r));
         eval_ctx_internal_round_proof.prepare_at_points(std::slice::from_ref(&r));
-        eval_ctx_internal_round_polys.interpolate(&z_hat[1..], z_output);
+        eval_ctx_internal_round_polys.interpolate(&z_hat[1..], z_output, 0, 2);
         let next_round_size = ((L + 2 * M - 1) / (2 * M)) * (2 * M);
         // We now round up z_tilde's length to be a multiple of 2*M. This is OK for inner product.
         for i in L..next_round_size {
             z_hat[i + 1] = F::zero();
         }
 
-        eval_ctx_internal_round_proof.interpolate(&round_proof, &mut z_hat[0..1]);
+        eval_ctx_internal_round_proof.interpolate(&round_proof, &mut z_hat[0..1], 0, 1);
         z_hat = &mut z_hat[..=next_round_size];
     }
     //last_round
@@ -744,11 +762,15 @@ pub async fn verifier<F: FieldElement>(
         .copied()
         .collect();
     let mut f_hat_r = [F::zero(); 2];
-    eval_ctx_last_round_polys.interpolate(&interpolation_buf, &mut f_hat_r);
+    eval_ctx_last_round_polys.interpolate(&interpolation_buf, &mut f_hat_r, 0, 1);
     eval_ctx_last_round_proof.prepare_at_points(std::slice::from_ref(&r));
     let mut q_hat_r = F::zero();
-    eval_ctx_last_round_proof
-        .interpolate(&last_round_proof[2..], std::slice::from_mut(&mut q_hat_r));
+    eval_ctx_last_round_proof.interpolate(
+        &last_round_proof[2..],
+        std::slice::from_mut(&mut q_hat_r),
+        0,
+        1,
+    );
     b_hat.push(z_hat[0] - last_round_proof[2..2 + M].iter().copied().sum());
 
     // Decision
@@ -838,7 +860,7 @@ mod test {
         }
         eval_ctx.prepare_at_points(&eval_points);
         let mut output: Vec<GF128> = vec![GF128::zero(); EVAL_POINTS * POLYS_COUNT];
-        eval_ctx.interpolate(&evals_input, &mut output);
+        eval_ctx.interpolate(&evals_input, &mut output, 0, 1);
         // verify
         assert_eq!(evals_output, output);
 
@@ -878,12 +900,8 @@ mod test {
             .map(|_| VerifierCtx::<GF128>::new(LOG_FOLDING_FACTOR))
             .collect();
         let time = Instant::now();
-        let (prover_offline, verifiers_offline) = dealer(
-            &mut dealer_input_clone,
-            PARTIES - 2,
-            LOG_FOLDING_FACTOR,
-            &mut dealer_ctx,
-        );
+        let (prover_offline, verifiers_offline) =
+            dealer(&mut dealer_input_clone, PARTIES - 2, &mut dealer_ctx);
         println!("Dealer time: {}", time.elapsed().as_millis());
 
         // Online proof.
@@ -917,7 +935,6 @@ mod test {
                 &prover_offline,
                 // Some(dealer_input),
                 None,
-                LOG_FOLDING_FACTOR,
                 &mut prover_ctx,
             )
             .await
@@ -930,15 +947,7 @@ mod test {
                 let input = verifier_input.clone();
                 async move {
                     let mut input = input;
-                    verifier(
-                        engine,
-                        &mut input,
-                        prover_id,
-                        &v,
-                        LOG_FOLDING_FACTOR,
-                        &mut verifier_ctx,
-                    )
-                    .await;
+                    verifier(engine, &mut input, prover_id, &v, &mut verifier_ctx).await;
                     Result::<(), ()>::Ok(())
                 }
             })

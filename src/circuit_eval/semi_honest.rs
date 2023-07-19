@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::commitment::{self, StandardCommitReveal};
 use crate::zkfliop::ni::{obtain_check_value, verify_check_value, ZkFliopProof};
-use crate::zkfliop::{self, PowersIterator};
+use crate::zkfliop::{self, PowersIterator, VerifierCtx};
 use aes_prng::AesRng;
 use async_trait::async_trait;
 use bitvec::vec::BitVec;
@@ -234,6 +234,7 @@ pub trait OfflineSemiHonestCorrelation<CF: FieldElement>:
         engine: &mut impl MultiPartyEngine,
         circuit: &ParsedCircuit,
         proof: &HashMap<PartyId, ZkFliopProof<VF>>,
+        verifier_ctx: &mut Vec<VerifierCtx<VF>>,
     ) -> bool
     where
         GF2: Mul<VF, Output = VF>;
@@ -369,6 +370,7 @@ impl<
         engine: &mut impl MultiPartyEngine,
         circuit: &ParsedCircuit,
         proof: &HashMap<PartyId, ZkFliopProof<VF>>,
+        verifier_ctx: &mut Vec<VerifierCtx<VF>>,
     ) -> bool
     where
         GF2: Mul<VF, Output = VF>,
@@ -389,7 +391,8 @@ impl<
         let handles: Vec<_> = regular_bts
             .into_iter()
             .zip(wide_bts.into_iter())
-            .map(|((pid, bts), (wpid, wbts))| {
+            .zip(verifier_ctx.drain(..))
+            .map(|(((pid, bts), (wpid, wbts)), mut verifier_ctx)| {
                 assert_eq!(pid, wpid);
                 let pids = if pid > my_pid {
                     vec![my_pid, pid]
@@ -405,13 +408,17 @@ impl<
                 let coin = coin.clone();
                 async move {
                     let statement_share = construct_statement_from_bts(&bts, &wbts, coin);
-                    let (flag, check_vals) = obtain_check_value(statement_share, proof);
+                    let (flag, check_vals) =
+                        obtain_check_value(statement_share, proof, &mut verifier_ctx);
                     let output = verify_check_value(engine, flag, check_vals).await;
-                    Result::<bool, ()>::Ok(output)
+                    Result::<(bool, VerifierCtx<VF>), ()>::Ok((output, verifier_ctx))
                 }
             })
             .collect();
-        try_join_all(handles).await.unwrap().into_iter().all(|v| v)
+        try_join_all(handles).await.unwrap().into_iter().all(|v| {
+            verifier_ctx.push(v.1);
+            v.0
+        })
     }
     // Only called by the dealer anyway.
     fn get_gates_input_wires_masks(

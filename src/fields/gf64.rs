@@ -170,6 +170,14 @@ impl From<GF64> for [u8; 8] {
 
 impl FieldElement for GF64 {
     const BITS: usize = 64;
+    fn as_bytes(&self) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                std::mem::transmute::<_, *const u8>((&self.0) as *const u64),
+                8,
+            )
+        }
+    }
     fn one() -> Self {
         GF64(1u64)
     }

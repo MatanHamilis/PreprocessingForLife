@@ -97,6 +97,9 @@ impl FieldElement for GF2 {
     fn one() -> Self {
         Self { v: 1u8 }
     }
+    fn as_bytes(&self) -> &[u8] {
+        std::slice::from_ref(&self.v)
+    }
 
     fn hash(&self, hasher: &mut blake3::Hasher) {
         hasher.update(&[self.v]);
@@ -233,6 +236,14 @@ pub struct PackedGF2 {
 }
 impl FieldElement for PackedGF2 {
     const BITS: usize = PACKING;
+    fn as_bytes(&self) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                std::mem::transmute(self.bits.as_raw_slice().as_ptr()),
+                self.bits.as_raw_slice().len() * std::mem::size_of::<usize>(),
+            )
+        }
+    }
     fn from_bit(bit: bool) -> Self {
         let mut b = Self::zero();
         b.bits.fill(bit);
