@@ -23,7 +23,7 @@ use tokio::time::Instant;
 
 use crate::circuit_eval::bristol_fashion::ParsedGate;
 use crate::engine::{MultiPartyEngine, PartyId};
-use crate::fields::{FieldElement, PackedField, PackedGF2, GF2};
+use crate::fields::{FieldElement, IntermediateMulField, PackedField, PackedGF2, GF2};
 use crate::pcg::{
     FullPcgKey, PackedKeysDealer, PackedOfflineFullPcgKey, PackedSenderCorrelationGenerator,
     RegularBeaverTriple, WideBeaverTriple,
@@ -229,7 +229,7 @@ pub trait OfflineSemiHonestCorrelation<CF: FieldElement>:
     ) -> (Vec<CF>, Vec<CF>, Vec<(PartyId, Self)>);
     /// This method may optionally be called in a pre-online phase to same computation time in the online phase itself.
     fn pre_online_phase_preparation(&mut self, circuit: &ParsedCircuit);
-    async fn verify_correlation<VF: FieldElement>(
+    async fn verify_correlation<VF: IntermediateMulField>(
         &self,
         engine: &mut impl MultiPartyEngine,
         circuit: &ParsedCircuit,
@@ -365,7 +365,7 @@ impl<
         self.wide_expanded_pcg_keys = Some(wm);
     }
 
-    async fn verify_correlation<VF: FieldElement>(
+    async fn verify_correlation<VF: IntermediateMulField>(
         &self,
         engine: &mut impl MultiPartyEngine,
         circuit: &ParsedCircuit,

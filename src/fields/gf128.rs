@@ -420,16 +420,24 @@ pub struct MulResidue128 {
     carry: u64x2,
 }
 impl MulResidue<GF128> for MulResidue128 {
-    fn reduce(self) -> GF128 {
+    fn reduce(&self) -> GF128 {
         let v = GF128::mod_reduce(self.carry);
-        GF128(v + self.base)
+        GF128(v ^ self.base)
+    }
+}
+impl From<GF128> for MulResidue128 {
+    fn from(value: GF128) -> Self {
+        Self {
+            base: value.0,
+            carry: u64x2::default(),
+        }
     }
 }
 
 impl AddAssign for MulResidue128 {
     fn add_assign(&mut self, rhs: Self) {
-        self.base += rhs.base;
-        self.carry += rhs.carry;
+        self.base ^= rhs.base;
+        self.carry ^= rhs.carry;
     }
 }
 

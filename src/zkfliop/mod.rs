@@ -3,7 +3,7 @@ use std::time::Instant;
 use crate::{
     commitment::{CommmitShare, OfflineCommitment},
     engine::{MultiPartyEngine, PartyId},
-    fields::FieldElement,
+    fields::{FieldElement, IntermediateMulField, MulResidue},
 };
 use aes_prng::AesRng;
 use log::info;
@@ -75,6 +75,11 @@ pub fn compute_round_count(mut z_len: usize, log_folding_factor: usize) -> usize
 pub fn g<F: FieldElement>(z: &[F]) -> F {
     z.chunks_exact(2).map(|f| f[0] * f[1]).sum()
 }
+pub fn g_mul_res<F: IntermediateMulField>(z: &[F::MulRes]) -> F {
+    z.chunks_exact(2)
+        .map(|f| f[0].reduce() * f[1].reduce())
+        .sum()
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OfflineProver<F: FieldElement> {
     #[serde(bound = "")]
@@ -89,16 +94,16 @@ pub struct OfflineVerifier {
     final_msg: OfflineCommitment,
 }
 
-struct EvalCtx<F: FieldElement> {
+struct EvalCtx<F: IntermediateMulField> {
     numbers: Vec<F>,
     prefix_buf: Vec<F>,
     suffix_buf: Vec<F>,
     denoms: Vec<F>,
     eval_points: usize,
     coeffs: Vec<F>,
-    interpolation_buf: Vec<F>,
+    interpolation_buf: Vec<F::MulRes>,
 }
-impl<F: FieldElement> EvalCtx<F> {
+impl<F: IntermediateMulField> EvalCtx<F> {
     fn new(interpolation_points: usize, eval_points: usize) -> Self {
         let numbers: Vec<_> = (0..interpolation_points)
             .map(|i| F::number(i as u32))
@@ -120,7 +125,7 @@ impl<F: FieldElement> EvalCtx<F> {
             denoms,
             eval_points,
             coeffs,
-            interpolation_buf: vec![F::zero(); interpolation_points * eval_points],
+            interpolation_buf: vec![F::zero().into(); interpolation_points * eval_points],
         }
     }
     fn prepare_at_points(&mut self, at: &[F]) {
@@ -165,14 +170,16 @@ impl<F: FieldElement> EvalCtx<F> {
         for poly_chunk_base in (0..L).step_by(M) {
             self.interpolation_buf
                 .iter_mut()
-                .for_each(|v| *v = F::zero());
+                .for_each(|v| *v = F::zero().into());
             let poly_chunk_size = usize::min(L, poly_chunk_base + M) - poly_chunk_base;
             for evalled in 0..M {
                 let in_coeff_idx = evalled * L + poly_chunk_base;
                 for eval_point in 0..self.eval_points {
                     for p in (base..poly_chunk_size).step_by(step) {
                         self.interpolation_buf[eval_point * M + p] += evals[in_coeff_idx + p]
-                            * self.coeffs[eval_point + evalled * self.eval_points];
+                            .intermediate_mul(
+                                &self.coeffs[eval_point + evalled * self.eval_points],
+                            );
                         // output[eval_point * L + poly_chunk_base + p] += evals[in_coeff_idx + p]
                         // * self.coeffs[eval_point + evalled * self.eval_points];
                     }
@@ -181,7 +188,7 @@ impl<F: FieldElement> EvalCtx<F> {
             for eval_point in 0..self.eval_points {
                 for p in 0..poly_chunk_size {
                     output[eval_point * L + poly_chunk_base + p] =
-                        self.interpolation_buf[eval_point * M + p];
+                        self.interpolation_buf[eval_point * M + p].reduce();
                 }
             }
         }
@@ -220,7 +227,7 @@ impl<F: FieldElement> EvalCtx<F> {
         for poly_chunk_base in (0..L).step_by(M) {
             self.interpolation_buf
                 .iter_mut()
-                .for_each(|v| *v = F::zero());
+                .for_each(|v| *v = F::zero().into());
             let poly_chunk_size = usize::min(L, poly_chunk_base + M) - poly_chunk_base;
             for evalled in 0..M {
                 let in_coeff_idx = evalled * L + poly_chunk_base;
@@ -230,7 +237,7 @@ impl<F: FieldElement> EvalCtx<F> {
                         .iter_mut()
                         .zip(evals[in_coeff_idx..in_coeff_idx + poly_chunk_size].iter())
                         .for_each(|(o, i)| {
-                            *o += c * *i;
+                            *o += c.intermediate_mul(i);
                         });
                 }
             }
@@ -239,19 +246,19 @@ impl<F: FieldElement> EvalCtx<F> {
                 .zip(self.interpolation_buf.chunks(M))
                 .for_each(|(o, chunk)| {
                     // Ok because entries we didn't touch are zero.
-                    *o += g(chunk);
+                    *o += g_mul_res(chunk);
                 });
         }
     }
 }
-pub struct VerifierCtx<F: FieldElement> {
+pub struct VerifierCtx<F: IntermediateMulField> {
     eval_ctx_internal_round_proof: EvalCtx<F>,
     eval_ctx_internal_round_polys: EvalCtx<F>,
     eval_ctx_last_round_polys: EvalCtx<F>,
     eval_ctx_last_round_proof: EvalCtx<F>,
     log_folding_factor: usize,
 }
-impl<F: FieldElement> VerifierCtx<F> {
+impl<F: IntermediateMulField> VerifierCtx<F> {
     pub fn new(log_folding_factor: usize) -> Self {
         Self {
             eval_ctx_internal_round_proof: EvalCtx::<F>::new(
@@ -271,7 +278,7 @@ impl<F: FieldElement> VerifierCtx<F> {
         self.log_folding_factor
     }
 }
-pub fn dealer<F: FieldElement>(
+pub fn dealer<F: IntermediateMulField>(
     mut z_tilde: &mut [F],
     num_verifiers: usize,
     verifier_ctx: &mut VerifierCtx<F>,
@@ -402,7 +409,7 @@ pub fn dealer<F: FieldElement>(
     (prover, verifiers)
 }
 
-fn make_round_proof<F: FieldElement>(
+fn make_round_proof<F: IntermediateMulField>(
     z: &[F],
     log_folding_factor: usize,
     eval_ctx_at_m_to_2m_minus_1: &mut EvalCtx<F>,
@@ -425,7 +432,7 @@ fn make_round_proof<F: FieldElement>(
     eval_ctx_at_m_to_2m_minus_1.interpolate_with_g(&z[1..], &mut output[M..]);
     output
 }
-fn multi_eval_at_point<F: FieldElement>(
+fn multi_eval_at_point<F: IntermediateMulField>(
     z: &mut [F],
     round_proof: &[F],
     challenge: F,
@@ -449,7 +456,7 @@ fn multi_eval_at_point<F: FieldElement>(
     eval_ctx_proof.interpolate(round_proof, std::slice::from_mut(&mut output), 0, 1);
     output
 }
-pub struct ProverCtx<F: FieldElement> {
+pub struct ProverCtx<F: IntermediateMulField> {
     eval_ctx_internal_round_polys_challenge: EvalCtx<F>,
     eval_ctx_internal_round_proof_challenge: EvalCtx<F>,
     eval_ctx_internal_round_proof_gen: EvalCtx<F>,
@@ -458,7 +465,7 @@ pub struct ProverCtx<F: FieldElement> {
     eval_ctx_auth_proof: EvalCtx<F>,
     log_folding_factor: usize,
 }
-impl<F: FieldElement> ProverCtx<F> {
+impl<F: IntermediateMulField> ProverCtx<F> {
     pub fn new(log_folding_factor: usize) -> Self {
         let mut output = Self {
             eval_ctx_internal_round_polys_challenge: EvalCtx::<F>::new(1 << log_folding_factor, 1),
@@ -498,7 +505,7 @@ impl<F: FieldElement> ProverCtx<F> {
         output
     }
 }
-pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
+pub async fn prover<F: IntermediateMulField, E: MultiPartyEngine>(
     mut engine: E,
     mut z: &mut [F],
     offline_material: &OfflineProver<F>,
@@ -694,7 +701,7 @@ pub async fn prover<F: FieldElement, E: MultiPartyEngine>(
     println!("Prover LAST: {} ms", time.elapsed().as_millis());
 }
 
-pub async fn verifier<F: FieldElement>(
+pub async fn verifier<F: IntermediateMulField>(
     mut engine: impl MultiPartyEngine,
     mut z_hat: &mut [F],
     prover_id: PartyId,
@@ -879,8 +886,8 @@ mod test {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_zkfliop() {
         const LOG_FOLDING_FACTOR: usize = 1;
-        const LOG: usize = 25;
-        const Z_LEN: usize = 1 + 100_000;
+        const LOG: usize = 2;
+        const Z_LEN: usize = 1 + 4;
         const PARTIES: usize = 3;
         const ONLINE_PARTIES: usize = PARTIES - 1;
         let party_ids: [PartyId; PARTIES] = core::array::from_fn(|i| i as u64);

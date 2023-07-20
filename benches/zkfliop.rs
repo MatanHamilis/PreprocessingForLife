@@ -3,11 +3,11 @@ use std::fmt::format;
 use aes_prng::AesRng;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::thread_rng;
-use silent_party::fields::{FieldElement, GF64};
+use silent_party::fields::{FieldElement, IntermediateMulField, GF64};
 use silent_party::zkfliop::ni::{obtain_check_value, prove};
 use silent_party::zkfliop::{dealer, ProverCtx, VerifierCtx};
 
-fn do_zkfliop_bench<F: FieldElement>(
+fn do_zkfliop_bench<F: IntermediateMulField>(
     c: &mut Criterion,
     statement_len: usize,
     log_folding_factor: usize,
@@ -43,7 +43,7 @@ fn do_zkfliop_bench<F: FieldElement>(
         },
     );
 }
-fn do_zkfliop_bench_verify<F: FieldElement>(
+fn do_zkfliop_bench_verify<F: IntermediateMulField>(
     c: &mut Criterion,
     statement_len: usize,
     log_folding_factor: usize,

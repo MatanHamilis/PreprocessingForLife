@@ -9,7 +9,7 @@ use tokio::time::Instant;
 use crate::{
     commitment::OfflineCommitment,
     engine::MultiPartyEngine,
-    fields::{FieldElement, PackedField, GF2},
+    fields::{FieldElement, IntermediateMulField, PackedField, GF2},
     zkfliop::{self, ni::ZkFliopProof},
     PartyId,
 };
@@ -39,7 +39,7 @@ pub struct MaliciousSecurityOffline<
 impl<
         const PACKING: usize,
         PF: PackedField<GF2, PACKING>,
-        F: FieldElement + From<GF2>,
+        F: IntermediateMulField + From<GF2>,
         SHO: OfflineSemiHonestCorrelation<PF>,
     > MaliciousSecurityOffline<PACKING, PF, F, SHO>
 where
@@ -172,7 +172,7 @@ pub struct PreOnlineMaterial<
 impl<
         const PACKING: usize,
         PF: PackedField<GF2, PACKING>,
-        F: FieldElement + From<GF2>,
+        F: IntermediateMulField + From<GF2>,
         C: AsRef<ParsedCircuit>,
         SHO: OfflineSemiHonestCorrelation<PF>,
     > PreOnlineMaterial<PACKING, PF, F, C, SHO>

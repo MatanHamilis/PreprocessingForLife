@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     add_assign_arrays, diff_assign_arrays,
     engine::MultiPartyEngine,
-    fields::FieldElement,
+    fields::{FieldElement, IntermediateMulField},
     zkfliop::{internal_round_proof_length, last_round_proof_length, PowersIterator},
 };
 
@@ -95,7 +95,7 @@ impl<F: FieldElement> ZkFliopProof<F> {
         self.commits.push(commits);
     }
 }
-pub fn prove<'a, F: FieldElement>(
+pub fn prove<'a, F: IntermediateMulField>(
     parties_statements: impl Iterator<Item = &'a Vec<F>>,
     mut statement: Vec<F>,
     prover_ctx: &mut ProverCtx<F>,
@@ -214,7 +214,7 @@ pub fn prove<'a, F: FieldElement>(
     }
     output
 }
-pub fn obtain_check_value<F: FieldElement>(
+pub fn obtain_check_value<F: IntermediateMulField>(
     mut statement_share: Vec<F>,
     proof: &ZkFliopProof<F>,
     verifier_ctx: &mut VerifierCtx<F>,
@@ -323,14 +323,14 @@ mod test {
 
     use crate::{
         engine::LocalRouter,
-        fields::{FieldElement, GF64},
+        fields::{FieldElement, IntermediateMulField, GF64},
         zkfliop::{ProverCtx, VerifierCtx},
         UCTag,
     };
 
     use super::{obtain_check_value, prove, verify_check_value};
 
-    async fn test_nizk_fliop<F: FieldElement>(
+    async fn test_nizk_fliop<F: IntermediateMulField>(
         statement: &[F],
         verifiers: u64,
         log_folding_factor: usize,

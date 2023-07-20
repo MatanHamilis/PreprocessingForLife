@@ -1,7 +1,7 @@
 use std::{collections::HashMap, ops::Mul, sync::Arc};
 
 use crate::{
-    fields::GF2,
+    fields::{IntermediateMulField, GF2},
     zkfliop::{
         ni::{hash_statement, prove, ZkFliopProof},
         PowersIterator, ProverCtx, VerifierCtx,
@@ -482,11 +482,11 @@ pub struct OfflineCircuitVerify<F: FieldElement> {
     prover_offline_material: OfflineProver<F>,
 }
 
-pub struct FliopCtx<F: FieldElement> {
+pub struct FliopCtx<F: IntermediateMulField> {
     pub prover_ctx: Option<ProverCtx<F>>,
     pub verifiers_ctx: Option<Vec<VerifierCtx<F>>>,
 }
-impl<F: FieldElement> FliopCtx<F> {
+impl<F: IntermediateMulField> FliopCtx<F> {
     pub fn new(log_folding_factor: usize, verifiers_count: usize) -> Self {
         Self {
             prover_ctx: Some(ProverCtx::new(log_folding_factor)),
@@ -502,7 +502,7 @@ pub async fn verify_parties<
     const PACKING: usize,
     PF: PackedField<CF, PACKING>,
     CF: FieldElement + Mul<F, Output = F>,
-    F: FieldElement + From<CF>,
+    F: IntermediateMulField + From<CF>,
     E: MultiPartyEngine,
 >(
     engine: &mut E,
@@ -722,11 +722,11 @@ pub async fn verify_parties<
     return p.is_zero();
 }
 
-pub struct DealerCtx<F: FieldElement> {
+pub struct DealerCtx<F: IntermediateMulField> {
     prover_ctx: ProverCtx<F>,
     verifier_ctx: VerifierCtx<F>,
 }
-impl<F: FieldElement> DealerCtx<F> {
+impl<F: IntermediateMulField> DealerCtx<F> {
     pub fn new(log_folding_factor: usize) -> Self {
         Self {
             prover_ctx: ProverCtx::new(log_folding_factor),
@@ -737,7 +737,7 @@ impl<F: FieldElement> DealerCtx<F> {
 pub fn offline_verify_dealer<
     const PACKING: usize,
     PF: PackedField<GF2, PACKING>,
-    F: FieldElement + From<GF2>,
+    F: IntermediateMulField + From<GF2>,
     SHO: OfflineSemiHonestCorrelation<PF>,
 >(
     circuit: &ParsedCircuit,

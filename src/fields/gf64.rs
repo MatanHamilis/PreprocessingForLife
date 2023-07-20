@@ -371,8 +371,15 @@ pub struct MulResidue64 {
     v: u64x2,
 }
 impl MulResidue<GF64> for MulResidue64 {
-    fn reduce(self) -> GF64 {
+    fn reduce(&self) -> GF64 {
         GF64(GF64::reduce(self.v.into()))
+    }
+}
+impl From<GF64> for MulResidue64 {
+    fn from(value: GF64) -> Self {
+        Self {
+            v: Simd::from_array([value.0, 0]),
+        }
     }
 }
 

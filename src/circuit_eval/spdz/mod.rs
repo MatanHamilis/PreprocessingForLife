@@ -13,7 +13,7 @@ use crate::{
     circuit_eval::{bristol_fashion::ParsedGate, RegularMask},
     commitment::{OfflineCommitment, StandardCommitReveal},
     engine::MultiPartyEngine,
-    fields::{FieldElement, PackedField, GF2},
+    fields::{FieldElement, IntermediateMulField, PackedField, GF2},
     zkfliop::{self, g, ni::ZkFliopProof, PowersIterator, ProverCtx, VerifierCtx},
     PartyId,
 };
@@ -219,7 +219,7 @@ pub fn build_statement<
 pub fn spdz_deal<
     const N: usize,
     PF: PackedField<GF2, N>,
-    VF: FieldElement + Mul<GF2, Output = VF>,
+    VF: IntermediateMulField + Mul<GF2, Output = VF>,
 >(
     circuit: &ParsedCircuit,
     input_pos: &HashMap<PartyId, (usize, usize)>,
@@ -355,7 +355,7 @@ pub fn spdz_deal<
 pub async fn offline_spdz_verify<
     const N: usize,
     PF: PackedField<GF2, N>,
-    VF: FieldElement + Mul<GF2, Output = VF>,
+    VF: IntermediateMulField + Mul<GF2, Output = VF>,
 >(
     engine: &mut impl MultiPartyEngine,
     correlation: &SpdzCorrelation<N, PF, VF>,

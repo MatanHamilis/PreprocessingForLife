@@ -18,9 +18,18 @@ use std::ops::Neg;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 mod gf_mersenne;
 pub trait MulResidue<F: FieldElement>:
-    Add<Output = Self> + AddAssign + Sub<Output = Self> + SubAssign + Copy + Clone + Send + Sync + Sum
+    Add<Output = Self>
+    + AddAssign
+    + Sub<Output = Self>
+    + SubAssign
+    + Copy
+    + Clone
+    + Send
+    + Sync
+    + Sum
+    + From<F>
 {
-    fn reduce(self) -> F;
+    fn reduce(&self) -> F;
 }
 pub trait IntermediateMulField: FieldElement {
     type MulRes: MulResidue<Self>;
