@@ -645,7 +645,7 @@ mod tests {
     use crate::{
         circuit_eval::{
             parse_bristol, semi_honest::local_eval_circuit, spdz::offline_spdz_verify,
-            ParsedCircuit,
+            FieldContainer, GF2Container, PackedGF2Container, ParsedCircuit,
         },
         engine::{LocalRouter, MultiPartyEngine, NetworkRouter},
         fields::{FieldElement, PackedField, PackedGF2, GF2, GF64},
@@ -654,7 +654,7 @@ mod tests {
     };
 
     use super::{online_spdz, spdz_deal};
-    fn spdz_test_circuit<const N: usize, PF: PackedField<GF2, N>>(
+    fn spdz_test_circuit<const N: usize, PF: PackedField<GF2, N>, CF: FieldContainer<PF>>(
         circuit: ParsedCircuit,
         input: Vec<PF>,
         log_folding_factor: usize,
@@ -718,7 +718,7 @@ mod tests {
         let input_pos_second = input_pos_first.clone();
         let first_party_handle = runtime.spawn(async move {
             let mut first_party = first_party;
-            online_spdz(
+            online_spdz::<N, _, _, CF>(
                 &mut first_party,
                 &first_party_circuit,
                 &input_first,
@@ -729,7 +729,7 @@ mod tests {
         });
         let second_party_handle = runtime.spawn(async move {
             let mut second_party = second_party;
-            online_spdz(
+            online_spdz::<N, _, _, CF>(
                 &mut second_party,
                 &second_party_circuit,
                 &input_second,
@@ -762,14 +762,18 @@ mod tests {
         let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
             .expect("Failed to parse");
 
-        spdz_test_circuit::<{ GF2::BITS }, GF2>(parsed_circuit, vec![GF2::zero(), GF2::zero()], 1);
+        spdz_test_circuit::<{ GF2::BITS }, GF2, GF2Container>(
+            parsed_circuit,
+            vec![GF2::zero(), GF2::zero()],
+            1,
+        );
     }
     #[test]
     fn spdz_test() {
         const PARTY_COUNT: usize = 2;
         let path = Path::new("circuits/aes_128.txt");
         let parsed_circuit = super::super::circuit_from_file(path).unwrap();
-        spdz_test_circuit::<{ PackedGF2::BITS }, PackedGF2>(
+        spdz_test_circuit::<{ PackedGF2::BITS }, PackedGF2, PackedGF2Container>(
             parsed_circuit,
             vec![PackedGF2::one(); 256],
             2,

@@ -17,12 +17,12 @@ use std::iter::Sum;
 use std::ops::Neg;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 mod gf_mersenne;
-trait MulResidue<F: FieldElement>:
+pub trait MulResidue<F: FieldElement>:
     Add<Output = Self> + AddAssign + Sub<Output = Self> + SubAssign + Copy + Clone + Send + Sync + Sum
 {
     fn reduce(self) -> F;
 }
-trait IntermediateMulField: FieldElement {
+pub trait IntermediateMulField: FieldElement {
     type MulRes: MulResidue<Self>;
     fn intermediate_mul(&self, rhs: &Self) -> Self::MulRes;
 }

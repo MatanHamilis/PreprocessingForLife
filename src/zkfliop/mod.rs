@@ -187,7 +187,7 @@ impl<F: FieldElement> EvalCtx<F> {
         }
     }
     // Denoms are independent of evaluation point and therefore can be preprocessed.
-    fn interpolate_with_g<'a>(&self, evals: &[F], output: &mut [F]) {
+    fn interpolate_with_g<'a>(&mut self, evals: &[F], output: &mut [F]) {
         let M = self.denoms.len();
         output.iter_mut().for_each(|v| *v = F::zero());
         let L = evals.len() / M;
@@ -216,15 +216,17 @@ impl<F: FieldElement> EvalCtx<F> {
         // For every chunk of M polynomials we evaluation all of them on a set of `eval_points` points.
         // First M will be evals at first point, next will be evals of second point etc...
         // Since M is even we can make partial computation out of it.
-        let mut interpolation_buf = vec![F::zero(); M * self.eval_points];
+        // let mut interpolation_buf = vec![F::zero(); M * self.eval_points];
         for poly_chunk_base in (0..L).step_by(M) {
-            interpolation_buf.iter_mut().for_each(|v| *v = F::zero());
+            self.interpolation_buf
+                .iter_mut()
+                .for_each(|v| *v = F::zero());
             let poly_chunk_size = usize::min(L, poly_chunk_base + M) - poly_chunk_base;
             for evalled in 0..M {
                 let in_coeff_idx = evalled * L + poly_chunk_base;
                 for eval_point in 0..self.eval_points {
                     let c = self.coeffs[eval_point + evalled * self.eval_points];
-                    interpolation_buf[eval_point * M..eval_point * M + poly_chunk_size]
+                    self.interpolation_buf[eval_point * M..eval_point * M + poly_chunk_size]
                         .iter_mut()
                         .zip(evals[in_coeff_idx..in_coeff_idx + poly_chunk_size].iter())
                         .for_each(|(o, i)| {
@@ -234,7 +236,7 @@ impl<F: FieldElement> EvalCtx<F> {
             }
             output
                 .iter_mut()
-                .zip(interpolation_buf.chunks(M))
+                .zip(self.interpolation_buf.chunks(M))
                 .for_each(|(o, chunk)| {
                     // Ok because entries we didn't touch are zero.
                     *o += g(chunk);
