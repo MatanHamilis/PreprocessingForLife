@@ -1,3 +1,5 @@
+use std::alloc::Layout;
+
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 
@@ -5,7 +7,10 @@ use crate::{
     engine::MultiPartyEngine,
     fields::{FieldElement, GF128},
     ot::{ChosenMessageOTReceiver, ChosenMessageOTSender},
-    pseudorandom::prg::{double_prg_field, double_prg_many_inplace, fill_prg},
+    pseudorandom::prg::{
+        alloc_aligned_vec, double_prg_field, double_prg_many_inplace, fill_prg,
+        fill_prg_cache_friendly, ALIGN,
+    },
 };
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -31,34 +36,47 @@ pub struct PprfSender {
 // }
 
 impl PackedPprfSender {
-    fn inflate_internal(&self, is_deal: bool, evals: &mut [GF128]) -> Option<Vec<(GF128, GF128)>> {
+    fn inflate_internal(
+        &self,
+        is_deal: bool,
+        evals: &mut [GF128],
+        buf: &mut [GF128],
+    ) -> Option<Vec<(GF128, GF128)>> {
         let mut left_right_sums = if is_deal {
             None
         } else {
             Some(Vec::<(GF128, GF128)>::with_capacity(self.depth))
         };
-        evals[0] = self.seed;
-        for i in 0..self.depth {
-            double_prg_many_inplace(&mut evals[0..1 << (i + 1)]);
-            if !is_deal {
-                let sums = left_right_sums.as_mut().unwrap();
-                sums.push(
-                    evals[0..1 << (i + 1)]
-                        .chunks_exact(2)
-                        .fold((GF128::zero(), GF128::zero()), |a, b| {
-                            (a.0 + b[0], a.1 + b[1])
-                        }),
-                );
+        if is_deal {
+            fill_prg_cache_friendly(&self.seed, &mut evals[..], buf)
+        } else {
+            evals[0] = self.seed;
+            for i in 0..self.depth {
+                double_prg_many_inplace(&mut evals[0..1 << (i + 1)]);
+                if !is_deal {
+                    let sums = left_right_sums.as_mut().unwrap();
+                    sums.push(
+                        evals[0..1 << (i + 1)]
+                            .chunks_exact(2)
+                            .fold((GF128::zero(), GF128::zero()), |a, b| {
+                                (a.0 + b[0], a.1 + b[1])
+                            }),
+                    );
+                }
             }
         }
         left_right_sums
     }
-    pub fn inflate_distributed(&self, output: &mut [GF128]) -> Vec<(GF128, GF128)> {
-        let left_right_sums = self.inflate_internal(false, output);
+    pub fn inflate_distributed(
+        &self,
+        output: &mut [GF128],
+        buf: &mut [GF128],
+    ) -> Vec<(GF128, GF128)> {
+        let left_right_sums = self.inflate_internal(false, output, buf);
         left_right_sums.unwrap()
     }
-    pub fn inflate_with_deal(&self, output: &mut [GF128]) {
-        self.inflate_internal(true, output);
+    pub fn inflate_with_deal(&self, output: &mut [GF128], buf: &mut [GF128]) {
+        self.inflate_internal(true, output, buf);
     }
     pub fn puncture(&self, punctured_index: usize) -> PackedPprfReceiver {
         let mut seed = self.seed;
@@ -99,7 +117,7 @@ pub struct PackedPprfReceiver {
 }
 
 impl PackedPprfReceiver {
-    pub fn unpack_into(&self, evals: &mut [GF128]) -> usize {
+    pub fn unpack_into(&self, evals: &mut [GF128], buf: &mut [GF128]) -> usize {
         let depth = self.subtree_seeds.len();
         let n = 1 << depth;
         assert!(self.punctured_index < n);
@@ -108,10 +126,22 @@ impl PackedPprfReceiver {
         for seed in self.subtree_seeds.iter() {
             let mid = (top + bottom) / 2;
             if self.punctured_index >= mid {
-                fill_prg(seed, &mut evals[bottom..mid]);
+                if mid - bottom < ALIGN {
+                    fill_prg(seed, &mut evals[bottom..mid]);
+                } else {
+                    fill_prg_cache_friendly(
+                        seed,
+                        &mut evals[bottom..mid],
+                        &mut buf[..(mid - bottom)],
+                    );
+                }
                 bottom = mid;
             } else {
-                fill_prg(seed, &mut evals[mid..top]);
+                if top - mid < ALIGN {
+                    fill_prg(seed, &mut evals[mid..top]);
+                } else {
+                    fill_prg_cache_friendly(seed, &mut evals[mid..top], &mut buf[..(top - mid)]);
+                }
                 top = mid;
             }
         }
@@ -120,24 +150,24 @@ impl PackedPprfReceiver {
         self.punctured_index
     }
 }
-impl From<&PackedPprfReceiver> for PprfReceiver {
-    fn from(value: &PackedPprfReceiver) -> Self {
+
+pub struct PprfReceiver {
+    pub punctured_index: usize,
+    pub evals: Vec<GF128>,
+}
+impl PprfReceiver {
+    fn from(value: &PackedPprfReceiver, buf: &mut [GF128]) -> Self {
         let depth = value.subtree_seeds.len();
         let n = 1 << depth;
-        let mut evals = Vec::with_capacity(n);
+        let mut evals = alloc_aligned_vec(n);
         unsafe { evals.set_len(n) };
         assert!(value.punctured_index < n);
-        value.unpack_into(&mut evals);
+        value.unpack_into(&mut evals, buf);
         Self {
             punctured_index: value.punctured_index,
             evals,
         }
     }
-}
-
-pub struct PprfReceiver {
-    pub punctured_index: usize,
-    pub evals: Vec<GF128>,
 }
 pub async fn distributed_pprf_receiver<T: MultiPartyEngine>(
     engine: T,
@@ -184,6 +214,7 @@ mod tests {
     use super::{deal_pprf, distributed_pprf_receiver, distributed_pprf_sender};
     use super::{PackedPprfSender, PprfSender};
     use crate::pprf::PprfReceiver;
+    use crate::pseudorandom::prg::alloc_aligned_vec;
     use crate::{
         engine::LocalRouter,
         fields::{FieldElement, GF128},
@@ -203,9 +234,10 @@ mod tests {
         let pprf_sender_engine = engines.remove(&party_ids[0]).unwrap();
         let pprf_receiver_engine = engines.remove(&party_ids[1]).unwrap();
         let mut rng = thread_rng();
-        let mut evals = vec![GF128::zero(); 1 << PPRF_DEPTH];
+        let mut evals = alloc_aligned_vec(1 << PPRF_DEPTH);
+        let mut buf = alloc_aligned_vec(1 << PPRF_DEPTH);
         let left_right_sums = PackedPprfSender::new(PPRF_DEPTH, GF128::random(&mut rng))
-            .inflate_distributed(&mut evals);
+            .inflate_distributed(&mut evals, &mut buf);
         let pprf_sender_val: PprfSender = PprfSender {
             evals,
             left_right_sums,
@@ -243,9 +275,10 @@ mod tests {
     fn test_puncture() {
         const DEPTH: usize = 1;
         let (sender, receiver) = deal_pprf(DEPTH, thread_rng());
-        let mut evals = vec![GF128::zero(); 1 << DEPTH];
-        sender.inflate_with_deal(&mut evals);
-        let receiver = PprfReceiver::from(&receiver);
+        let mut evals = alloc_aligned_vec(1 << DEPTH);
+        let mut buf = alloc_aligned_vec(1 << DEPTH);
+        sender.inflate_with_deal(&mut evals, &mut buf);
+        let receiver = PprfReceiver::from(&receiver, &mut buf);
         for i in 0..1 << DEPTH {
             if i != receiver.punctured_index {
                 assert_eq!(evals[i], receiver.evals[i])

@@ -1,4 +1,7 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    alloc::Layout,
+    ops::{Deref, DerefMut},
+};
 
 use crate::{fields::GF128, xor_arrays};
 #[cfg(feature = "aesni")]
@@ -7,15 +10,61 @@ use aes::{
     Aes128, Block,
 };
 use once_cell::sync::Lazy;
+use rayon::{
+    prelude::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator},
+    slice::ParallelSliceMut,
+};
 use serde::{Deserialize, Serialize};
 pub const PRG_KEY_SIZE: usize = 16;
-
+pub const ALIGN: usize = 256;
+pub fn alloc_aligned_vec(length: usize) -> Vec<GF128> {
+    let layout = Layout::array::<GF128>(length)
+        .unwrap()
+        .align_to(ALIGN)
+        .unwrap();
+    let buf1 = unsafe { std::alloc::alloc(layout) as *mut GF128 };
+    unsafe { Vec::from_raw_parts(buf1, length, length) }
+}
 pub fn fill_prg(seed: &GF128, output: &mut [GF128]) {
     let depth = output.len().ilog2();
     assert_eq!(1 << depth, output.len());
     output[0] = *seed;
     for i in 1..=depth {
         double_prg_many_inplace(&mut output[..1 << i]);
+    }
+}
+pub fn fill_prg_cache_friendly(seed: &GF128, output: &mut [GF128], buf: &mut [GF128]) {
+    // Ensure output is aligned with cache line size.
+    const EXPANSION_FACTOR: usize = 8;
+    const ALIGNMENT: usize = 1 << EXPANSION_FACTOR;
+    assert_eq!(output.as_ptr() as usize & (ALIGNMENT - 1), 0);
+    assert_eq!(buf.as_ptr() as usize & (ALIGNMENT - 1), 0);
+    let depth = output.len().ilog2() as usize;
+    assert_eq!(1 << depth, output.len());
+    assert_eq!(1 << depth, buf.len());
+    let non_first_iteration_count = depth / EXPANSION_FACTOR;
+    let first = depth - EXPANSION_FACTOR * non_first_iteration_count;
+    let (mut cur, mut next) = if non_first_iteration_count & 1 == 0 {
+        (output, buf)
+    } else {
+        (buf, output)
+    };
+    cur[0] = *seed;
+    for i in 0..first {
+        double_prg_many_inplace(&mut cur[..1 << (i + 1)]);
+    }
+    for i in 0..non_first_iteration_count {
+        (cur, next) = (next, cur);
+        let start_depth = first + i * EXPANSION_FACTOR;
+        next[..1 << start_depth]
+            .par_iter()
+            .zip(cur.par_chunks_exact_mut(1 << EXPANSION_FACTOR))
+            .for_each(|(seed, buf)| {
+                buf[0] = *seed;
+                for j in 1..=EXPANSION_FACTOR {
+                    double_prg_many_inplace(&mut buf[..1 << j]);
+                }
+            });
     }
 }
 #[cfg(not(feature = "aesni"))]
@@ -162,12 +211,17 @@ fn double_prg_many_inplace_parametrized<const BLOCK_SIZE: usize>(in_out: &mut [B
 
 #[cfg(test)]
 mod tests {
+    use std::alloc::Layout;
+
     use crate::fields::FieldElement;
     use crate::fields::GF128;
+    use crate::pseudorandom::prg::ALIGN;
     use rand::thread_rng;
 
     use super::double_prg_field;
     use super::double_prg_many_inplace;
+    use super::fill_prg;
+    use super::fill_prg_cache_friendly;
 
     #[test]
     pub fn test() {
@@ -177,5 +231,24 @@ mod tests {
         double_prg_many_inplace(&mut vect);
         assert_eq!(v_0, vect[0]);
         assert_eq!(v_1, vect[1]);
+    }
+
+    #[test]
+    pub fn test_cache_friendly() {
+        let v = GF128::random(thread_rng());
+        const LEN: usize = 1 << 10;
+        let layout = Layout::array::<GF128>(LEN)
+            .unwrap()
+            .align_to(ALIGN)
+            .unwrap();
+        let buf1 = unsafe { std::alloc::alloc(layout) as *mut GF128 };
+        let buf2 = unsafe { std::alloc::alloc(layout) as *mut GF128 };
+        let buf3 = unsafe { std::alloc::alloc(layout) as *mut GF128 };
+        let mut v1 = unsafe { Vec::from_raw_parts(buf1, LEN, LEN) };
+        let mut v2 = unsafe { Vec::from_raw_parts(buf2, LEN, LEN) };
+        let mut v3 = unsafe { Vec::from_raw_parts(buf3, LEN, LEN) };
+        fill_prg(&v, &mut v1);
+        fill_prg_cache_friendly(&v, &mut v2, &mut v3);
+        assert_eq!(v1, v2);
     }
 }

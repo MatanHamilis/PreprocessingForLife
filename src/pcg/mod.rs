@@ -6,6 +6,7 @@ use crate::{
     pseudorandom::{
         hash::{correlation_robust_hash_block_field, correlation_robust_hash_block_field_slice},
         prf::prf_eval,
+        prg::alloc_aligned_vec,
     },
 };
 use aes_prng::AesRng;
@@ -181,7 +182,7 @@ impl<const N: usize> PackedOfflineReceiverPcgKey<N> {
         let single_pprf_size = 1 << self.pprfs[0][0].depth;
         let pprf_count = self.pprfs[0].len();
         let mut evals: [_; N] = core::array::from_fn(|_| {
-            let mut v = Vec::with_capacity(n);
+            let mut v = alloc_aligned_vec(n);
             unsafe { v.set_len(n) };
             v
         });
@@ -199,8 +200,9 @@ impl<const N: usize> PackedOfflineReceiverPcgKey<N> {
                         .zip(sums.par_iter_mut())
                         .zip(evals.par_chunks_exact_mut(single_pprf_size))
                         .for_each(|((v, s), output)| {
+                            let mut buf = alloc_aligned_vec(output.len());
                             let mut sum = GF128::zero();
-                            v.inflate_with_deal(output);
+                            v.inflate_with_deal(output, &mut buf);
                             output.iter_mut().for_each(|v| {
                                 v.set_bit(false, 0);
                                 sum += *v;
@@ -218,7 +220,8 @@ impl<const N: usize> PackedOfflineReceiverPcgKey<N> {
                         .zip(sums.par_iter_mut())
                         .zip(evals.par_chunks_exact_mut(single_pprf_size))
                         .for_each(|(((v, sums), s), output)| {
-                            *sums = v.inflate_distributed(output);
+                            let mut buf = alloc_aligned_vec(output.len());
+                            *sums = v.inflate_distributed(output, &mut buf);
                             let mut sum = GF128::zero();
                             output.iter_mut().for_each(|v| {
                                 v.set_bit(false, 0);
@@ -250,7 +253,7 @@ impl<const N: usize> PackedOfflineReceiverPcgKey<N> {
         let time = Instant::now();
         let p = unsafe {
             std::alloc::alloc(
-                std::alloc::Layout::from_size_align(n * std::mem::size_of::<[GF128; N]>(), 128)
+                std::alloc::Layout::from_size_align(n * std::mem::size_of::<[GF128; N]>(), 256)
                     .unwrap(),
             ) as *mut [GF128; N]
         };
@@ -408,7 +411,7 @@ where
         }
         let n = value.receivers[0].len() * (1 << pprf_depth);
         let mut evals: [Vec<GF128>; PCGPACK] = core::array::from_fn(|_| {
-            let mut v = Vec::with_capacity(n);
+            let mut v = alloc_aligned_vec(n);
             unsafe {
                 v.set_len(n);
             };
@@ -423,7 +426,8 @@ where
                     .zip(evals.par_chunks_exact_mut(1 << pprf_depth))
                     .zip(sums.par_iter_mut())
                     .for_each(|((v, evals), sum_cell)| {
-                        v.0.unpack_into(evals);
+                        let mut buf = alloc_aligned_vec(evals.len());
+                        v.0.unpack_into(evals, &mut buf);
                         let (punctured_index, punctured_val) = (v.0.punctured_index, v.1);
                         evals[punctured_index] = punctured_val;
                         let mut sum = GF128::zero();
