@@ -162,7 +162,11 @@ impl<const N: usize> PackedOfflineReceiverPcgKey<N> {
                 .map(|_| PackedPprfSender::new(pprf_depth, GF128::random(&mut rng)))
                 .collect()
         });
-        let delta = core::array::from_fn(|_| GF128::random(&mut rng));
+        let delta = core::array::from_fn(|_| {
+            let mut v = GF128::random(&mut rng);
+            v.set_bit(false, 0);
+            v
+        });
         Self { pprfs, delta }
     }
 
@@ -198,6 +202,7 @@ impl<const N: usize> PackedOfflineReceiverPcgKey<N> {
                             let mut sum = GF128::zero();
                             v.inflate_with_deal(output);
                             output.iter_mut().for_each(|v| {
+                                v.set_bit(false, 0);
                                 sum += *v;
                                 *v = sum;
                             });
@@ -216,6 +221,7 @@ impl<const N: usize> PackedOfflineReceiverPcgKey<N> {
                             *sums = v.inflate_distributed(output);
                             let mut sum = GF128::zero();
                             output.iter_mut().for_each(|v| {
+                                v.set_bit(false, 0);
                                 sum += *v;
                                 *v = sum;
                             });
@@ -313,31 +319,6 @@ where
         (m0_arr, m1_arr)
     }
 }
-// pub async fn distributed_receiver_pcg_key<const N: usize, E: MultiPartyEngine>(
-//     engine: E,
-//     packed_key: &PackedOfflineReceiverPcgKey<N>,
-// ) -> Result<OfflineReceiverPcgKey<N>, ()> {
-//     let (offline_key, left_right_sums) = packed_key.unpack_distributed();
-//     let delta = packed_key.delta;
-//     let pprf_futures: Vec<_> = left_right_sums
-//         .into_iter()
-//         .enumerate()
-//         .map(|(i, left_right_sum)| {
-//             let mut sub_engine = engine.sub_protocol(format!("PCG TO PPRF {}", i));
-//             tokio::spawn(async move {
-//                 let left_right_sum = left_right_sum;
-//                 let last = left_right_sum.last().unwrap();
-//                 let leaf_sum = last.0 + last.1;
-//                 sub_engine.broadcast(leaf_sum + delta);
-//                 distributed_pprf_sender(sub_engine, &left_right_sum)
-//                     .await
-//                     .unwrap()
-//             })
-//         })
-//         .collect();
-//     try_join_all(pprf_futures).await.or(Err(()))?;
-//     Ok(offline_key)
-// }
 impl<const N: usize> ReceiverPcgKey<N> {
     fn new(offline_key: OfflineReceiverPcgKey<N>, code_seed: AesRng, code_width: usize) -> Self {
         Self {
@@ -400,7 +381,7 @@ pub struct OfflineSenderPcgKey<const PCGPACK: usize>
 where
     [(); (PCGPACK + 7) / 8]:,
 {
-    evals: Vec<([GF128; PCGPACK], [u8; (PCGPACK + 7) / 8])>,
+    evals: Vec<[GF128; PCGPACK]>,
 }
 
 impl<const PCGPACK: usize> OfflineReceiverCorrelationGenerator for OfflineSenderPcgKey<PCGPACK>
@@ -426,12 +407,7 @@ where
             }
         }
         let n = value.receivers[0].len() * (1 << pprf_depth);
-        let mut final_evals: Vec<([GF128; PCGPACK], [u8; (PCGPACK + 7) / 8])> =
-            Vec::with_capacity(n);
-        unsafe {
-            final_evals.set_len(n);
-        }
-        let mut evals: [Vec<(GF128, GF2)>; PCGPACK] = core::array::from_fn(|_| {
+        let mut evals: [Vec<GF128>; PCGPACK] = core::array::from_fn(|_| {
             let mut v = Vec::with_capacity(n);
             unsafe {
                 v.set_len(n);
@@ -439,27 +415,22 @@ where
             v
         });
         evals
-            .par_iter_mut()
-            .zip(value.receivers.par_iter())
+            .iter_mut()
+            .zip(value.receivers.iter())
             .for_each(|(evals, r)| {
                 let mut sums = vec![GF128::zero(); r.len()];
                 r.par_iter()
                     .zip(evals.par_chunks_exact_mut(1 << pprf_depth))
                     .zip(sums.par_iter_mut())
-                    .enumerate()
-                    .for_each(|(idx, ((v, evals), sum_cell))| {
-                        let (mut pprf, punctured_val) = (PprfReceiver::from(&v.0), v.1);
-                        pprf.evals[pprf.punctured_index] = punctured_val;
+                    .for_each(|((v, evals), sum_cell)| {
+                        v.0.unpack_into(evals);
+                        let (punctured_index, punctured_val) = (v.0.punctured_index, v.1);
+                        evals[punctured_index] = punctured_val;
                         let mut sum = GF128::zero();
-                        let mut bit = (idx & 1) != 0;
-                        for ((idx, d), v) in
-                            evals.iter_mut().enumerate().zip(pprf.evals.into_iter())
-                        {
-                            sum += v;
-                            if idx == pprf.punctured_index {
-                                bit = !bit;
-                            }
-                            *d = (sum, GF2::from(bit));
+                        for (idx, d) in evals.iter_mut().enumerate() {
+                            d.set_bit(idx == punctured_index, 0);
+                            sum += *d;
+                            *d = sum;
                         }
                         *sum_cell = sum;
                     });
@@ -474,21 +445,33 @@ where
                     .zip(sums.par_iter())
                     .for_each(|(chunk, prefix_sum)| {
                         for c in chunk {
-                            c.0 += prefix_sum;
+                            *c += *prefix_sum;
                         }
                     });
             });
-        for i in 0..n {
-            for j in 0..final_evals[i].1.len() {
-                final_evals[i].1[j] = 0;
+        let v = if PCGPACK > 1 {
+            let mut final_evals: Vec<[GF128; PCGPACK]> = Vec::with_capacity(n);
+            unsafe {
+                final_evals.set_len(n);
             }
-            for j in 0..PCGPACK {
-                final_evals[i].0[j] = evals[j][i].0;
-                let shift = j & 7;
-                final_evals[i].1[j / 8] |= (evals[j][i].1.is_one() as u8) << shift;
+            for i in 0..n {
+                for j in 0..PCGPACK {
+                    final_evals[i][j] = evals[j][i];
+                }
             }
-        }
-        OfflineSenderPcgKey { evals: final_evals }
+            final_evals
+        } else {
+            let final_evals = unsafe {
+                Vec::from_raw_parts(
+                    evals[0].as_mut_ptr() as *mut [GF128; PCGPACK],
+                    evals[0].len(),
+                    evals[0].capacity(),
+                )
+            };
+            std::mem::forget(evals);
+            final_evals
+        };
+        OfflineSenderPcgKey { evals: v }
     }
 }
 
@@ -496,11 +479,11 @@ pub struct SenderPcgKey<const PCGPACK: usize>
 where
     [(); (PCGPACK + 7) / 8]:,
 {
-    evals: Vec<([GF128; PCGPACK], [u8; (PCGPACK + 7) / 8])>,
+    evals: Vec<[GF128; PCGPACK]>,
     code_seed: AesRng,
     code_width: usize,
     idx: usize,
-    arr: [(GF128, GF2); PCGPACK],
+    arr: [GF128; PCGPACK],
 }
 impl<const PCGPACK: usize> OnlineReceiverCorrelationGenerator for SenderPcgKey<PCGPACK>
 where
@@ -522,44 +505,6 @@ where
         (m_arr, c)
     }
 }
-// pub async fn distributed_sender_pcg_key<const PCGPACK: usize, E: MultiPartyEngine>(
-//     engine: E,
-//     pprf_count: usize,
-//     pprf_depth: usize,
-// ) -> Result<OfflineSenderPcgKey<PCGPACK>, ()>
-// where
-//     [(); PCGPACK / 8]:,
-// {
-//     let t = pprf_count;
-//     let n = pprf_count * (1 << pprf_depth);
-//     let pprf_futures: Vec<_> = (0..t)
-//         .map(|i| {
-//             let mut sub_engine = engine.sub_protocol(format!("PCG TO PPRF {}", i));
-//             tokio::spawn(async move {
-//                 let (sum, _): (GF128, _) = sub_engine.recv().await.unwrap();
-//                 let mut recv = distributed_pprf_receiver(sub_engine, pprf_depth).await?;
-//                 let leaf_sum = recv.evals.iter().fold(GF128::zero(), |acc, cur| acc + *cur);
-//                 recv.evals[recv.punctured_index] = sum - leaf_sum;
-//                 Ok(recv)
-//             })
-//         })
-//         .collect();
-//     let pprfs = try_join_all(pprf_futures).await.or(Err(()))?;
-//     let mut acc = GF128::zero();
-//     let mut acc_bit = GF2::zero();
-//     let mut evals = Vec::<(GF128, GF2)>::with_capacity(n);
-//     for pprf in pprfs.into_iter() {
-//         let pprf = pprf?;
-//         for (idx, o) in pprf.evals.into_iter().enumerate() {
-//             acc += o;
-//             if idx == pprf.punctured_index {
-//                 acc_bit.flip();
-//             }
-//             evals.push((acc, acc_bit));
-//         }
-//     }
-//     Ok(OfflineSenderPcgKey { evals })
-// }
 
 impl<const PCGPACK: usize> SenderPcgKey<PCGPACK>
 where
@@ -575,29 +520,24 @@ where
             code_width,
             evals: offline_key.evals,
             idx: 0,
-            arr: [(GF128::zero(), GF2::zero()); PCGPACK],
+            arr: [GF128::zero(); PCGPACK],
         }
     }
     fn next_subfield_vole(&mut self) -> (GF128, GF2) {
         if self.idx == 0 {
-            self.arr
-                .iter_mut()
-                .for_each(|v| *v = (GF128::zero(), GF2::zero()));
+            self.arr.iter_mut().for_each(|v| *v = GF128::zero());
             for _ in 0..self.code_width {
                 let entry = self.evals[self.code_seed.next_u32() as usize & (self.evals.len() - 1)];
-                self.arr
-                    .iter_mut()
-                    .zip(entry.0.iter())
-                    .enumerate()
-                    .for_each(|(idx, (a, e))| {
-                        a.0 += *e;
-                        a.1 += GF2::from(((entry.1[idx / 8] >> (idx & 7)) & 1) == 1);
-                    });
+                self.arr.iter_mut().zip(entry.iter()).for_each(|(a, e)| {
+                    *a += *e;
+                });
             }
         }
         let ridx = self.idx;
         self.idx = (self.idx + 1) % PCGPACK;
-        self.arr[ridx]
+        let bit = self.arr[ridx].get_bit(0);
+        self.arr[ridx].set_bit(false, 0);
+        (self.arr[ridx], GF2::from(bit))
     }
     fn next_correlated_ot(&mut self) -> (GF128, GF2) {
         self.next_subfield_vole()
@@ -758,13 +698,14 @@ mod test {
         let (sender, receiver): (PackedOfflineReceiverPcgKey<PCGPACK>, _) =
             dealer.deal(&mut thread_rng());
         let offline_sender = sender.unpack();
-        let offline_receiver = receiver.unpack();
+        let mut offline_receiver = receiver.unpack();
         for i in 0..offline_receiver.evals.len() {
             for j in 0..offline_sender.evals[i].len() {
+                let bit = offline_receiver.evals[i][j].get_bit(0);
+                offline_receiver.evals[i][j].set_bit(false, 0);
                 assert_eq!(
-                    offline_receiver.evals[i].0[j] + offline_sender.evals[i][j],
-                    sender.delta[j]
-                        * GF2::from(offline_receiver.evals[i].1[j / 8] >> (j & 7) & 1 == 1)
+                    offline_receiver.evals[i][j] + offline_sender.evals[i][j],
+                    sender.delta[j] * GF2::from(bit)
                 );
             }
         }

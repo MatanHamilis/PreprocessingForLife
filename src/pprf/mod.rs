@@ -98,18 +98,16 @@ pub struct PackedPprfReceiver {
     pub subtree_seeds: Vec<GF128>,
 }
 
-impl From<&PackedPprfReceiver> for PprfReceiver {
-    fn from(value: &PackedPprfReceiver) -> Self {
-        let depth = value.subtree_seeds.len();
+impl PackedPprfReceiver {
+    pub fn unpack_into(&self, evals: &mut [GF128]) -> usize {
+        let depth = self.subtree_seeds.len();
         let n = 1 << depth;
-        let mut evals = Vec::with_capacity(n);
-        unsafe { evals.set_len(n) };
-        assert!(value.punctured_index < n);
+        assert!(self.punctured_index < n);
         let mut top = n;
         let mut bottom = 0;
-        for seed in value.subtree_seeds.iter() {
+        for seed in self.subtree_seeds.iter() {
             let mid = (top + bottom) / 2;
-            if value.punctured_index >= mid {
+            if self.punctured_index >= mid {
                 fill_prg(seed, &mut evals[bottom..mid]);
                 bottom = mid;
             } else {
@@ -117,8 +115,19 @@ impl From<&PackedPprfReceiver> for PprfReceiver {
                 top = mid;
             }
         }
-        debug_assert_eq!(bottom, value.punctured_index);
-        evals[value.punctured_index] = GF128::zero();
+        debug_assert_eq!(bottom, self.punctured_index);
+        evals[self.punctured_index] = GF128::zero();
+        self.punctured_index
+    }
+}
+impl From<&PackedPprfReceiver> for PprfReceiver {
+    fn from(value: &PackedPprfReceiver) -> Self {
+        let depth = value.subtree_seeds.len();
+        let n = 1 << depth;
+        let mut evals = Vec::with_capacity(n);
+        unsafe { evals.set_len(n) };
+        assert!(value.punctured_index < n);
+        value.unpack_into(&mut evals);
         Self {
             punctured_index: value.punctured_index,
             evals,

@@ -267,10 +267,6 @@ fn bench_malicious_circuit<
     is_authenticated: bool,
     log_folding_factor: usize,
 ) {
-    let mut two = GF64::zero();
-    two.set_bit(true, 1);
-    let three = two + GF64::one();
-    let four = two * two;
     let input = input.clone();
     let dealer = pcg_dealer.clone();
     let input = Arc::new(input);
