@@ -656,39 +656,6 @@ mod test {
     use aes_prng::AesRng;
     use rand_core::SeedableRng;
 
-    // #[tokio::test]
-    // async fn test_bit_beaver_triples() {
-    //     const PPRF_COUNT: usize = 5;
-    //     const PPRF_DEPTH: usize = 8;
-    //     const CODE_WIDTH: usize = 7;
-    //     const CORRELATION_COUNT: usize = 10_000;
-    //     let seed = [0; 16];
-    //     let party_ids = [1, 2];
-    //     let party_ids_set = HashSet::from_iter(party_ids.iter().copied());
-    //     let (router, mut engines) = LocalRouter::new(UCTag::new(&"root tag"), &party_ids_set);
-    //     let sender_engine = engines.remove(&party_ids[0]).unwrap();
-    //     let receiver_engine = engines.remove(&party_ids[1]).unwrap();
-
-    //     let local_handle = tokio::spawn(router.launch());
-    //     let sender_h = distributed_sender_pcg_key(sender_engine, PPRF_COUNT, PPRF_DEPTH);
-    //     let packed_offline_receiver =
-    //         PackedOfflineReceiverPcgKey::random(PPRF_COUNT, PPRF_DEPTH, thread_rng());
-    //     let receiver_h = distributed_receiver_pcg_key(receiver_engine, &packed_offline_receiver);
-
-    //     let (snd_res, rcv_res) = join!(sender_h, receiver_h);
-    //     let (snd_res, rcv_res) = (snd_res.unwrap(), rcv_res.unwrap());
-    //     let mut online_sender = SenderPcgKey::new(snd_res, AesRng::from_seed(seed), CODE_WIDTH);
-    //     let mut online_receiver = ReceiverPcgKey::new(rcv_res, AesRng::from_seed(seed), CODE_WIDTH);
-    //     for _ in 0..CORRELATION_COUNT {
-    //         let sender_corr = online_sender.next_bit_beaver_triple::<1, GF2>();
-    //         let rcv_corr = online_receiver.next_bit_beaver_triple();
-    //         assert_eq!(
-    //             (sender_corr.0 + rcv_corr.0) * (sender_corr.1 + rcv_corr.1),
-    //             sender_corr.2 + rcv_corr.2
-    //         );
-    //     }
-    //     local_handle.await.unwrap().unwrap();
-    // }
     #[test]
     fn test_deal() {
         const PPRF_COUNT: usize = 10;
