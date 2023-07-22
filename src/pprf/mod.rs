@@ -13,6 +13,8 @@ use crate::{
     },
 };
 
+const PRG_EXPANSION_FACTOR: usize = 8;
+
 #[derive(Serialize, Deserialize, Clone, Copy)]
 pub struct PackedPprfSender {
     pub seed: GF128,
@@ -48,7 +50,7 @@ impl PackedPprfSender {
             Some(Vec::<(GF128, GF128)>::with_capacity(self.depth))
         };
         if is_deal {
-            fill_prg_cache_friendly(&self.seed, &mut evals[..], buf)
+            fill_prg_cache_friendly::<PRG_EXPANSION_FACTOR>(&self.seed, &mut evals[..], buf)
         } else {
             evals[0] = self.seed;
             for i in 0..self.depth {
@@ -129,7 +131,7 @@ impl PackedPprfReceiver {
                 if mid - bottom < ALIGN {
                     fill_prg(seed, &mut evals[bottom..mid]);
                 } else {
-                    fill_prg_cache_friendly(
+                    fill_prg_cache_friendly::<PRG_EXPANSION_FACTOR>(
                         seed,
                         &mut evals[bottom..mid],
                         &mut buf[..(mid - bottom)],
@@ -140,7 +142,11 @@ impl PackedPprfReceiver {
                 if top - mid < ALIGN {
                     fill_prg(seed, &mut evals[mid..top]);
                 } else {
-                    fill_prg_cache_friendly(seed, &mut evals[mid..top], &mut buf[..(top - mid)]);
+                    fill_prg_cache_friendly::<PRG_EXPANSION_FACTOR>(
+                        seed,
+                        &mut evals[mid..top],
+                        &mut buf[..(top - mid)],
+                    );
                 }
                 top = mid;
             }

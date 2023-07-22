@@ -33,12 +33,14 @@ pub fn fill_prg(seed: &GF128, output: &mut [GF128]) {
         double_prg_many_inplace(&mut output[..1 << i]);
     }
 }
-pub fn fill_prg_cache_friendly(seed: &GF128, output: &mut [GF128], buf: &mut [GF128]) {
+pub fn fill_prg_cache_friendly<const EXPANSION_FACTOR: usize>(
+    seed: &GF128,
+    output: &mut [GF128],
+    buf: &mut [GF128],
+) {
     // Ensure output is aligned with cache line size.
-    const EXPANSION_FACTOR: usize = 8;
-    const ALIGNMENT: usize = 1 << EXPANSION_FACTOR;
-    assert_eq!(output.as_ptr() as usize & (ALIGNMENT - 1), 0);
-    assert_eq!(buf.as_ptr() as usize & (ALIGNMENT - 1), 0);
+    assert_eq!(output.as_ptr() as usize & (ALIGN - 1), 0);
+    assert_eq!(buf.as_ptr() as usize & (ALIGN - 1), 0);
     let depth = output.len().ilog2() as usize;
     assert_eq!(1 << depth, output.len());
     assert_eq!(1 << depth, buf.len());
@@ -248,7 +250,7 @@ mod tests {
         let mut v2 = unsafe { Vec::from_raw_parts(buf2, LEN, LEN) };
         let mut v3 = unsafe { Vec::from_raw_parts(buf3, LEN, LEN) };
         fill_prg(&v, &mut v1);
-        fill_prg_cache_friendly(&v, &mut v2, &mut v3);
+        fill_prg_cache_friendly::<3>(&v, &mut v2, &mut v3);
         assert_eq!(v1, v2);
     }
 }
