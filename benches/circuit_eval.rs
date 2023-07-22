@@ -180,62 +180,65 @@ fn bench_boolean_circuit_semi_honest<
                                 "\t\tSemi Honest - Opening Beaver triples: {}ms",
                                 timer.elapsed().as_millis()
                             );
-                            Result::<_, ()>::Ok((id, bts, offline_correlation))
+                            Result::<_, ()>::Ok((id, offline_correlation))
                         })
                     });
 
             let exec_results = try_join_all(engine_futures).await.unwrap();
-            let engine_futures = exec_results.into_iter().map(|v| v.unwrap()).map(
-                |(id, n_party_correlation, offline_corerlation)| {
-                    let mut engine = engines.remove(&id).unwrap();
-                    let circuit = circuit.clone();
-                    let input = inputs.remove(&id).unwrap();
-                    let output_wire_masks: Vec<_> =
-                        offline_corerlation.get_circuit_output_wires_masks_shares(&circuit);
-                    let input_wire_masks: Vec<_> =
-                        offline_corerlation.get_circuit_input_wires_masks_shares(&circuit);
-                    let my_input_mask = offline_corerlation
-                        .get_personal_circuit_input_wires_masks()
-                        .to_vec();
-                    let parties_input_lengths = parties_input_lengths.clone();
-                    tokio::spawn(async move {
-                        let (n_party_correlation, wide_n_party_correlation) = n_party_correlation;
-                        let time = Instant::now();
-                        let o = multi_party_semi_honest_eval_circuit::<N, _, _, _, FC>(
-                            &mut engine,
-                            &circuit,
-                            &input,
-                            &my_input_mask,
-                            input_wire_masks,
-                            &n_party_correlation,
-                            &wide_n_party_correlation,
-                            &output_wire_masks,
-                            &parties_input_lengths,
-                        )
-                        .await
-                        .map(
-                            |(
-                                masked_input_wires,
-                                masked_gate_inputs,
-                                wide_masked_gate_inputs,
-                                masked_outputs,
-                            )| {
-                                (
+            let engine_futures =
+                exec_results
+                    .into_iter()
+                    .map(|v| v.unwrap())
+                    .map(|(id, offline_corerlation)| {
+                        let mut engine = engines.remove(&id).unwrap();
+                        let circuit = circuit.clone();
+                        let input = inputs.remove(&id).unwrap();
+                        let output_wire_masks: Vec<_> =
+                            offline_corerlation.get_circuit_output_wires_masks_shares(&circuit);
+                        let input_wire_masks: Vec<_> =
+                            offline_corerlation.get_circuit_input_wires_masks_shares(&circuit);
+                        let my_input_mask = offline_corerlation
+                            .get_personal_circuit_input_wires_masks()
+                            .to_vec();
+                        let parties_input_lengths = parties_input_lengths.clone();
+                        tokio::spawn(async move {
+                            let (n_party_correlation, wide_n_party_correlation) =
+                                offline_corerlation
+                                    .get_prepared_multiparty_beaver_triples(&circuit);
+                            let time = Instant::now();
+                            let o = multi_party_semi_honest_eval_circuit::<N, _, _, _, FC>(
+                                &mut engine,
+                                &circuit,
+                                &input,
+                                &my_input_mask,
+                                input_wire_masks,
+                                &n_party_correlation,
+                                &wide_n_party_correlation,
+                                &output_wire_masks,
+                                &parties_input_lengths,
+                            )
+                            .await
+                            .map(
+                                |(
+                                    masked_input_wires,
                                     masked_gate_inputs,
                                     wide_masked_gate_inputs,
                                     masked_outputs,
-                                    output_wire_masks,
-                                    n_party_correlation,
-                                    masked_input_wires,
-                                )
-                            },
-                        );
-                        let time = time.elapsed();
-                        info!("semi honest: {}", time.as_millis());
-                        (time, o)
-                    })
-                },
-            );
+                                )| {
+                                    (
+                                        masked_gate_inputs,
+                                        wide_masked_gate_inputs,
+                                        masked_outputs,
+                                        output_wire_masks,
+                                        masked_input_wires,
+                                    )
+                                },
+                            );
+                            let time = time.elapsed();
+                            info!("semi honest: {}", time.as_millis());
+                            (time, o)
+                        })
+                    });
 
             let e = try_join_all(engine_futures).await.unwrap();
             let output = e[0].0;
@@ -308,6 +311,12 @@ fn bench_malicious_circuit<
         &mut dealer_ctx,
     );
     info!("Dealer:\t took: {}ms", time.elapsed().as_millis());
+    parties_offline_material.values().for_each(|v| {
+        info!(
+            "Serialized correlation size: {}",
+            bincode::serialized_size(v).unwrap()
+        );
+    });
     let online_party_ids: Vec<_> = (0..parties).map(|i| (i + 1) as PartyId).collect();
     let online_parties_set = Arc::new(HashSet::from_iter(online_party_ids.iter().copied()));
 
@@ -472,7 +481,7 @@ pub fn bench_2p_semi_honest(c: &mut Criterion) {
     );
 }
 pub fn bench_2p_malicious(c: &mut Criterion) {
-    let is_authenticated = false;
+    let is_authenticated = true;
     pretty_env_logger::formatted_builder()
         .filter_level(log::LevelFilter::Info)
         .init();

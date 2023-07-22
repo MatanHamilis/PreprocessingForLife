@@ -1,4 +1,4 @@
-use std::{mem::MaybeUninit, time::Instant};
+use std::{fmt::Debug, mem::MaybeUninit, time::Instant};
 
 use crate::{
     fields::{FieldElement, PackedField, GF128, GF2},
@@ -18,21 +18,23 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_big_array::BigArray;
 
 pub trait PackedSenderCorrelationGenerator:
-    Serialize + DeserializeOwned + Send + Sync + Clone
+    Serialize + DeserializeOwned + Send + Sync + Clone + Debug
 {
     type Offline: OfflineSenderCorrelationGenerator;
     type Receiver: PackedReceiverCorrelationGenerator;
     fn unpack(&self) -> Self::Offline;
 }
 pub trait PackedReceiverCorrelationGenerator:
-    Serialize + DeserializeOwned + Send + Sync + Clone
+    Serialize + DeserializeOwned + Send + Sync + Clone + Debug
 {
     type Offline: OfflineReceiverCorrelationGenerator;
     type Sender: PackedSenderCorrelationGenerator;
     fn unpack(&self) -> Self::Offline;
 }
 
-pub trait PackedKeysDealer<S: PackedSenderCorrelationGenerator>: Send + Sync + Clone {
+pub trait PackedKeysDealer<S: PackedSenderCorrelationGenerator>:
+    Send + Sync + Clone + Debug
+{
     fn deal<R: CryptoRng + RngCore>(&self, rng: &mut R) -> (S, S::Receiver);
 }
 pub trait OfflineSenderCorrelationGenerator {
@@ -81,7 +83,7 @@ pub trait OnlineSenderCorrelationGenerator {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct StandardDealer {
     pprf_count: usize,
     pprf_depth: usize,
@@ -121,7 +123,7 @@ where
         (receiver, sender)
     }
 }
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PackedOfflineReceiverPcgKey<const N: usize> {
     #[serde(with = "BigArray")]
     pprfs: [Vec<PackedPprfSender>; N],
@@ -364,7 +366,7 @@ impl<const N: usize> ReceiverPcgKey<N> {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PackedOfflineSenderPcgKey<const N: usize> {
     #[serde(with = "BigArray")]
     receivers: [Vec<(PackedPprfReceiver, GF128)>; N],
@@ -548,7 +550,7 @@ where
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(bound = "S: Serialize + DeserializeOwned, R: Serialize+DeserializeOwned")]
 pub struct PackedOfflineFullPcgKey<
     S: PackedSenderCorrelationGenerator,

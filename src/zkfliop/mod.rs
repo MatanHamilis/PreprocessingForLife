@@ -80,7 +80,7 @@ pub fn g_mul_res<F: IntermediateMulField>(z: &[F::MulRes]) -> F {
         .map(|f| f[0].reduce() * f[1].reduce())
         .sum()
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct OfflineProver<F: FieldElement> {
     #[serde(bound = "")]
     proof_masks: Vec<F>,
@@ -88,7 +88,7 @@ pub struct OfflineProver<F: FieldElement> {
     final_msg: OfflineCommitment,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct OfflineVerifier {
     round_challenges: Vec<OfflineCommitment>,
     final_msg: OfflineCommitment,
@@ -512,6 +512,7 @@ pub async fn prover<F: IntermediateMulField, E: MultiPartyEngine>(
     mut auth_statement: Option<Vec<F>>,
     prover_ctx: &mut ProverCtx<F>,
 ) {
+    debug_assert_eq!(z[0], g(&z[1..]));
     let mut time = Instant::now();
     let ProverCtx {
         eval_ctx_internal_round_polys_challenge,
@@ -535,7 +536,6 @@ pub async fn prover<F: IntermediateMulField, E: MultiPartyEngine>(
     let mut b_tilde = Vec::with_capacity(round_count);
     let mut masked_internal_proof =
         vec![F::zero(); internal_round_proof_length(log_folding_factor)];
-    info!("Proving: round count {}", round_count);
     // Rounds
     for (round_id, (round_challenge, masks)) in round_challenges
         .into_iter()
@@ -698,7 +698,6 @@ pub async fn prover<F: IntermediateMulField, E: MultiPartyEngine>(
         assert_eq!(final_value.4, q_tilde_dealer);
         assert_eq!(b_tilde_check, b_tilde_check_dealer);
     }
-    println!("Prover LAST: {} ms", time.elapsed().as_millis());
 }
 
 pub async fn verifier<F: IntermediateMulField>(

@@ -203,46 +203,64 @@ fn compute_gamma_i<
 >(
     gammas: &[(usize, usize, RegularGateGamma<PACKING, F>)],
     wide_gammas: &[(usize, usize, WideGateGamma<PACKING, F>)],
-    mask_shares: &HashMap<(usize, usize), RegularBeaverTriple<PF>>,
-    wide_mask_shares: &HashMap<(usize, usize), WideBeaverTriple<PF>>,
-    masked_values: &HashMap<(usize, usize), RegularMask<PF>>,
-    wide_masked_values: &HashMap<(usize, usize), WideMask<PF>>,
+    mask_shares: &[((usize, usize), RegularBeaverTriple<PF>)],
+    wide_mask_shares: &[((usize, usize), WideBeaverTriple<PF>)],
+    masked_values: &[((usize, usize), RegularMask<PF>)],
+    wide_masked_values: &[((usize, usize), WideMask<PF>)],
 ) -> F {
     let regular: F = gammas
         .par_iter()
-        .map(|(layer_idx, gate_idx, gamma)| {
-            let mask = mask_shares.get(&(*layer_idx, *gate_idx)).unwrap();
-            let masked_values = masked_values.get(&(*layer_idx, *gate_idx)).unwrap();
-            match (gamma, mask, masked_values) {
-                (RegularGateGamma(g), RegularBeaverTriple(m_a, m_b, _), RegularMask(v_a, v_b)) => {
-                    let bit = *m_a * *v_b + *v_a * *m_b;
-                    (0..PACKING)
-                        .map(|pack| bit.get_element(pack) * g[pack])
-                        .sum()
+        .zip(mask_shares.par_iter().rev())
+        .zip(masked_values.par_iter().rev())
+        .map(
+            |(
+                ((layer_idx, gate_idx, gamma), (gate_mask, mask)),
+                (gate_masked_values, masked_values),
+            )| {
+                assert_eq!(gate_mask, gate_masked_values);
+                assert_eq!(layer_idx, &gate_mask.0);
+                assert_eq!(gate_idx, &gate_mask.1);
+                // let mask = mask_shares.get(&(*layer_idx, *gate_idx)).unwrap();
+                // let masked_values = masked_values.get(&(*layer_idx, *gate_idx)).unwrap();
+                match (gamma, mask, masked_values) {
+                    (
+                        RegularGateGamma(g),
+                        RegularBeaverTriple(m_a, m_b, _),
+                        RegularMask(v_a, v_b),
+                    ) => {
+                        let bit = *m_a * *v_b + *v_a * *m_b;
+                        (0..PACKING)
+                            .map(|pack| bit.get_element(pack) * g[pack])
+                            .sum()
+                    }
                 }
-            }
-        })
+            },
+        )
         .sum();
     let wide: F = wide_gammas
         .par_iter()
-        .map(|(layer_idx, gate_idx, gamma)| {
-            let mask = wide_mask_shares.get(&(*layer_idx, *gate_idx)).unwrap();
-            let masked_values = wide_masked_values.get(&(*layer_idx, *gate_idx)).unwrap();
-            match (gamma, mask, masked_values) {
-                (WideGateGamma(g), WideBeaverTriple(m_a, m_wb, _), WideMask(v_a, v_wb)) => {
-                    let mut sum = F::zero();
-                    for pack in 0..PACKING {
-                        for i in 0..g.len() {
-                            // sum += g[i] * F::from(bits[i]);
-                            sum += (m_wb[i].get_element(pack) * v_a.get_element(pack)
-                                + v_wb[i].get_element(pack) * m_a.get_element(pack))
-                                * g[pack][i]
+        .zip(wide_mask_shares.par_iter())
+        .zip(wide_masked_values.par_iter())
+        .map(
+            |(((layer_idx, gate_idx, gamma), (_, mask)), (_, masked_values))| {
+                // let mask = wide_mask_shares.get(&(*layer_idx, *gate_idx)).unwrap();
+                // let masked_values = wide_masked_values.get(&(*layer_idx, *gate_idx)).unwrap();
+                match (gamma, mask, masked_values) {
+                    (WideGateGamma(g), WideBeaverTriple(m_a, m_wb, _), WideMask(v_a, v_wb)) => {
+                        let mut sum = F::zero();
+                        for pack in 0..PACKING {
+                            for i in 0..g.len() {
+                                // sum += g[i] * F::from(bits[i]);
+                                sum += (m_wb[i].get_element(pack) * v_a.get_element(pack)
+                                    + v_wb[i].get_element(pack) * m_a.get_element(pack))
+                                    * g[pack][i]
+                            }
                         }
+                        sum
                     }
-                    sum
                 }
-            }
-        })
+            },
+        )
         .sum();
     regular + wide
 }
@@ -254,8 +272,8 @@ fn dot_product_gamma<
 >(
     gammas: &[(usize, usize, RegularGateGamma<PACKING, F>)],
     wide_gammas: &[(usize, usize, WideGateGamma<PACKING, F>)],
-    masks_gates: &HashMap<(usize, usize), RegularMask<PF>>,
-    wide_masks_gates: &HashMap<(usize, usize), WideMask<PF>>,
+    masks_gates: &[((usize, usize), RegularMask<PF>)],
+    wide_masks_gates: &[((usize, usize), WideMask<PF>)],
     input_wires_gammas: &[[F; PACKING]],
     input_wires_masks: &[PF],
 ) -> F {
@@ -266,8 +284,11 @@ fn dot_product_gamma<
         .sum();
     let regular_gates_dp = gammas
         .par_iter()
-        .map(|(layer_idx, gate_idx, gamma)| {
-            let mask = masks_gates.get(&(*layer_idx, *gate_idx)).unwrap();
+        .zip(masks_gates.par_iter().rev())
+        .map(|((layer_idx, gate_idx, gamma), (mask_idx, mask))| {
+            // let mask = masks_gates.get(&(*layer_idx, *gate_idx)).unwrap();
+            assert_eq!(&mask_idx.0, layer_idx);
+            assert_eq!(&mask_idx.1, gate_idx);
             match (gamma, mask) {
                 (RegularGateGamma(g), RegularMask(m_a, m_b)) => {
                     let m_a_m_b = *m_a * *m_b;
@@ -280,8 +301,9 @@ fn dot_product_gamma<
         .sum();
     let wides_gates_dp = wide_gammas
         .par_iter()
-        .map(|(layer_idx, gate_idx, gamma)| {
-            let mask = wide_masks_gates.get(&(*layer_idx, *gate_idx)).unwrap();
+        .zip(wide_masks_gates.par_iter())
+        .map(|((layer_idx, gate_idx, gamma), (_, mask))| {
+            // let mask = wide_masks_gates.get(&(*layer_idx, *gate_idx)).unwrap();
             match (gamma, mask) {
                 (WideGateGamma(g), WideMask(m_a, m_wb)) => {
                     let mut sum = F::zero();
@@ -308,30 +330,36 @@ fn dot_product_alpha<
     alphas_gate: &[(usize, usize, RegularInputWireCoefficient<N, F>)],
     wide_alphas_gate: &[(usize, usize, WideInputWireCoefficient<N, F>)],
     alphas_outputs: &[[F; N]],
-    regular_masks_gates: &HashMap<(usize, usize), RegularMask<PF>>,
-    wide_masks_gates: &HashMap<(usize, usize), WideMask<PF>>,
+    regular_masks_gates: &[((usize, usize), RegularMask<PF>)],
+    wide_masks_gates: &[((usize, usize), WideMask<PF>)],
     masks_outputs: &[PF],
 ) -> F {
     // Sigma alpha_w r_w
     let regular_sigma_alpha_w_r_w_gates: F = alphas_gate
         .par_iter()
-        .map(|(layer_id, gate_id, input_wire_coefficients)| {
-            let mask = regular_masks_gates.get(&(*layer_id, *gate_id)).unwrap();
-            match (mask, input_wire_coefficients) {
-                (RegularMask(a, b), RegularInputWireCoefficient(c_a, c_b)) => {
-                    (0..N)
-                        .map(|i| a.get_element(i) * c_a[i] + b.get_element(i) * c_b[i])
-                        .sum()
-                    // * c_a * F::from(*a) + *c_b * F::from(*b)
+        .zip(regular_masks_gates.par_iter())
+        .map(
+            |((layer_id, gate_id, input_wire_coefficients), (mask_idx, mask))| {
+                // let mask = regular_masks_gates.get(&(*layer_id, *gate_id)).unwrap();
+                assert_eq!(&mask_idx.0, layer_id);
+                assert_eq!(&mask_idx.1, gate_id);
+                match (mask, input_wire_coefficients) {
+                    (RegularMask(a, b), RegularInputWireCoefficient(c_a, c_b)) => {
+                        (0..N)
+                            .map(|i| a.get_element(i) * c_a[i] + b.get_element(i) * c_b[i])
+                            .sum()
+                        // * c_a * F::from(*a) + *c_b * F::from(*b)
+                    }
                 }
-            }
-        })
+            },
+        )
         .sum();
     let wide_sigma_alpha_w_r_w_gates: F = wide_alphas_gate
         .par_iter()
-        .map(|(layer_id, gate_id, input_wire_coefficients)| {
-            let mask = wide_masks_gates.get(&(*layer_id, *gate_id)).unwrap();
-            match (mask, input_wire_coefficients) {
+        .zip(wide_masks_gates.par_iter())
+        .map(|((layer_id, gate_id, input_wire_coefficients), mask)| {
+            // let mask = wide_masks_gates.get(&(*layer_id, *gate_id)).unwrap();
+            match (&mask.1, input_wire_coefficients) {
                 (WideMask(a, wb), WideInputWireCoefficient(c_a, c_wb)) => {
                     let mut sum = F::zero();
                     for pack in 0..N {
@@ -384,10 +412,10 @@ fn construct_statement<
     gamma_i_mask: Option<F>,
     regular_gate_gammas: &[(usize, usize, RegularGateGamma<N, F>)],
     wide_gate_gammas: &[(usize, usize, WideGateGamma<N, F>)],
-    regular_masked_inputs: Option<&HashMap<(usize, usize), RegularMask<PF>>>,
-    wide_masked_inputs: Option<&HashMap<(usize, usize), WideMask<PF>>>,
-    regular_mask_shares: Option<&HashMap<(usize, usize), RegularBeaverTriple<PF>>>,
-    wide_mask_shares: Option<&HashMap<(usize, usize), WideBeaverTriple<PF>>>,
+    regular_masked_inputs: Option<&[((usize, usize), RegularMask<PF>)]>,
+    wide_masked_inputs: Option<&[((usize, usize), WideMask<PF>)]>,
+    regular_mask_shares: Option<&[((usize, usize), RegularBeaverTriple<PF>)]>,
+    wide_mask_shares: Option<&[((usize, usize), WideBeaverTriple<PF>)]>,
     circuit: &ParsedCircuit,
 ) -> Vec<F> {
     let statement_length: usize = statement_length::<N>(circuit);
@@ -404,8 +432,12 @@ fn construct_statement<
         iter_masks.for_each(|v| *v = F::zero());
     } else {
         let gate_masks = regular_mask_shares.unwrap();
-        for (layer_idx, gate_idx, _) in regular_gate_gammas {
-            let gate_mask = gate_masks.get(&(*layer_idx, *gate_idx)).unwrap();
+        for ((layer_idx, gate_idx, _), (gate_mask_idx, gate_mask)) in
+            regular_gate_gammas.iter().zip(gate_masks.iter().rev())
+        {
+            assert_eq!(&gate_mask_idx.0, layer_idx);
+            assert_eq!(&gate_mask_idx.1, gate_idx);
+            // let gate_mask = gate_masks.get(&(*layer_idx, *gate_idx)).unwrap();
             match gate_mask {
                 RegularBeaverTriple(m_a, m_b, _) => {
                     for i in 0..N {
@@ -416,8 +448,10 @@ fn construct_statement<
             }
         }
         let gate_masks = wide_mask_shares.unwrap();
-        for (layer_idx, gate_idx, _) in wide_gate_gammas {
-            let gate_mask = gate_masks.get(&(*layer_idx, *gate_idx)).unwrap();
+        for ((layer_idx, gate_idx, _), (_, gate_mask)) in
+            wide_gate_gammas.iter().zip(gate_masks.iter())
+        {
+            // let gate_mask = gate_masks.get(&(*layer_idx, *gate_idx)).unwrap();
             match gate_mask {
                 WideBeaverTriple(m_a, m_wb, _) => {
                     for pack in 0..N {
@@ -438,8 +472,14 @@ fn construct_statement<
         iter_masked_values.for_each(|v| *v = F::zero());
     } else {
         let gate_masked_inputs = regular_masked_inputs.unwrap();
-        for (layer_idx, gate_idx, gate_gamma) in regular_gate_gammas {
-            let gate_mask_input = gate_masked_inputs.get(&(*layer_idx, *gate_idx)).unwrap();
+        for ((layer_idx, gate_idx, gate_gamma), (gate_mask_input_idx, gate_mask_input)) in
+            regular_gate_gammas
+                .iter()
+                .zip(gate_masked_inputs.iter().rev())
+        {
+            assert_eq!(&gate_mask_input_idx.0, layer_idx);
+            assert_eq!(&gate_mask_input_idx.1, gate_idx);
+            // let gate_mask_input = gate_masked_inputs.get(&(*layer_idx, *gate_idx)).unwrap();
             match (gate_mask_input, gate_gamma) {
                 (RegularMask(m_a, m_b), RegularGateGamma(g)) => {
                     for pack in 0..N {
@@ -450,8 +490,10 @@ fn construct_statement<
             }
         }
         let gate_masked_inputs = wide_masked_inputs.unwrap();
-        for (layer_idx, gate_idx, gate_gamma) in wide_gate_gammas {
-            let gate_mask_input = gate_masked_inputs.get(&(*layer_idx, *gate_idx)).unwrap();
+        for ((layer_idx, gate_idx, gate_gamma), (_, gate_mask_input)) in
+            wide_gate_gammas.iter().zip(gate_masked_inputs.iter())
+        {
+            // let gate_mask_input = gate_masked_inputs.get(&(*layer_idx, *gate_idx)).unwrap();
             match (gate_mask_input, gate_gamma) {
                 (WideMask(m_a, m_wb), WideGateGamma(gs)) => {
                     for pack in 0..N {
@@ -470,7 +512,7 @@ fn construct_statement<
     statement
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct OfflineCircuitVerify<F: FieldElement> {
     #[serde(bound = "")]
     s_i: F,
@@ -507,10 +549,10 @@ pub async fn verify_parties<
 >(
     engine: &mut E,
     input_wire_masked_values: &[PF],
-    regular_masked_values: &HashMap<(usize, usize), RegularMask<PF>>,
-    wide_masked_values: &HashMap<(usize, usize), WideMask<PF>>,
-    regular_masks_shares: &HashMap<(usize, usize), RegularBeaverTriple<PF>>,
-    wide_masks_shares: &HashMap<(usize, usize), WideBeaverTriple<PF>>,
+    regular_masked_values: &[((usize, usize), RegularMask<PF>)],
+    wide_masked_values: &[((usize, usize), WideMask<PF>)],
+    regular_masks_shares: &[((usize, usize), RegularBeaverTriple<PF>)],
+    wide_masks_shares: &[((usize, usize), WideBeaverTriple<PF>)],
     output_wire_masked_values: &[PF],
     circuit: &ParsedCircuit,
     offline_material: &OfflineCircuitVerify<F>,
@@ -570,8 +612,8 @@ pub async fn verify_parties<
     let gamma_x_hat = dot_product_gamma(
         &gammas,
         &wide_gammas,
-        &regular_masked_values,
-        &wide_masked_values,
+        regular_masked_values,
+        wide_masked_values,
         &gammas_input_wires,
         input_wire_masked_values,
     );
@@ -582,8 +624,8 @@ pub async fn verify_parties<
     let gamma_i = compute_gamma_i(
         &gammas,
         &wide_gammas,
-        &regular_masks_shares,
-        &wide_masks_shares,
+        regular_masks_shares,
+        wide_masks_shares,
         &regular_masked_values,
         &wide_masked_values,
     );
@@ -743,7 +785,7 @@ pub fn offline_verify_dealer<
     circuit: &ParsedCircuit,
     total_input_wires_masks: &[PF],
     total_output_wires_masks: &[PF],
-    sho: &[(PartyId, SHO)],
+    sho: &mut [(PartyId, SHO)],
     is_authenticated: bool,
     dealer_ctx: &mut DealerCtx<F>,
 ) -> HashMap<
@@ -801,7 +843,7 @@ where
                 };
             })
         });
-    for (pid, sho) in sho {
+    for (pid, sho) in sho.iter_mut() {
         let (regular_gate_input_masks, wide_gate_input_masks) =
             sho.get_gates_input_wires_masks(circuit);
         debug_assert_eq!(regular_gate_input_masks.len(), total_gate_input_masks.len());
@@ -843,17 +885,15 @@ where
         compute_gammas_alphas::<PACKING, _, PF>(&alpha, circuit);
 
     // Compute Omega
-    let regular_gates_input_wire_masks: HashMap<_, _> =
-        total_gate_input_masks.iter().copied().collect();
-    let wide_gates_input_wire_masks: HashMap<_, _> =
-        wide_total_gate_input_masks.iter().copied().collect();
+    let regular_gates_input_wire_masks = &total_gate_input_masks;
+    let wide_gates_input_wire_masks = &wide_total_gate_input_masks;
     let mu = F::random(&mut rng);
     let alpha_r = dot_product_alpha::<PACKING, _, _, PF>(
         &alphas,
         &wide_alphas,
         &alphas_output_wires,
-        &regular_gates_input_wire_masks,
-        &wide_gates_input_wire_masks,
+        regular_gates_input_wire_masks,
+        wide_gates_input_wire_masks,
         total_output_wires_masks,
     );
 
@@ -894,7 +934,7 @@ where
             let wide_gammas_rc = wide_gammas_rc.clone();
             let regular_gammas = regular_gamma_rc.as_ref();
             let wide_gammas = wide_gammas_rc.as_ref();
-            let regular_mask_shares: HashMap<_, _> = regular_gate_masks
+            let regular_mask_shares: Vec<_> = regular_gate_masks
                 .into_iter()
                 .map(|((l, g), m)| {
                     let m = match m {
@@ -903,7 +943,7 @@ where
                     ((l, g), m)
                 })
                 .collect();
-            let wide_mask_shares: HashMap<_, _> = wide_gate_masks
+            let wide_mask_shares: Vec<_> = wide_gate_masks
                 .into_iter()
                 .map(|((l, g), m)| {
                     let m = match m {
@@ -963,11 +1003,9 @@ where
             .0
             .verifiers_offline_material = verifiers;
     });
+    let auth_time = Instant::now();
     if is_authenticated {
-        let pairwise_triples: HashMap<_, _> = sho
-            .iter()
-            .map(|(pid, sho)| (*pid, sho.get_pairwise_triples(circuit)))
-            .collect();
+        let mut time = Instant::now();
         let coin: F = sho
             .iter()
             .map(|sho| {
@@ -977,21 +1015,37 @@ where
                 F::random(&mut rng)
             })
             .sum();
+        let pairwise_triples: HashMap<_, _> = sho
+            .iter_mut()
+            .map(|(pid, sho)| (*pid, sho.get_pairwise_triples(circuit)))
+            .collect();
+        info!(
+            "GET PAIRWISE TRIPLES TIME: {}ms",
+            time.elapsed().as_millis()
+        );
+
         let mut proofs: HashMap<PartyId, HashMap<PartyId, ZkFliopProof<F>>> = parties
             .iter()
             .copied()
             .map(|pid| (pid, HashMap::new()))
             .collect();
         for i in 0..parties.len() {
+            time = Instant::now();
             let pi = parties[i];
             for j in 0..i {
                 let pj = parties[j];
                 let (reg_ci, wide_ci) = pairwise_triples.get(&pi).unwrap();
-                let (reg_ci, wide_ci) = (reg_ci.get(&pj).unwrap(), wide_ci.get(&pj).unwrap());
+                let (reg_ci, wide_ci) = (
+                    reg_ci.iter().find(|v| v.0 == pj).unwrap(),
+                    wide_ci.iter().find(|v| v.0 == pj).unwrap(),
+                );
                 let (reg_cj, wide_cj) = pairwise_triples.get(&pj).unwrap();
-                let (reg_cj, wide_cj) = (reg_cj.get(&pi).unwrap(), wide_cj.get(&pi).unwrap());
-                let stmt_i = construct_statement_from_bts(&reg_ci, &wide_ci, coin);
-                let stmt_j = construct_statement_from_bts(&reg_cj, &wide_cj, coin);
+                let (reg_cj, wide_cj) = (
+                    reg_cj.iter().find(|v| v.0 == pi).unwrap(),
+                    wide_cj.iter().find(|v| v.0 == pi).unwrap(),
+                );
+                let stmt_i = construct_statement_from_bts(&reg_ci.1, &wide_ci.1, coin);
+                let stmt_j = construct_statement_from_bts(&reg_cj.1, &wide_cj.1, coin);
                 let stmt: Vec<F> = stmt_i
                     .iter()
                     .copied()
@@ -1005,7 +1059,9 @@ where
                 proofs.get_mut(&pi).unwrap().insert(pj, proof_i);
                 proofs.get_mut(&pj).unwrap().insert(pi, proof_j);
             }
+            info!("Party took: {}ms", time.elapsed().as_millis());
         }
+        info!("Auth time: {}ms", auth_time.elapsed().as_millis());
         proofs.into_iter().for_each(|(pid, proofs)| {
             offline_verifiers.get_mut(&pid).unwrap().1 = Some(proofs);
         })

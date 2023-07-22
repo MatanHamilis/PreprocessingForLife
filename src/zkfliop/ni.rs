@@ -65,7 +65,7 @@ fn random_oracle(commits: &[[u8; OUT_LEN]]) -> impl RngCore + CryptoRng {
     let seed = core::array::from_fn(|i| hash.as_bytes()[i]);
     AesRng::from_seed(seed)
 }
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ZkFliopProof<F: FieldElement> {
     #[serde(bound = "")]
     proof_shares: Vec<Vec<F>>,

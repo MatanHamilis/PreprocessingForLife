@@ -15,7 +15,7 @@ use crate::{
 
 const PRG_EXPANSION_FACTOR: usize = 8;
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub struct PackedPprfSender {
     pub seed: GF128,
     pub depth: usize,
@@ -112,7 +112,7 @@ pub async fn distributed_pprf_sender(
     Ok(())
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PackedPprfReceiver {
     pub punctured_index: usize,
     pub subtree_seeds: Vec<GF128>,

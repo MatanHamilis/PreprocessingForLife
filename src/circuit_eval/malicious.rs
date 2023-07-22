@@ -20,7 +20,7 @@ use super::{
     verify::{self, statement_length, DealerCtx, FliopCtx, OfflineCircuitVerify},
 };
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MaliciousSecurityOffline<
     const PACKING: usize,
     PF: PackedField<GF2, PACKING>,
@@ -55,16 +55,21 @@ where
         // Correlated Randomness for Semi-Honest
         let mut aes_rng = AesRng::from_random_seed();
         let parties_num = party_input_length.len();
-        let (input_wire_masks, output_wire_masks, offline_correlations) =
+        let (input_wire_masks, output_wire_masks, mut offline_correlations) =
             SHO::deal(&mut aes_rng, party_input_length, circuit, dealer);
         // Correlated random for Verify
+        let time = Instant::now();
         let mut verifier_correlations = verify::offline_verify_dealer(
             circuit,
             &input_wire_masks,
             &output_wire_masks,
-            &offline_correlations,
+            &mut offline_correlations,
             is_authenticated,
             dealer_ctx,
+        );
+        info!(
+            "Offline verify dealer took: {}ms",
+            time.elapsed().as_millis()
         );
 
         let (mut output_wires_share, output_wires_commitment) =
@@ -225,8 +230,8 @@ where
             &masked_input_wires,
             &masked_gate_inputs,
             &wide_masked_gate_inputs,
-            &regular_multi_party_beaver_triples,
-            &wide_multi_party_beaver_triples,
+            regular_multi_party_beaver_triples,
+            wide_multi_party_beaver_triples,
             &masked_outputs,
             circuit.as_ref(),
             offline_verification_material,
@@ -458,7 +463,7 @@ mod tests {
         ];
         let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
             .expect("Failed to parse");
-        let input = vec![GF2::zero(), GF2::zero()];
+        let input = vec![GF2::one(), GF2::zero()];
         let dealer = StandardDealer::new(10, 7);
         test_malicious_circuit::<1, _, PackedOfflineReceiverPcgKey<4>, _, GF2Container>(
             parsed_circuit,
@@ -501,7 +506,7 @@ mod tests {
         ];
         let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
             .expect("Failed to parse");
-        let input = vec![GF2::zero(), GF2::zero(), GF2::zero()];
+        let input = vec![GF2::one(), GF2::zero(), GF2::zero()];
         let dealer = StandardDealer::new(10, 7);
         test_malicious_circuit::<1, _, PackedOfflineReceiverPcgKey<4>, _, GF2Container>(
             parsed_circuit,
