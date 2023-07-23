@@ -27,24 +27,54 @@ pub fn last_round_proof_length(log_folding_factor: usize) -> usize {
     // Total is 2*L so 2*L+1 evals needed.
     (2<<log_folding_factor) + 1
 }
-// const CHUNK_SIZE: usize = 1 << 10;
+const CHUNK_SIZE: usize = 1 << 4;
 pub struct PowersIterator<F: FieldElement> {
-    alpha: F,
-    current: F,
+    alpha_pow: F,
+    current: [F; CHUNK_SIZE],
+    index: usize,
 }
 impl<F: FieldElement> PowersIterator<F> {
     pub fn new(alpha: F) -> Self {
+        let mut cur = F::one();
+        let current = core::array::from_fn(|_| {
+            let output = cur;
+            cur *= alpha;
+            output
+        });
+        let alpha_pow = cur * alpha;
+
         Self {
-            alpha,
-            current: F::one(),
+            alpha_pow,
+            current,
+            index: 0,
         }
     }
 }
 impl<F: FieldElement> Iterator for PowersIterator<F> {
     type Item = F;
     fn next(&mut self) -> Option<Self::Item> {
-        self.current *= self.alpha;
-        Some(self.current)
+        let output = Some(self.current[self.index]);
+        self.index += 1;
+        self.index &= CHUNK_SIZE - 1;
+        if self.index == 0 {
+            self.current[0] *= self.alpha_pow;
+            self.current[1] *= self.alpha_pow;
+            self.current[2] *= self.alpha_pow;
+            self.current[3] *= self.alpha_pow;
+            self.current[4] *= self.alpha_pow;
+            self.current[5] *= self.alpha_pow;
+            self.current[6] *= self.alpha_pow;
+            self.current[7] *= self.alpha_pow;
+            self.current[8] *= self.alpha_pow;
+            self.current[9] *= self.alpha_pow;
+            self.current[10] *= self.alpha_pow;
+            self.current[11] *= self.alpha_pow;
+            self.current[12] *= self.alpha_pow;
+            self.current[13] *= self.alpha_pow;
+            self.current[14] *= self.alpha_pow;
+            self.current[15] *= self.alpha_pow;
+        }
+        output
     }
 }
 
