@@ -1005,7 +1005,6 @@ where
     });
     let auth_time = Instant::now();
     if is_authenticated {
-        let mut time = Instant::now();
         let coin: F = sho
             .iter()
             .map(|sho| {
@@ -1019,10 +1018,6 @@ where
             .iter_mut()
             .map(|(pid, sho)| (*pid, sho.get_pairwise_triples(circuit)))
             .collect();
-        info!(
-            "GET PAIRWISE TRIPLES TIME: {}ms",
-            time.elapsed().as_millis()
-        );
 
         let mut proofs: HashMap<PartyId, HashMap<PartyId, ZkFliopProof<F>>> = parties
             .iter()
@@ -1030,7 +1025,6 @@ where
             .map(|pid| (pid, HashMap::new()))
             .collect();
         for i in 0..parties.len() {
-            time = Instant::now();
             let pi = parties[i];
             for j in 0..i {
                 let pj = parties[j];
@@ -1059,7 +1053,6 @@ where
                 proofs.get_mut(&pi).unwrap().insert(pj, proof_i);
                 proofs.get_mut(&pj).unwrap().insert(pi, proof_j);
             }
-            info!("Party took: {}ms", time.elapsed().as_millis());
         }
         info!("Auth time: {}ms", auth_time.elapsed().as_millis());
         proofs.into_iter().for_each(|(pid, proofs)| {

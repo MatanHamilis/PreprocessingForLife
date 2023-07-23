@@ -311,12 +311,6 @@ fn bench_malicious_circuit<
         &mut dealer_ctx,
     );
     info!("Dealer:\t took: {}ms", time.elapsed().as_millis());
-    parties_offline_material.values().for_each(|v| {
-        info!(
-            "Serialized correlation size: {}",
-            bincode::serialized_size(v).unwrap()
-        );
-    });
     let online_party_ids: Vec<_> = (0..parties).map(|i| (i + 1) as PartyId).collect();
     let online_parties_set = Arc::new(HashSet::from_iter(online_party_ids.iter().copied()));
 
@@ -411,8 +405,22 @@ pub fn party_run<
         .block_on(async {
             let (router, mut engine) =
                 set_up_router_for_party(party_id, party_ids.as_ref(), base_port).await;
-            // Pre Online
             let router_handle = tokio::spawn(router.launch());
+            // First, if needed, verify the triples
+            if is_authenticated {
+                let time = Instant::now();
+                offline_material
+                    .malicious_security_offline_party(
+                        &mut engine.sub_protocol("verify_triples"),
+                        circuit.as_ref(),
+                        is_authenticated,
+                        ctx,
+                    )
+                    .await;
+                info!("Offline party took: {}ms", time.elapsed().as_millis());
+            }
+
+            // Pre Online
 
             let mut pre = {
                 let mut engine = engine.sub_protocol("PRE-ONLINE");
@@ -436,6 +444,7 @@ pub fn party_run<
                     .ok_or(());
                 (o, start)
             };
+            drop(engine);
             let end = Instant::now();
             let total_bytes: usize = router_handle.await.unwrap();
             info!("Total bytes:{}", total_bytes);
@@ -481,7 +490,7 @@ pub fn bench_2p_semi_honest(c: &mut Criterion) {
     );
 }
 pub fn bench_2p_malicious(c: &mut Criterion) {
-    let is_authenticated = true;
+    let is_authenticated = false;
     pretty_env_logger::formatted_builder()
         .filter_level(log::LevelFilter::Info)
         .init();

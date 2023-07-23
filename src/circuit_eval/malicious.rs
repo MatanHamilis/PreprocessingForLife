@@ -10,7 +10,7 @@ use crate::{
     commitment::OfflineCommitment,
     engine::MultiPartyEngine,
     fields::{FieldElement, IntermediateMulField, PackedField, GF2},
-    zkfliop::{self, ni::ZkFliopProof},
+    zkfliop::{self, ni::ZkFliopProof, VerifierCtx},
     PartyId,
 };
 
@@ -45,6 +45,24 @@ impl<
 where
     GF2: Mul<F, Output = F>,
 {
+    pub async fn verify_triples<E: MultiPartyEngine>(
+        &self,
+        engine: &mut E,
+        circuit: &ParsedCircuit,
+        verifier_ctx: &mut Vec<VerifierCtx<F>>,
+    ) {
+        if self.dealer_verification_material.is_none() {
+            return;
+        }
+        self.semi_honest_offline_correlation
+            .verify_correlation(
+                &mut engine.sub_protocol("verify triples"),
+                circuit,
+                self.dealer_verification_material.as_ref().unwrap(),
+                verifier_ctx,
+            )
+            .await;
+    }
     pub fn malicious_security_offline_dealer(
         circuit: &ParsedCircuit,
         party_input_length: &HashMap<PartyId, (usize, usize)>,
@@ -95,25 +113,25 @@ where
             .collect()
     }
     pub async fn malicious_security_offline_party(
+        &self,
         engine: &mut impl MultiPartyEngine,
-        circuit: impl AsRef<ParsedCircuit>,
-        correlation: &MaliciousSecurityOffline<PACKING, PF, F, SHO>,
+        circuit: &ParsedCircuit,
         is_authenticated: bool,
         ctx: &mut FliopCtx<F>,
     ) -> bool {
         if !is_authenticated {
             return true;
         }
-        let proof_statement_length = statement_length::<PACKING>(circuit.as_ref());
+        let proof_statement_length = statement_length::<PACKING>(circuit);
         println!("Verifying triples...");
-        let proofs = correlation.dealer_verification_material.as_ref().unwrap();
+        let proofs = self.dealer_verification_material.as_ref().unwrap();
         let peers: Vec<PartyId> = engine.party_ids().iter().copied().collect();
         let peers = Arc::new(peers.into());
-        let semi_honest_offline_correlation = &correlation.semi_honest_offline_correlation;
+        let semi_honest_offline_correlation = &self.semi_honest_offline_correlation;
         let triples_verdict = semi_honest_offline_correlation
             .verify_correlation(
                 &mut engine.sub_protocol_with("verify triples", peers),
-                circuit.as_ref(),
+                circuit,
                 proofs,
                 ctx.verifiers_ctx.as_mut().unwrap(),
             )
@@ -363,14 +381,14 @@ mod tests {
                     .sub_protocol("verify_corr");
                 let circuit = circuit.clone();
                 async move {
-                    let res = MaliciousSecurityOffline::malicious_security_offline_party(
-                        &mut engine,
-                        circuit,
-                        material,
-                        is_authenticated,
-                        &mut ctx,
-                    )
-                    .await;
+                    let res = material
+                        .malicious_security_offline_party(
+                            &mut engine,
+                            circuit.as_ref(),
+                            is_authenticated,
+                            &mut ctx,
+                        )
+                        .await;
                     Result::<(bool, FliopCtx<_>), ()>::Ok((res, ctx))
                 }
             })

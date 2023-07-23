@@ -271,16 +271,17 @@ pub struct PcgBasedPairwiseBooleanCorrelation<
         PartyId,
         (PackedOfflineFullPcgKey<PS, PS::Receiver>, [u8; 16]),
     )>,
-    #[serde(bound = "")]
+    #[serde(bound = "", skip)]
     pub regular_expanded_pcg_keys:
         Option<Vec<(PartyId, Vec<((usize, usize), RegularBeaverTriple<F>)>)>>,
-    #[serde(bound = "")]
+    #[serde(bound = "", skip)]
     pub wide_expanded_pcg_keys: Option<Vec<(PartyId, Vec<((usize, usize), WideBeaverTriple<F>)>)>>,
-    #[serde(bound = "")]
+    #[serde(bound = "", skip)]
     pub multi_party_correlations: Option<(
         Vec<((usize, usize), RegularBeaverTriple<F>)>,
         Vec<((usize, usize), WideBeaverTriple<F>)>,
     )>,
+    #[serde(bound = "", skip)]
     _d: PhantomData<D>,
 }
 
