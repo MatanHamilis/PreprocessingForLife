@@ -420,7 +420,9 @@ fn construct_statement<
 ) -> Vec<F> {
     let statement_length: usize = statement_length::<N>(circuit);
     // We create a statement of size that is 1 + power of 2.
-    let mut statement = vec![F::zero(); statement_length];
+    // let mut statement = vec![F::zero(); statement_length];
+    let mut statement =
+        unsafe { vec![std::mem::MaybeUninit::<F>::uninit().assume_init(); statement_length] };
 
     // Initialize first entry
     statement[0] = masked_gamma_i.unwrap_or(F::zero()) + gamma_i_mask.unwrap_or(F::zero());
@@ -672,17 +674,25 @@ pub async fn verify_parties<
     } else {
         None
     };
-    let verify_statement = Arc::new(construct_statement(
-        None,
-        None,
-        &gammas,
-        &wide_gammas,
-        Some(&regular_masked_values),
-        Some(&wide_masked_values),
-        None,
-        None,
-        circuit,
-    ));
+    let verify_statement: Arc<Vec<_>> = Arc::new(
+        proof_statement
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(idx, v)| if idx & 1 == 0 { F::zero() } else { v })
+            .collect(),
+    );
+    // let verify_statement = Arc::new(construct_statement(
+    //     None,
+    //     None,
+    //     &gammas,
+    //     &wide_gammas,
+    //     Some(&regular_masked_values),
+    //     Some(&wide_masked_values),
+    //     None,
+    //     None,
+    //     circuit,
+    // ));
     info!(
         "\t\tVerify {} - Statements Construction: {}ms",
         my_id,
