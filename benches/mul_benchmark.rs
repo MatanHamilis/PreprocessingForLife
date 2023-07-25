@@ -3,6 +3,7 @@ use rand_core::OsRng;
 use silent_party::fields::FieldElement;
 use silent_party::fields::GF128;
 use silent_party::fields::GF64;
+use silent_party::zkfliop::PowersIterator;
 use std::time::Instant;
 
 pub fn mul_benchmark(c: &mut Criterion) {
@@ -94,11 +95,56 @@ pub fn inv_benchmark(c: &mut Criterion) {
     });
 }
 
+const CHUNK_SIZE: usize = 1 << 4;
+pub struct NaivePowersIterator<F: FieldElement> {
+    alpha: F,
+    cur: F,
+}
+impl<F: FieldElement> NaivePowersIterator<F> {
+    pub fn new(alpha: F) -> Self {
+        Self {
+            alpha,
+            cur: F::one(),
+        }
+    }
+}
+impl<F: FieldElement> Iterator for NaivePowersIterator<F> {
+    type Item = F;
+    fn next(&mut self) -> Option<Self::Item> {
+        let output = Some(self.cur);
+        self.cur *= self.alpha;
+        output
+    }
+}
+pub fn power_benchmark(c: &mut Criterion) {
+    c.bench_function("powers naive", |b| {
+        let rng = &mut OsRng;
+        let a = GF128::random(rng);
+        let mut powers = NaivePowersIterator::new(a);
+        b.iter(|| {
+            black_box((0..10_000_000).for_each(|_| {
+                powers.next().unwrap();
+            }))
+        });
+    });
+    c.bench_function("powers optimized", |b| {
+        let rng = &mut OsRng;
+        let a = GF128::random(rng);
+        let mut powers = PowersIterator::new(a);
+        b.iter(|| {
+            black_box((0..10_000_000).for_each(|_| {
+                powers.next().unwrap();
+            }))
+        });
+    });
+}
+
 criterion_group!(
     benches,
     mul_benchmark_with_mem,
     mul_benchmark_with_vec,
     mul_benchmark,
     inv_benchmark,
+    power_benchmark
 );
 criterion_main!(benches);
