@@ -1,12 +1,14 @@
 use std::time::Instant;
 
 use crate::{
-    commitment::{CommmitShare, OfflineCommitment},
+    commitment::{commit_value, CommmitShare, OfflineCommitment},
     engine::{MultiPartyEngine, PartyId},
     fields::{FieldElement, IntermediateMulField, MulResidue},
 };
 use aes_prng::AesRng;
+use blake3::OUT_LEN;
 use log::info;
+use rand_core::{RngCore, SeedableRng};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -114,14 +116,62 @@ pub fn g_mul_res<F: IntermediateMulField>(z: &[F::MulRes]) -> F {
 pub struct OfflineProver<F: FieldElement> {
     #[serde(bound = "")]
     proof_masks: Vec<F>,
-    round_challenges: Vec<OfflineCommitment>,
-    final_msg: OfflineCommitment,
+    round_challenges_commitments: Vec<[u8; OUT_LEN]>,
+    final_msg_commitment: [u8; OUT_LEN],
 }
+// pub fn generate_fliop_verification_statement_prover<F: FieldElement>(
+//     prover: &OfflineProver<F>,
+//     masks: &mut [F],
+//     log_folding_factor: usize,
+// ) -> Vec<F> {
+//     /// The masks_and_output should be of length that is a multiple of 2M.
+//     /// The part not made of masks should be zeros.
+//     let M = 1 << log_folding_factor;
+//     let initial_length = (masks.len() + 2 * M - 1) / (2 * M);
+//     let mut output_vec: Vec<_> = masks
+//         .iter()
+//         .copied()
+//         .chain(
+//             std::iter::once(F::zero())
+//                 .cycle()
+//                 .take(initial_length - masks.len()),
+//         )
+//         .collect();
+//     let mut window_size = output_vec.len() / M;
+//     while  {
+
+//     }
+// }
+// pub fn generate_fliop_verification_statement_verifier<F: FieldElement>(
+//     prover: &OfflineVerifier,
+//     masks: &mut [F],
+//     log_folding_factor: usize,
+// ) -> Vec<F> {
+//     /// The masks_and_output should be of length that is a multiple of 2M.
+//     /// The part not made of masks should be zeros.
+//     let M = 1 << log_folding_factor;
+//     let initial_length = (masks.len() + 2 * M - 1) / (2 * M);
+//     let mut output_vec: Vec<_> = masks
+//         .iter()
+//         .copied()
+//         .chain(
+//             std::iter::once(F::zero())
+//                 .cycle()
+//                 .take(initial_length - masks.len()),
+//         )
+//         .collect();
+//     let mut window_size = output_vec.len() / M;
+//     while  {
+
+//     }
+// }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct OfflineVerifier {
-    round_challenges: Vec<OfflineCommitment>,
-    final_msg: OfflineCommitment,
+pub struct OfflineVerifier<F: FieldElement> {
+    #[serde(bound = "")]
+    round_challenges: Vec<F>,
+    #[serde(bound = "")]
+    final_msg: ([u8; 16], F, F, F, F),
 }
 
 struct EvalCtx<F: IntermediateMulField> {
@@ -312,7 +362,7 @@ pub fn dealer<F: IntermediateMulField>(
     mut z_tilde: &mut [F],
     num_verifiers: usize,
     verifier_ctx: &mut VerifierCtx<F>,
-) -> (OfflineProver<F>, Vec<OfflineVerifier>) {
+) -> (OfflineProver<F>, Vec<OfflineVerifier<F>>) {
     let VerifierCtx {
         eval_ctx_internal_round_proof,
         eval_ctx_internal_round_polys,
@@ -335,22 +385,26 @@ pub fn dealer<F: IntermediateMulField>(
     // let s_tilde = (F::random(&mut rng), F::random(&mut rng));
 
     // Rounds
-    let mut round_challenges_shares = vec![Vec::with_capacity(round_count); num_verifiers + 1];
+    let mut round_challenges = Vec::with_capacity(round_count);
+    let mut round_challenges_commitments = Vec::with_capacity(round_count);
     let M = 1 << log_folding_factor;
     for round_id in 1..round_count {
         let z_len = z_tilde.len();
         let r = F::random(&mut rng);
-        let (challenge_commit_shares, commitment) =
-            OfflineCommitment::commit(&r, num_verifiers + 1);
-        round_challenges_shares
-            .iter_mut()
-            .zip(challenge_commit_shares.into_iter())
-            .for_each(|(v, commit_share)| {
-                v.push(OfflineCommitment {
-                    commit_share,
-                    commitment,
-                });
-            });
+        let r_comm = commit_value(&r);
+        round_challenges_commitments.push(r_comm);
+        round_challenges.push(r);
+        // let (challenge_commit_shares, commitment) =
+        //     OfflineCommitment::commit(&r, num_verifiers + 1);
+        // round_challenges_shares
+        //     .iter_mut()
+        //     .zip(challenge_commit_shares.into_iter())
+        //     .for_each(|(v, commit_share)| {
+        //         v.push(OfflineCommitment {
+        //             commit_share,
+        //             commitment,
+        //         });
+        //     });
         let q_base = (round_id - 1) * internal_proof_length;
         let b_tilde_value = z_tilde[0] - (0..M).map(|i| proof_masks[q_base + i]).sum();
         b_tilde.push(b_tilde_value);
@@ -377,16 +431,19 @@ pub fn dealer<F: IntermediateMulField>(
     // last round
     debug_assert_eq!(z_tilde.len(), 1 + 2 * M);
     let r = F::random(&mut rng);
-    let (challenge_commit_shares, commitment) = OfflineCommitment::commit(&r, num_verifiers + 1);
-    round_challenges_shares
-        .iter_mut()
-        .zip(challenge_commit_shares.into_iter())
-        .for_each(|(v, commit_share)| {
-            v.push(OfflineCommitment {
-                commit_share,
-                commitment,
-            });
-        });
+    let r_comm = commit_value(&r);
+    round_challenges.push(r);
+    round_challenges_commitments.push(r_comm);
+    // let (challenge_commit_shares, commitment) = OfflineCommitment::commit(&r, num_verifiers + 1);
+    // round_challenges_shares
+    //     .iter_mut()
+    //     .zip(challenge_commit_shares.into_iter())
+    //     .for_each(|(v, commit_share)| {
+    //         v.push(OfflineCommitment {
+    //             commit_share,
+    //             commitment,
+    //         });
+    //     });
     let last_round_masks =
         &proof_masks[proof_masks.len() - last_round_proof_length(log_folding_factor)..];
     // let mut polys_eval_ctx = EvalCtx::<F>::new(M + 1);
@@ -407,35 +464,56 @@ pub fn dealer<F: IntermediateMulField>(
     b_tilde.push(z_tilde[0] - (0..M).map(|i| last_round_masks[2 + i]).sum());
 
     // Decision
-    let betas: Vec<_> = (0..round_count).map(|_| F::random(&mut rng)).collect();
+    let mut betas_seed: [u8; 16] = core::array::from_fn(|_| 0u8);
+    rng.fill_bytes(&mut betas_seed);
+    let mut betas_rng = AesRng::from_seed(betas_seed);
+    let betas: Vec<_> = (0..round_count)
+        .map(|_| F::random(&mut betas_rng))
+        .collect();
     debug_assert_eq!(betas.len(), b_tilde.len());
     let b_tilde_check = betas
         .iter()
         .zip(b_tilde.iter())
         .map(|(a, b)| *a * *b)
         .fold(F::zero(), |acc, cur| acc + cur);
-    let final_value = (betas, b_tilde_check, f_tilde_r[0], f_tilde_r[1], g_tilde_r);
+    let final_msg = (
+        betas_seed,
+        b_tilde_check,
+        f_tilde_r[0],
+        f_tilde_r[1],
+        g_tilde_r,
+    );
+    let final_msg_commitment = commit_value(&final_msg);
     let (mut last_value_commitments, commitment) =
-        OfflineCommitment::commit(&final_value, num_verifiers + 1);
+        OfflineCommitment::commit(&final_msg, num_verifiers + 1);
     let prover = OfflineProver {
-        final_msg: OfflineCommitment {
-            commit_share: last_value_commitments.pop().unwrap(),
-            commitment,
-        },
+        final_msg_commitment,
+        round_challenges_commitments,
+        // final_msg: OfflineCommitment {
+        //     commit_share: last_value_commitments.pop().unwrap(),
+        //     commitment,
+        // },
         proof_masks,
-        round_challenges: round_challenges_shares.pop().unwrap(),
+        // round_challenges: round_challenges_shares.pop().unwrap(),
     };
-    let verifiers = round_challenges_shares
-        .into_iter()
-        .zip(last_value_commitments.into_iter())
-        .map(|(challenge, last_val)| OfflineVerifier {
-            round_challenges: challenge,
-            final_msg: OfflineCommitment {
-                commit_share: last_val,
-                commitment,
-            },
-        })
-        .collect();
+    let verifiers = vec![
+        OfflineVerifier {
+            round_challenges,
+            final_msg
+        };
+        num_verifiers
+    ];
+    // (0..num_verifiers)
+    // .into_iter()
+    // .zip(last_value_commitments.into_iter())
+    // .map(|(challenge, last_val)| OfflineVerifier {
+    //     round_challenges: challenge,
+    //     final_msg: OfflineCommitment {
+    //         commit_share: last_val,
+    //         commitment,
+    //     },
+    // })
+    // .collect();
     (prover, verifiers)
 }
 
@@ -554,22 +632,27 @@ pub async fn prover<F: IntermediateMulField, E: MultiPartyEngine>(
         log_folding_factor,
     } = prover_ctx;
     let log_folding_factor = *log_folding_factor;
+    let challenges_sender = *engine
+        .party_ids()
+        .iter()
+        .find(|v| **v != engine.my_party_id())
+        .unwrap();
     let OfflineProver {
         proof_masks,
-        round_challenges,
-        final_msg,
+        round_challenges_commitments,
+        final_msg_commitment,
     } = offline_material;
     let M: usize = 1 << log_folding_factor;
-    let last_round_challenge = round_challenges.last().unwrap();
+    let last_round_challenge_commitment = round_challenges_commitments.last().unwrap();
     // Init
     let round_count = compute_round_count(z.len(), log_folding_factor);
     let mut b_tilde = Vec::with_capacity(round_count);
     let mut masked_internal_proof =
         vec![F::zero(); internal_round_proof_length(log_folding_factor)];
     // Rounds
-    for (round_id, (round_challenge, masks)) in round_challenges
+    for (round_id, (round_challenge_commitments, masks)) in round_challenges_commitments
         .into_iter()
-        .take(round_challenges.len() - 1)
+        .take(round_challenges_commitments.len() - 1)
         .zip(proof_masks.chunks_exact(internal_round_proof_length(log_folding_factor)))
         .enumerate()
     {
@@ -583,7 +666,8 @@ pub async fn prover<F: IntermediateMulField, E: MultiPartyEngine>(
 
         // Communication
         engine.broadcast(&masked_internal_proof);
-        let r: F = round_challenge.online_decommit(&mut engine).await;
+        let r: F = engine.recv_from(challenges_sender).await.unwrap();
+        assert_eq!(&commit_value(&r), round_challenge_commitments);
         eval_ctx_internal_round_polys_challenge.prepare_at_points(std::slice::from_ref(&r));
         eval_ctx_internal_round_proof_challenge.prepare_at_points(std::slice::from_ref(&r));
         // Query
@@ -653,15 +737,15 @@ pub async fn prover<F: IntermediateMulField, E: MultiPartyEngine>(
         .zip(proof_masks_last_round.iter())
         .for_each(|(p, a)| *p -= *a);
     engine.broadcast(last_round_proof);
-    let r: F = last_round_challenge.online_decommit(&mut engine).await;
+    // let r: F = last_round_challenge.online_decommit(&mut engine).await;
+    let r: F = engine.recv_from(challenges_sender).await.unwrap();
+    assert_eq!(&commit_value(&r), last_round_challenge_commitment);
     // Decision
-    let (betas, b_tilde_check_dealer, f_0_tilde_dealer, f_1_tilde_dealer, q_tilde_dealer): (
-        Vec<F>,
-        F,
-        F,
-        F,
-        F,
-    ) = final_msg.online_decommit(&mut engine).await;
+    let last_round_msg: ([u8; 16], F, F, F, F) = engine.recv_from(challenges_sender).await.unwrap();
+    assert_eq!(&commit_value(&last_round_msg), final_msg_commitment);
+    let (betas_seed, b_tilde_check_dealer, f_0_tilde_dealer, f_1_tilde_dealer, q_tilde_dealer) =
+        last_round_msg;
+    // ) = final_msg.online_decommit(&mut engine).await;
     if auth_statement.is_some() {
         let z_tilde = auth_statement.unwrap();
         debug_assert_eq!(z_tilde.len(), 1 + 2 * M);
@@ -705,6 +789,10 @@ pub async fn prover<F: IntermediateMulField, E: MultiPartyEngine>(
             1,
         );
         b_tilde.push(z_tilde[0] - (0..M).map(|i| proof_masks_last_round[2 + i]).sum());
+        let mut betas_rng = AesRng::from_seed(betas_seed);
+        let betas: Vec<_> = (0..round_count)
+            .map(|_| F::random(&mut betas_rng))
+            .collect();
 
         // Decision
         debug_assert_eq!(betas.len(), b_tilde.len());
@@ -734,7 +822,7 @@ pub async fn verifier<F: IntermediateMulField>(
     mut engine: impl MultiPartyEngine,
     mut z_hat: &mut [F],
     prover_id: PartyId,
-    offline_material: &OfflineVerifier,
+    offline_material: &OfflineVerifier<F>,
     verifier_ctx: &mut VerifierCtx<F>,
 ) {
     let VerifierCtx {
@@ -754,6 +842,12 @@ pub async fn verifier<F: IntermediateMulField>(
         round_challenges,
     } = offline_material;
     let last_round_challenge = round_challenges.last().unwrap();
+    let challenges_sender = *engine
+        .party_ids()
+        .iter()
+        .find(|v| **v != prover_id)
+        .unwrap();
+    let should_send_challenge = challenges_sender == engine.my_party_id();
 
     let mut b_hat = Vec::with_capacity(round_count);
     // Rounds
@@ -769,7 +863,10 @@ pub async fn verifier<F: IntermediateMulField>(
             round_proof.len(),
             internal_round_proof_length(log_folding_factor)
         );
-        let r: F = round_challenge.online_decommit(&mut engine).await;
+        let r = round_challenge;
+        if should_send_challenge {
+            engine.send(r, prover_id);
+        }
         b_hat.push(z_hat[0] - round_proof[0..M].iter().copied().sum());
         let z_output = unsafe { std::slice::from_raw_parts_mut(z_hat[1..1 + L].as_mut_ptr(), L) };
         const CHUNK_SIZE: usize = 32;
@@ -792,7 +889,10 @@ pub async fn verifier<F: IntermediateMulField>(
         last_round_proof.len(),
         last_round_proof_length(log_folding_factor)
     );
-    let r: F = last_round_challenge.online_decommit(&mut engine).await;
+    let r: F = *last_round_challenge;
+    if should_send_challenge {
+        engine.send(r, prover_id);
+    }
     eval_ctx_last_round_polys.prepare_at_points(std::slice::from_ref(&r));
     let interpolation_buf: Vec<F> = z_hat[1..]
         .iter()
@@ -812,8 +912,15 @@ pub async fn verifier<F: IntermediateMulField>(
     b_hat.push(z_hat[0] - last_round_proof[2..2 + M].iter().copied().sum());
 
     // Decision
-    let (betas, b_tilde_check, f_0_tilde_r, f_1_tilde_r, q_tilde_r): (Vec<F>, F, F, F, F) =
-        final_msg.online_decommit(&mut engine).await;
+    if should_send_challenge {
+        engine.send(final_msg, prover_id);
+    }
+    let (betas_seed, b_tilde_check, f_0_tilde_r, f_1_tilde_r, q_tilde_r): ([u8; 16], F, F, F, F) =
+        *final_msg;
+    let mut betas_rng = AesRng::from_seed(betas_seed);
+    let betas: Vec<_> = (0..round_count)
+        .map(|_| F::random(&mut betas_rng))
+        .collect();
     assert_eq!(betas.len(), b_hat.len());
     let b_hat_check = betas
         .iter()

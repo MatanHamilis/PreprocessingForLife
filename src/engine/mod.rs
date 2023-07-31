@@ -80,7 +80,7 @@ impl MultiPartyEngineImpl {
             id,
             downstream_sender,
             upstream_receiver,
-            parties,
+            parties: parties,
             buffer: VecDeque::new(),
         };
         output

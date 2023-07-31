@@ -29,6 +29,10 @@ pub struct OfflineCommitment {
     pub(crate) commitment: [u8; OUT_LEN],
 }
 
+pub fn commit_value<T: Serialize>(v: &T) -> [u8; OUT_LEN] {
+    let mut encoded_value: Box<[u8]> = bincode::serialize(v).unwrap().into();
+    *blake3::hash(&encoded_value).as_bytes()
+}
 impl OfflineCommitment {
     pub fn commit<T: Serialize + DeserializeOwned>(
         value: &T,

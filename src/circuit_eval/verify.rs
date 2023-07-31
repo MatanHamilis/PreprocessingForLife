@@ -521,7 +521,7 @@ pub struct OfflineCircuitVerify<F: FieldElement> {
     alpha_omega_commitment: OfflineCommitment,
     s_commitment: OfflineCommitment,
     #[serde(bound = "")]
-    verifiers_offline_material: Vec<(PartyId, OfflineVerifier)>,
+    verifiers_offline_material: Vec<(PartyId, OfflineVerifier<F>)>,
     #[serde(bound = "")]
     prover_offline_material: OfflineProver<F>,
 }
@@ -1070,4 +1070,47 @@ where
         })
     };
     offline_verifiers
+}
+
+/// The Verification of the FLIOP correlation can be described as a degree-2 circuit of the following input:
+///
+/// First, we denote With L_{i,S}^x the lagrange coefficient of point i at point x from set of points S.
+/// That is, the coefficient f(x)  is interpolated by sum_{i in S} f(i)*(L_{i,S}^x).
+/// We wish to express this circuit for folding factor M.
+///
+/// The verifier is holding the round challenges (r_1,...,r_rho) and the values beta_1,...,beta_rho as well as the expected resulting check values determined by the dealer.
+/// The online prover is holding the masks, the zk-blinding-factors the mask s and the proof masks.
+/// The parties should verify that both sum beta_i * b_i is correct (held by the online verifier) and that the masked share of q(r)-f_1(r)*f_2(r) is correct (also held by the online verifier).
+/// Their input to the degree-2 circuit that computes sum beta_i * b_i is:
+///     - For verifier each summand of can be described easily if we have a circuit for b_i.
+///         - Each b_i is z[0] - sum(pi_i[0]...pi_i[M-1]) where:
+///             - pi[0]...pi[M-1] are known to the online prover.
+///             - z[0] is shared between the online prover and verifier with a degree two circuit taking:
+///                 - From the prover       [pi_(i-1)[0]        ...     pi_(i-1)[M]         ]
+///                 - From the verifier:    [L_(0,[M])^r_(i-1)....      L_(M,[M]^r_(i-1))   ]
+///             - Except for the first round where z[0] is known to the online prover which is exactly s.
+///         - So beta_i*b_i can be computed by:
+///             - For i=1:
+///                 - For the prover:   [s - sum(pi_1[0]...pi_1[M-1])]
+///                 - For the verifier: [beta_1]
+///             - For i > 1:
+///                 - For the prover:   [s - sum(pi_1[0]...pi_1[M-1])]
+///                 - From the prover       [pi_(i-1)[0]                ... pi_(i-1)[M]                 sum(pi_i[0..M])]
+///                 - From the verifier:    [beta_i * L_(0,[M])^r_(i-1) ... beta_i * L_(M,[M]^r_(i-1))  beta_i ]
+///         - To obtain sum, simply concatanate shares.
+///
+/// Their input to the degree-2 circuit that computes q(r_rho)-f_1(r_rho)*f_2(r_rho) is:
+///     - For computing q(r_rho) they interpolate the masked proof on r_rho, similar to what we already did.
+///     - For computing f_2(r_rho) they multiply L_{M,[M+1]} by z_2 (the blinding factor held by the prover).
+///     - For computing f_1(r_rho) they generate the following inputs:
+///         - The prover computes recursively the differences vector.
+///         - The verifier computes iteratively the lagrange coefficients subsets multiplication vector.
+///         - The prover adds a last item of z_1.
+///         - The verifier adds a last item of L_{M,[M+1]}^{r_rho} and is multiplying each consecutive M values by L_{i,[M+1]}^{r_rho} for i in 0..M-1.
+pub fn verify_fliop_prover<VF: FieldElement>(
+    engine: impl MultiPartyEngine,
+    fliop: &OfflineCircuitVerify<VF>,
+) -> bool {
+    true
+    // fliop.prover_offline_material.
 }
