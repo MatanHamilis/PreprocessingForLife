@@ -6,7 +6,7 @@ use crate::{
     fields::{FieldElement, IntermediateMulField, MulResidue},
 };
 use aes_prng::AesRng;
-use blake3::OUT_LEN;
+use blake3::{Hasher, OUT_LEN};
 use log::info;
 use rand_core::{RngCore, SeedableRng};
 use rayon::prelude::*;
@@ -119,6 +119,20 @@ pub struct OfflineProver<F: FieldElement> {
     round_challenges_commitments: Vec<[u8; OUT_LEN]>,
     final_msg_commitment: [u8; OUT_LEN],
 }
+
+impl<F: FieldElement> OfflineProver<F> {
+    pub fn hash(&self) -> [u8; OUT_LEN] {
+        let mut hasher = Hasher::new();
+        self.proof_masks.iter().for_each(|v| {
+            hasher.update(v.as_bytes());
+        });
+        self.round_challenges_commitments.iter().for_each(|v| {
+            hasher.update(&v[..]);
+        });
+        hasher.update(&self.final_msg_commitment);
+        *hasher.finalize().as_bytes()
+    }
+}
 // pub fn generate_fliop_verification_statement_prover<F: FieldElement>(
 //     prover: &OfflineProver<F>,
 //     masks: &mut [F],
@@ -173,6 +187,20 @@ pub struct OfflineVerifier<F: FieldElement> {
     #[serde(bound = "")]
     final_msg: ([u8; 16], F, F, F, F),
 }
+impl<F: FieldElement> OfflineVerifier<F> {
+    pub fn hash(&self) -> [u8; OUT_LEN] {
+        let mut hasher = Hasher::new();
+        self.round_challenges.iter().for_each(|v| {
+            hasher.update(v.as_bytes());
+        });
+        hasher.update(&self.final_msg.0);
+        hasher.update(self.final_msg.1.as_bytes());
+        hasher.update(self.final_msg.2.as_bytes());
+        hasher.update(self.final_msg.3.as_bytes());
+        hasher.update(self.final_msg.4.as_bytes());
+        *hasher.finalize().as_bytes()
+    }
+}
 
 struct EvalCtx<F: IntermediateMulField> {
     numbers: Vec<F>,
@@ -207,6 +235,9 @@ impl<F: IntermediateMulField> EvalCtx<F> {
             coeffs,
             interpolation_buf: vec![F::zero().into(); interpolation_points * eval_points],
         }
+    }
+    fn obtain_coeffs(&self) -> &[F] {
+        &self.coeffs
     }
     fn prepare_at_points(&mut self, at: &[F]) {
         assert_eq!(at.len(), self.eval_points);
@@ -932,6 +963,231 @@ pub async fn verifier<F: IntermediateMulField>(
     let f_1_r = f_1_tilde_r + f_hat_r[1];
     let q_r = q_tilde_r + q_hat_r;
     assert_eq!(q_r, f_0_r * f_1_r);
+}
+/// The Verification of the FLIOP correlation can be described as a degree-2 circuit of the following input:
+///
+/// First, we denote With L_{i,S}^x the lagrange coefficient of point i at point x from set of points S.
+/// That is, the coefficient f(x)  is interpolated by sum_{i in S} f(i)*(L_{i,S}^x).
+/// We wish to express this circuit for folding factor M.
+///
+/// The verifier is holding the round challenges (r_1,...,r_rho) and the values beta_1,...,beta_rho as well as the expected resulting check values determined by the dealer.
+/// The online prover is holding the masks, the zk-blinding-factors the mask s and the proof masks.
+/// The parties should verify that both sum beta_i * b_i is correct (held by the online verifier) and that the masked share of q(r)-f_1(r)*f_2(r) is correct (also held by the online verifier).
+/// Their input to the degree-2 circuit that computes sum beta_i * b_i is:
+///     - For verifier each summand of can be described easily if we have a circuit for b_i.
+///         - Each b_i is z[0] - sum(pi_i[0]...pi_i[M-1]) where:
+///             - pi[0]...pi[M-1] are known to the online prover.
+///             - z[0] is shared between the online prover and verifier with a degree two circuit taking:
+///                 - From the prover       [pi_(i-1)[0]        ...     pi_(i-1)[M]         ]
+///                 - From the verifier:    [L_(0,[M])^r_(i-1)....      L_(M,[M]^r_(i-1))   ]
+///             - Except for the first round where z[0] is known to the online prover which is exactly s.
+///         - So beta_i*b_i can be computed by:
+///             - For i=1:
+///                 - For the prover:   [s - sum(pi_1[0]...pi_1[M-1])]
+///                 - For the verifier: [beta_1]
+///             - For i > 1:
+///                 - For the prover:   [s - sum(pi_1[0]...pi_1[M-1])]
+///                 - From the prover       [pi_(i-1)[0]                ... pi_(i-1)[M]                 sum(pi_i[0..M])]
+///                 - From the verifier:    [beta_i * L_(0,[M])^r_(i-1) ... beta_i * L_(M,[M]^r_(i-1))  beta_i ]
+///         - To obtain sum, simply concatanate shares.
+///
+/// Their input to the degree-2 circuit that computes q(r_rho)-f_1(r_rho)*f_2(r_rho) is:
+///     - For computing q(r_rho) they interpolate the masked proof on r_rho, similar to what we already did.
+///     - For computing f_2(r_rho) they multiply L_{M,[M+1]} by z_2 (the blinding factor held by the prover).
+///     - For computing f_1(r_rho) they generate the following inputs:
+///         - The prover computes recursively the differences vector.
+///         - The verifier computes iteratively the lagrange coefficients subsets multiplication vector.
+///         - The prover adds a last item of z_1.
+///         - The verifier adds a last item of L_{M,[M+1]}^{r_rho} and is multiplying each consecutive M values by L_{i,[M+1]}^{r_rho} for i in 0..M-1.
+pub fn verify_fliop_construct_statement<F: FieldElement + IntermediateMulField>(
+    prover_s: Option<F>,
+    prover_proof_masks: Option<&[F]>,
+    prover_masks: Option<&[F]>,
+    verifier_betas: Option<&[F]>,
+    verifier_round_challenges: Option<&[F]>,
+    verifier_q_r: Option<F>,
+    verifier_f_1_r: Option<F>,
+    verifier_f_2_r: Option<F>,
+    verifier_bi_betai: Option<F>,
+    verifier_masks_count: Option<usize>,
+    log_folding_factor: usize,
+    powers: &mut PowersIterator<F>,
+    output: &mut [F],
+) -> F {
+    let M = 1 << log_folding_factor;
+    // We check four equalities.
+    let f_1_coefficient = powers.next().unwrap();
+    let f_2_coefficient = powers.next().unwrap();
+    let q_r_coefficient = powers.next().unwrap();
+    let bi_betai_coefficient = powers.next().unwrap();
+
+    let mut output_val = F::zero();
+    if prover_s.is_some() {
+        let s = prover_s.unwrap();
+        let proof_masks = prover_proof_masks.unwrap();
+        let masks = prover_masks.unwrap();
+        let last_round_proof_size = last_round_proof_length(log_folding_factor);
+        let internal_round_proof_size = internal_round_proof_length(log_folding_factor);
+        let internal_round_count =
+            (masks.len() - last_round_proof_size) / internal_round_proof_size;
+        let z_1 = masks[internal_round_proof_size * internal_round_count];
+        let z_2 = masks[internal_round_proof_size * internal_round_count + 1];
+        // First, verify f_1_r, this is the longest verification.
+        let first_eq_start = 1;
+        let first_eq_len = (masks.len() + 1) * 2;
+        output[first_eq_start..first_eq_start + first_eq_len]
+            .iter_mut()
+            .step_by(2)
+            .zip(masks.iter().chain(std::iter::once(&z_1)))
+            .for_each(|(o, i)| *o = *i);
+
+        // Verify f_2_r
+        let second_eq_start = first_eq_start + first_eq_len;
+        let second_eq_len = 2;
+        output[second_eq_start] = z_2;
+
+        // Verify q_r
+        let third_eq_start = second_eq_start + second_eq_len;
+        let third_eq_len = proof_masks.len() - 1;
+        output[third_eq_start] = s;
+        output[third_eq_start + 2..]
+            .iter_mut()
+            .step_by(2)
+            .zip(
+                masks
+                    .iter()
+                    .take(internal_round_count * internal_round_proof_size)
+                    .chain(
+                        masks
+                            .iter()
+                            .skip(internal_round_proof_size * internal_round_count + 2),
+                    ),
+            )
+            .for_each(|(o, i)| *o = *i);
+        let second_eq_len = 2;
+
+        // Verify bi_betai
+        // We don't need anything extra here.
+    }
+    if verifier_betas.is_some() {
+        let betas = verifier_betas.unwrap();
+        let round_challenges = verifier_round_challenges.unwrap();
+        let q_r = verifier_q_r.unwrap();
+        let f_1_r = verifier_f_1_r.unwrap();
+        let f_2_r = verifier_f_2_r.unwrap();
+        let bi_betai = verifier_bi_betai.unwrap();
+        let masks_count = verifier_masks_count.unwrap();
+        let mut verifier_ctx = EvalCtx::new(M, round_challenges.len() - 1);
+        verifier_ctx.prepare_at_points(&round_challenges[0..round_challenges.len() - 1]);
+        let coeffs = verifier_ctx.obtain_coeffs();
+        let mut verifier_ctx_last = EvalCtx::new(M + 1, 1);
+        verifier_ctx_last.prepare_at_points(std::slice::from_ref(round_challenges.last().unwrap()));
+        let last_coeffs = verifier_ctx_last.obtain_coeffs();
+
+        // Set expected output
+        output_val = f_1_r * f_1_coefficient
+            + f_2_r * f_2_coefficient
+            + q_r * q_r_coefficient
+            + bi_betai * bi_betai_coefficient;
+
+        // First, verify f_1_r
+        let first_eq_start = 2;
+        let first_eq_len = (masks_count + 1) * 2;
+        output[first_eq_start + first_eq_len - 2] = *last_coeffs.last().unwrap() * f_1_coefficient;
+        let first_eq_output = &mut output[first_eq_start..first_eq_start + first_eq_len - 2];
+        let to = M.min(masks_count);
+        first_eq_output[first_eq_start..]
+            .iter_mut()
+            .skip(2)
+            .take(to)
+            .zip(last_coeffs.iter())
+            .for_each(|(o, c)| {
+                *o = f_1_coefficient * *c;
+            });
+        let mut window_size = M;
+        let internal_round_count = round_challenges.len() - 1;
+        for i in (0..internal_round_count).rev() {
+            assert!(window_size < masks_count);
+            coeffs
+                .iter()
+                .skip(i)
+                .step_by(M)
+                .enumerate()
+                .rev()
+                .for_each(|(idx, c)| {
+                    let max_index = window_size * (idx + 1) - 1;
+                    let min_index = window_size * idx;
+                    let iterations = if max_index < masks_count {
+                        window_size
+                    } else if min_index >= masks_count {
+                        0
+                    } else {
+                        masks_count - min_index
+                    };
+                    let base_out = window_size * idx;
+                    for j in 0..iterations {
+                        first_eq_output[2 * (base_out + j)] = first_eq_output[2 * j] * *c;
+                    }
+                });
+            window_size *= M;
+        }
+        assert!(window_size >= masks_count);
+
+        // Second, verify f_2_r
+        let second_eq_start = first_eq_start + first_eq_len;
+        let second_eq_len = 2;
+        output[second_eq_start] = f_2_coefficient * *last_coeffs.last().unwrap();
+
+        // Verify q_r -- this depends only on last proof masks.
+        let third_eq_start = second_eq_start + second_eq_len;
+        let s_start = third_eq_start;
+        let first_mask_start = s_start + 2;
+        let last_round_start = first_mask_start
+            + 2 * internal_round_count * internal_round_proof_length(log_folding_factor);
+        output[third_eq_start
+            ..(last_round_start + 2 * (last_round_proof_length(log_folding_factor) - 2))]
+            .iter_mut()
+            .step_by(2)
+            .for_each(|o| *o = F::zero());
+        let mut interpolation_ctx = EvalCtx::new(2 * M + 1, 1);
+        interpolation_ctx.prepare_at_points(std::slice::from_ref(round_challenges.last().unwrap()));
+        let coeffs = interpolation_ctx.obtain_coeffs();
+        output[last_round_start..]
+            .iter_mut()
+            .step_by(2)
+            .zip(coeffs)
+            .for_each(|(o, i)| *o = *i * q_r_coefficient);
+
+        // verify bi_betai
+        let internal_round_proof_len = internal_round_proof_length(log_folding_factor);
+        let mut interpolation_ctx =
+            EvalCtx::new(internal_round_proof_len, round_challenges.len() - 1);
+        interpolation_ctx.prepare_at_points(&round_challenges[..round_challenges.len() - 1]);
+        let coeffs = interpolation_ctx.obtain_coeffs();
+        let mut beta_coeff = betas[0] * bi_betai_coefficient;
+        output[s_start] = beta_coeff;
+        for i in 0..internal_round_count {
+            let mask_begin = first_mask_start + i * internal_round_proof_len;
+            output[mask_begin..]
+                .iter_mut()
+                .step_by(2)
+                .take(M)
+                .for_each(|o| *o = -beta_coeff);
+            beta_coeff = betas[i + 1] * bi_betai_coefficient;
+            output[mask_begin..]
+                .iter_mut()
+                .step_by(2)
+                .take(internal_round_proof_len)
+                .zip(coeffs.iter().skip(i).step_by(internal_round_proof_len))
+                .for_each(|(o, c)| *o += beta_coeff * *c);
+        }
+        output[last_round_start..]
+            .iter_mut()
+            .step_by(2)
+            .take(M)
+            .for_each(|o| *o -= beta_coeff);
+    }
+    output_val
 }
 
 #[cfg(test)]

@@ -1,8 +1,9 @@
-use std::{collections::HashMap, ops::Mul, sync::Arc};
+use std::{collections::HashMap, mem::MaybeUninit, ops::Mul, sync::Arc};
 
 use crate::{
     fields::{IntermediateMulField, GF2},
     zkfliop::{
+        compute_round_count, internal_round_proof_length, last_round_proof_length,
         ni::{hash_statement, prove, ZkFliopProof},
         PowersIterator, ProverCtx, VerifierCtx,
     },
@@ -777,12 +778,14 @@ pub async fn verify_parties<
 pub struct DealerCtx<F: IntermediateMulField> {
     prover_ctx: ProverCtx<F>,
     verifier_ctx: VerifierCtx<F>,
+    log_folding_factor: usize,
 }
 impl<F: IntermediateMulField> DealerCtx<F> {
     pub fn new(log_folding_factor: usize) -> Self {
         Self {
             prover_ctx: ProverCtx::new(log_folding_factor),
             verifier_ctx: VerifierCtx::new(log_folding_factor),
+            log_folding_factor,
         }
     }
 }
@@ -820,6 +823,7 @@ where
         })
         .collect();
 
+    let party_id = sho[0].0;
     let mut per_party_gate_input_wires_masks = HashMap::with_capacity(parties.len());
     // let mut per_party_input_and_output_wires_masks = HashMap::with_capacity(mask_seeds.len());
     let total_gates: usize = circuit
@@ -932,6 +936,7 @@ where
     let DealerCtx {
         prover_ctx,
         verifier_ctx,
+        log_folding_factor,
     } = dealer_ctx;
     let mut offline_verifiers: HashMap<_, _> = parties
         .iter()
@@ -1015,6 +1020,7 @@ where
     });
     let auth_time = Instant::now();
     if is_authenticated {
+        // Semi Honest Proofs
         let coin: F = sho
             .iter()
             .map(|sho| {
@@ -1048,8 +1054,12 @@ where
                     reg_cj.iter().find(|v| v.0 == pi).unwrap(),
                     wide_cj.iter().find(|v| v.0 == pi).unwrap(),
                 );
-                let stmt_i = construct_statement_from_bts(&reg_ci.1, &wide_ci.1, coin);
-                let stmt_j = construct_statement_from_bts(&reg_cj.1, &wide_cj.1, coin);
+                let mut stmt_i_powers = PowersIterator::new(coin);
+                let mut stmt_j_powers = PowersIterator::new(coin);
+                let stmt_i =
+                    construct_statement_from_bts(&reg_ci.1, &wide_ci.1, &mut stmt_i_powers);
+                let stmt_j =
+                    construct_statement_from_bts(&reg_cj.1, &wide_cj.1, &mut stmt_j_powers);
                 let stmt: Vec<F> = stmt_i
                     .iter()
                     .copied()
@@ -1064,53 +1074,44 @@ where
                 proofs.get_mut(&pj).unwrap().insert(pi, proof_j);
             }
         }
+        // FLIOP proof (we prove all FLIOPs together)
+        let coin: F = offline_verifiers
+            .iter()
+            .map(|(_, verifier)| {
+                let hash_correlation = verifier.0.prover_offline_material.hash();
+                let hash_correlation: [u8; 16] = core::array::from_fn(|i| hash_correlation[i]);
+                let mut rng = AesRng::from_seed(hash_correlation);
+                let mut sum = F::random(&mut rng);
+
+                let hash_correlation = *blake3::hash(verifier.0.s_i.as_bytes()).as_bytes();
+                let hash_correlation: [u8; 16] = core::array::from_fn(|i| hash_correlation[i]);
+                let mut rng = AesRng::from_seed(hash_correlation);
+                sum += F::random(&mut rng);
+
+                // This will be just one anyway for 2+1.
+                verifier.0.verifiers_offline_material.iter().for_each(|v| {
+                    let hash_correlation = v.1.hash();
+                    let hash_correlation: [u8; 16] = core::array::from_fn(|i| hash_correlation[i]);
+                    let mut rng = AesRng::from_seed(hash_correlation);
+                    sum += F::random(&mut rng);
+                });
+
+                sum
+            })
+            .sum();
+        let total_masks = pairwise_triples.get(&party_id).unwrap().0.len();
+        let round_count = compute_round_count(1 + 2 * total_masks, *log_folding_factor);
+        let single_fliop_size = total_masks
+            + 1
+            + internal_round_proof_length(*log_folding_factor) * (round_count - 1)
+            + last_round_proof_length(*log_folding_factor);
+        let large_statement = unsafe {
+            vec![MaybeUninit::<F>::uninit().assume_init(); 1 + single_fliop_size * sho.len()]
+        };
         info!("Auth time: {}ms", auth_time.elapsed().as_millis());
         proofs.into_iter().for_each(|(pid, proofs)| {
             offline_verifiers.get_mut(&pid).unwrap().1 = Some(proofs);
         })
     };
     offline_verifiers
-}
-
-/// The Verification of the FLIOP correlation can be described as a degree-2 circuit of the following input:
-///
-/// First, we denote With L_{i,S}^x the lagrange coefficient of point i at point x from set of points S.
-/// That is, the coefficient f(x)  is interpolated by sum_{i in S} f(i)*(L_{i,S}^x).
-/// We wish to express this circuit for folding factor M.
-///
-/// The verifier is holding the round challenges (r_1,...,r_rho) and the values beta_1,...,beta_rho as well as the expected resulting check values determined by the dealer.
-/// The online prover is holding the masks, the zk-blinding-factors the mask s and the proof masks.
-/// The parties should verify that both sum beta_i * b_i is correct (held by the online verifier) and that the masked share of q(r)-f_1(r)*f_2(r) is correct (also held by the online verifier).
-/// Their input to the degree-2 circuit that computes sum beta_i * b_i is:
-///     - For verifier each summand of can be described easily if we have a circuit for b_i.
-///         - Each b_i is z[0] - sum(pi_i[0]...pi_i[M-1]) where:
-///             - pi[0]...pi[M-1] are known to the online prover.
-///             - z[0] is shared between the online prover and verifier with a degree two circuit taking:
-///                 - From the prover       [pi_(i-1)[0]        ...     pi_(i-1)[M]         ]
-///                 - From the verifier:    [L_(0,[M])^r_(i-1)....      L_(M,[M]^r_(i-1))   ]
-///             - Except for the first round where z[0] is known to the online prover which is exactly s.
-///         - So beta_i*b_i can be computed by:
-///             - For i=1:
-///                 - For the prover:   [s - sum(pi_1[0]...pi_1[M-1])]
-///                 - For the verifier: [beta_1]
-///             - For i > 1:
-///                 - For the prover:   [s - sum(pi_1[0]...pi_1[M-1])]
-///                 - From the prover       [pi_(i-1)[0]                ... pi_(i-1)[M]                 sum(pi_i[0..M])]
-///                 - From the verifier:    [beta_i * L_(0,[M])^r_(i-1) ... beta_i * L_(M,[M]^r_(i-1))  beta_i ]
-///         - To obtain sum, simply concatanate shares.
-///
-/// Their input to the degree-2 circuit that computes q(r_rho)-f_1(r_rho)*f_2(r_rho) is:
-///     - For computing q(r_rho) they interpolate the masked proof on r_rho, similar to what we already did.
-///     - For computing f_2(r_rho) they multiply L_{M,[M+1]} by z_2 (the blinding factor held by the prover).
-///     - For computing f_1(r_rho) they generate the following inputs:
-///         - The prover computes recursively the differences vector.
-///         - The verifier computes iteratively the lagrange coefficients subsets multiplication vector.
-///         - The prover adds a last item of z_1.
-///         - The verifier adds a last item of L_{M,[M+1]}^{r_rho} and is multiplying each consecutive M values by L_{i,[M+1]}^{r_rho} for i in 0..M-1.
-pub fn verify_fliop_prover<VF: FieldElement>(
-    engine: impl MultiPartyEngine,
-    fliop: &OfflineCircuitVerify<VF>,
-) -> bool {
-    true
-    // fliop.prover_offline_material.
 }

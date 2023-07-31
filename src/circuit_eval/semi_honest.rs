@@ -288,7 +288,7 @@ pub struct PcgBasedPairwiseBooleanCorrelation<
 pub fn construct_statement_from_bts<const N: usize, PF: PackedField<GF2, N>, VF: FieldElement>(
     regular_bts: &[((usize, usize), RegularBeaverTriple<PF>)],
     wide_bts: &[((usize, usize), WideBeaverTriple<PF>)],
-    coin: VF,
+    powers: &mut PowersIterator<VF>,
 ) -> Vec<VF>
 where
     GF2: Mul<VF, Output = VF>,
@@ -303,7 +303,6 @@ where
     let mut v = Vec::with_capacity(len);
     v.push(VF::zero());
     let mut sum = VF::zero();
-    let mut powers = PowersIterator::new(coin);
     for (_, bt) in regular_bts {
         for i in 0..N {
             let pow = powers.next().unwrap();
@@ -427,7 +426,8 @@ impl<
                 let proof = proof.get(&pid).unwrap();
                 let coin = coin.clone();
                 async move {
-                    let statement_share = construct_statement_from_bts(&bts, &wbts, coin);
+                    let mut powers = PowersIterator::new(coin);
+                    let statement_share = construct_statement_from_bts(&bts, &wbts, &mut powers);
                     let (flag, check_vals) =
                         obtain_check_value(statement_share, proof, &mut verifier_ctx);
                     let output = verify_check_value(engine, flag, check_vals).await;
