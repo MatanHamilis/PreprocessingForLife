@@ -7,7 +7,7 @@ use std::{
     time::Instant,
 };
 
-const PPRF_COUNT: usize = 76;
+const PPRF_COUNT: usize = 75;
 const PPRF_DEPTH: usize = 20;
 use aes_prng::AesRng;
 use core_affinity::CoreId;
@@ -502,6 +502,9 @@ pub fn bench_2p_malicious(c: &mut Criterion) {
     const PCGPACK: usize = 1;
     let path = Path::new("circuits/aes_128.txt");
     let circuit = circuit_from_file(path).unwrap();
+    let prexor_path = Path::new("circuits/prexor_256.txt");
+    let prexor_circuit = circuit_from_file(prexor_path).unwrap();
+    let circuit = prexor_circuit.try_compose(circuit).unwrap();
     let input = vec![PackedGF2::one(); circuit.input_wire_count];
     let dealer = Arc::new(StandardDealer::new(PPRF_COUNT, PPRF_DEPTH));
     let log_folding_factor: usize = 3;
