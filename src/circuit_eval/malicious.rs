@@ -17,7 +17,9 @@ use crate::{
 use super::{
     bristol_fashion::ParsedCircuit,
     semi_honest::{self, FieldContainer, OfflineSemiHonestCorrelation},
-    verify::{self, statement_length, DealerCtx, FliopCtx, OfflineCircuitVerify},
+    verify::{
+        self, statement_length, verify_fliop_correlation, DealerCtx, FliopCtx, OfflineCircuitVerify,
+    },
 };
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -33,7 +35,9 @@ pub struct MaliciousSecurityOffline<
     #[serde(bound = "")]
     offline_verification_material: OfflineCircuitVerify<F>,
     #[serde(bound = "")]
-    dealer_verification_material: Option<HashMap<PartyId, ZkFliopProof<F>>>,
+    dealer_verification_triples: Option<HashMap<PartyId, ZkFliopProof<F>>>,
+    #[serde(bound = "")]
+    dealer_verification_fliop: Option<ZkFliopProof<F>>,
     _phantom: PhantomData<PF>,
 }
 impl<
@@ -45,23 +49,33 @@ impl<
 where
     GF2: Mul<F, Output = F>,
 {
-    pub async fn verify_triples<E: MultiPartyEngine>(
+    pub async fn verify_dealer<E: MultiPartyEngine>(
         &self,
         engine: &mut E,
         circuit: &ParsedCircuit,
         verifier_ctx: &mut Vec<VerifierCtx<F>>,
     ) {
-        if self.dealer_verification_material.is_none() {
+        if self.dealer_verification_triples.is_none() {
             return;
         }
         self.semi_honest_offline_correlation
             .verify_correlation(
                 &mut engine.sub_protocol("verify triples"),
                 circuit,
-                self.dealer_verification_material.as_ref().unwrap(),
+                self.dealer_verification_triples.as_ref().unwrap(),
                 verifier_ctx,
             )
             .await;
+        assert!(
+            verify_fliop_correlation(
+                engine.sub_protocol("fliop"),
+                &self.offline_verification_material,
+                &self.semi_honest_offline_correlation,
+                &mut verifier_ctx[0],
+                self.dealer_verification_fliop.as_ref().unwrap(),
+            )
+            .await
+        );
     }
     pub fn malicious_security_offline_dealer(
         circuit: &ParsedCircuit,
@@ -95,7 +109,8 @@ where
         offline_correlations
             .into_iter()
             .map(|(pid, sho)| {
-                let (verify, dealer_verify) = verifier_correlations.remove(&pid).unwrap();
+                let (verify, dealer_verify_triples, dealer_verify_fliop) =
+                    verifier_correlations.remove(&pid).unwrap();
                 (
                     pid,
                     MaliciousSecurityOffline {
@@ -105,7 +120,8 @@ where
                             commitment: output_wires_commitment,
                         },
                         offline_verification_material: verify,
-                        dealer_verification_material: dealer_verify,
+                        dealer_verification_triples: dealer_verify_triples,
+                        dealer_verification_fliop: dealer_verify_fliop,
                         _phantom: PhantomData::<PF>,
                     },
                 )
@@ -124,7 +140,7 @@ where
         }
         let proof_statement_length = statement_length::<PACKING>(circuit);
         println!("Verifying triples...");
-        let proofs = self.dealer_verification_material.as_ref().unwrap();
+        let proofs = self.dealer_verification_triples.as_ref().unwrap();
         let peers: Vec<PartyId> = engine.party_ids().iter().copied().collect();
         let peers = Arc::new(peers.into());
         let semi_honest_offline_correlation = &self.semi_honest_offline_correlation;
@@ -150,7 +166,8 @@ where
             semi_honest_offline_correlation,
             output_wire_mask_commitments,
             offline_verification_material,
-            dealer_verification_material: _,
+            dealer_verification_triples: _,
+            dealer_verification_fliop: _,
             _phantom: _,
         } = &self;
         let output_wire_mask_shares =
@@ -207,7 +224,6 @@ where
         engine: &mut impl MultiPartyEngine,
         my_input: &[PF],
         parties_input_pos_and_lengths: &HashMap<PartyId, (usize, usize)>,
-        is_verified_dealer: bool,
         ctx: &mut FliopCtx<F>,
     ) -> Option<Vec<PF>> {
         let Self {
@@ -253,7 +269,6 @@ where
             &masked_outputs,
             circuit.as_ref(),
             offline_verification_material,
-            is_verified_dealer,
             ctx,
         )
         .await
@@ -437,7 +452,6 @@ mod tests {
                             &mut engine,
                             &input,
                             &input_lengths,
-                            is_authenticated,
                             &mut ctx,
                         )
                         .await
@@ -509,6 +523,55 @@ mod tests {
         .await;
     }
     #[tokio::test]
+    async fn test_four_bit_and() {
+        let logical_or_circuit = [
+            "3 7",
+            "1 4",
+            "1 1",
+            "",
+            "2 1 0 1 4 AND",
+            "2 1 2 3 5 AND",
+            "2 1 4 5 6 AND",
+        ];
+        let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
+            .expect("Failed to parse");
+        let input = vec![GF2::zero(); 4];
+        let dealer = StandardDealer::new(10, 7);
+        test_malicious_circuit::<1, _, PackedOfflineReceiverPcgKey<4>, _, GF2Container>(
+            parsed_circuit,
+            input,
+            Arc::new(dealer),
+            true,
+            1,
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn test_five_bit_and() {
+        let logical_or_circuit = [
+            "4 9",
+            "1 5",
+            "1 1",
+            "",
+            "2 1 0 1 5 AND",
+            "2 1 2 3 6 AND",
+            "2 1 4 5 7 AND",
+            "2 1 6 7 8 AND",
+        ];
+        let parsed_circuit = parse_bristol(logical_or_circuit.into_iter().map(|s| s.to_string()))
+            .expect("Failed to parse");
+        let input = vec![GF2::zero(); 5];
+        let dealer = StandardDealer::new(10, 7);
+        test_malicious_circuit::<1, _, PackedOfflineReceiverPcgKey<4>, _, GF2Container>(
+            parsed_circuit,
+            input,
+            Arc::new(dealer),
+            true,
+            1,
+        )
+        .await;
+    }
+    #[tokio::test]
     async fn test_three_bit_or() {
         let logical_or_circuit = [
             "6 9",
@@ -537,6 +600,31 @@ mod tests {
     }
 
     #[test]
+    fn test_add() {
+        let rt = runtime::Builder::new_multi_thread()
+            .worker_threads(16)
+            .thread_stack_size(1 << 27)
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let path = Path::new("circuits/adder64.txt");
+            let circuit = super::super::circuit_from_file(path).unwrap();
+            let mut input = Vec::with_capacity(circuit.input_wire_count);
+            for _ in 0..circuit.input_wire_count {
+                input.push(GF2::one())
+            }
+            let dealer = StandardDealer::new(10, 7);
+            test_malicious_circuit::<1, _, PackedOfflineReceiverPcgKey<4>, _, GF2Container>(
+                circuit,
+                input,
+                Arc::new(dealer),
+                true,
+                3,
+            )
+            .await;
+        });
+    }
+    #[test]
     fn test_aes() {
         let rt = runtime::Builder::new_multi_thread()
             .worker_threads(16)
@@ -556,7 +644,7 @@ mod tests {
                 input,
                 Arc::new(dealer),
                 true,
-                2,
+                4,
             )
             .await;
         });

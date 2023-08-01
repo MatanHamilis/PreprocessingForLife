@@ -8,7 +8,7 @@ use crate::{
     add_assign_arrays, diff_assign_arrays,
     engine::MultiPartyEngine,
     fields::{FieldElement, IntermediateMulField},
-    zkfliop::{internal_round_proof_length, last_round_proof_length, PowersIterator},
+    zkfliop::{compute_L, internal_round_proof_length, last_round_proof_length, PowersIterator},
 };
 
 use super::{compute_round_count, make_round_proof, multi_eval_at_point, ProverCtx, VerifierCtx};
@@ -156,7 +156,7 @@ pub fn prove<'a, F: IntermediateMulField>(
             eval_ctx_internal_round_proof_challenge,
         );
         let z_len = z.len();
-        let L = (z_len - 1) / M;
+        let L = compute_L(z_len, log_folding_factor);
         let next_round_size = ((L + 2 * M - 1) / (2 * M)) * (2 * M);
         for i in L..next_round_size {
             z[i + 1] = F::zero();
@@ -243,7 +243,7 @@ pub fn obtain_check_value<F: IntermediateMulField>(
         .zip(proof.commits.iter())
     {
         let z_len = z.len();
-        let L = (z_len - 1) / M;
+        let L = compute_L(z_len, log_folding_factor);
         statement_hash = compute_new_hash(&statement_hash, blinder, proof_share);
         let commit_to_check = commits[commit_idx];
         bool &= statement_hash == commit_to_check;

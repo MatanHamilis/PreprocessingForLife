@@ -203,8 +203,7 @@ fn bench_boolean_circuit_semi_honest<
                         let parties_input_lengths = parties_input_lengths.clone();
                         tokio::spawn(async move {
                             let (n_party_correlation, wide_n_party_correlation) =
-                                offline_corerlation
-                                    .get_prepared_multiparty_beaver_triples(&circuit);
+                                offline_corerlation.get_prepared_multiparty_beaver_triples();
                             let time = Instant::now();
                             let o = multi_party_semi_honest_eval_circuit::<N, _, _, _, FC>(
                                 &mut engine,
@@ -433,13 +432,7 @@ pub fn party_run<
             let (output, start) = {
                 let start = Instant::now();
                 let o = pre
-                    .online_malicious_computation::<FC>(
-                        &mut engine,
-                        &input,
-                        &input_lengths,
-                        is_authenticated,
-                        ctx,
-                    )
+                    .online_malicious_computation::<FC>(&mut engine, &input, &input_lengths, ctx)
                     .await
                     .ok_or(());
                 (o, start)

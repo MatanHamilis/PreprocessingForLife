@@ -249,7 +249,6 @@ pub trait OfflineSemiHonestCorrelation<CF: FieldElement>:
     );
     fn get_prepared_multiparty_beaver_triples(
         &self,
-        circuit: &ParsedCircuit,
     ) -> (
         &[((usize, usize), RegularBeaverTriple<CF>)],
         &[((usize, usize), WideBeaverTriple<CF>)],
@@ -472,7 +471,6 @@ impl<
     }
     fn get_prepared_multiparty_beaver_triples(
         &self,
-        circuit: &ParsedCircuit,
     ) -> (
         &[((usize, usize), RegularBeaverTriple<F>)],
         &[((usize, usize), WideBeaverTriple<F>)],
@@ -497,7 +495,6 @@ impl<
             panic!();
         }
 
-        // Otherwise, we have to communicate.
         let v = self.multi_party_correlations.as_ref().unwrap();
         (&v.0, &v.1)
     }
@@ -1374,7 +1371,7 @@ mod tests {
         let mut corr_sums = HashMap::<(usize, usize), RegularBeaverTriple<F>>::from_iter(
             exec_results[0]
                 .1
-                .get_prepared_multiparty_beaver_triples(&circuit)
+                .get_prepared_multiparty_beaver_triples()
                 .0
                 .iter()
                 .copied()
@@ -1383,13 +1380,13 @@ mod tests {
         let mut wide_corr_sums = HashMap::<(usize, usize), WideBeaverTriple<F>>::from_iter(
             exec_results[0]
                 .1
-                .get_prepared_multiparty_beaver_triples(&circuit)
+                .get_prepared_multiparty_beaver_triples()
                 .1
                 .iter()
                 .copied(),
         );
         exec_results.iter().skip(1).for_each(|(_, v)| {
-            v.get_prepared_multiparty_beaver_triples(&circuit)
+            v.get_prepared_multiparty_beaver_triples()
                 .0
                 .iter()
                 .for_each(|((layer_idx, gate_idx), bt)| {
@@ -1405,7 +1402,7 @@ mod tests {
                         }
                     }
                 });
-            v.get_prepared_multiparty_beaver_triples(&circuit)
+            v.get_prepared_multiparty_beaver_triples()
                 .1
                 .iter()
                 .for_each(|((layer_idx, gate_idx), bt)| {
@@ -1453,7 +1450,7 @@ mod tests {
             let parties_input_lengths = parties_input_lengths.clone();
             tokio::spawn(async move {
                 let (n_party_correlation, wide_n_party_correlation) =
-                    offline_corerlation.get_prepared_multiparty_beaver_triples(&circuit);
+                    offline_corerlation.get_prepared_multiparty_beaver_triples();
                 multi_party_semi_honest_eval_circuit::<N, _, _, _, FC>(
                     &mut engine,
                     &circuit,

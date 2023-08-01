@@ -1,10 +1,11 @@
-use std::{collections::HashMap, mem::MaybeUninit, ops::Mul, sync::Arc};
+use std::{collections::HashMap, marker::PhantomData, mem::MaybeUninit, ops::Mul, sync::Arc};
 
 use crate::{
+    commitment::StandardCommitReveal,
     fields::{IntermediateMulField, GF2},
     zkfliop::{
-        compute_round_count, internal_round_proof_length, last_round_proof_length,
-        ni::{hash_statement, prove, ZkFliopProof},
+        compute_round_count, g, internal_round_proof_length, last_round_proof_length,
+        ni::{hash_statement, obtain_check_value, prove, verify_check_value, ZkFliopProof},
         PowersIterator, ProverCtx, VerifierCtx,
     },
 };
@@ -15,6 +16,7 @@ use log::info;
 use rand_core::SeedableRng;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use serde::{Deserialize, Serialize};
+use std::iter::{Peekable, Rev};
 use tokio::time::Instant;
 
 use crate::{
@@ -527,6 +529,30 @@ pub struct OfflineCircuitVerify<F: FieldElement> {
     prover_offline_material: OfflineProver<F>,
 }
 
+impl<F: FieldElement> OfflineCircuitVerify<F> {
+    fn hash_for_coin(&self) -> F {
+        let hash_correlation = self.prover_offline_material.hash();
+        let hash_correlation: [u8; 16] = core::array::from_fn(|i| hash_correlation[i]);
+        let mut rng = AesRng::from_seed(hash_correlation);
+        let mut sum = F::random(&mut rng);
+
+        let hash_correlation = *blake3::hash(self.s_i.as_bytes()).as_bytes();
+        let hash_correlation: [u8; 16] = core::array::from_fn(|i| hash_correlation[i]);
+        let mut rng = AesRng::from_seed(hash_correlation);
+        sum += F::random(&mut rng);
+
+        // This will be just one anyway for 2+1.
+        self.verifiers_offline_material.iter().for_each(|v| {
+            let hash_correlation = v.1.hash();
+            let hash_correlation: [u8; 16] = core::array::from_fn(|i| hash_correlation[i]);
+            let mut rng = AesRng::from_seed(hash_correlation);
+            sum += F::random(&mut rng);
+        });
+
+        sum
+    }
+}
+
 pub struct FliopCtx<F: IntermediateMulField> {
     pub prover_ctx: Option<ProverCtx<F>>,
     pub verifiers_ctx: Option<Vec<VerifierCtx<F>>>,
@@ -559,7 +585,6 @@ pub async fn verify_parties<
     output_wire_masked_values: &[PF],
     circuit: &ParsedCircuit,
     offline_material: &OfflineCircuitVerify<F>,
-    auth_dealer: bool,
     ctx: &mut FliopCtx<F>,
 ) -> bool {
     let thread_pool = ThreadPoolBuilder::new().build().unwrap();
@@ -660,21 +685,6 @@ pub async fn verify_parties<
         Some(&wide_masks_shares),
         circuit,
     );
-    let dealer_statement = if auth_dealer {
-        Some(construct_statement(
-            None,
-            Some(*s_i),
-            &gammas,
-            &wide_gammas,
-            None,
-            None,
-            Some(&regular_masks_shares),
-            Some(&wide_masks_shares),
-            circuit,
-        ))
-    } else {
-        None
-    };
     let verify_statement: Arc<Vec<_>> = Arc::new(
         proof_statement
             .iter()
@@ -709,7 +719,6 @@ pub async fn verify_parties<
             sub_engine,
             &mut proof_statement,
             &prover_offline_material,
-            dealer_statement,
             &mut prover_ctx,
         )
         .await;
@@ -806,11 +815,13 @@ pub fn offline_verify_dealer<
     (
         OfflineCircuitVerify<F>,
         Option<HashMap<PartyId, ZkFliopProof<F>>>,
+        Option<ZkFliopProof<F>>,
     ),
 >
 where
     GF2: Mul<F, Output = F>,
 {
+    sho.sort_by(|a, b| a.0.cmp(&b.0));
     let mut rng = AesRng::from_random_seed();
     let alpha = F::random(&mut rng);
     let parties: Vec<PartyId> = sho.iter().map(|v| v.0).collect();
@@ -824,6 +835,7 @@ where
         .collect();
 
     let party_id = sho[0].0;
+    let another_party_id = sho[1].0;
     let mut per_party_gate_input_wires_masks = HashMap::with_capacity(parties.len());
     // let mut per_party_input_and_output_wires_masks = HashMap::with_capacity(mask_seeds.len());
     let total_gates: usize = circuit
@@ -1007,6 +1019,7 @@ where
                         prover_offline_material: prover_correlation,
                     },
                     None,
+                    None,
                 ),
             )
         })
@@ -1077,41 +1090,233 @@ where
         // FLIOP proof (we prove all FLIOPs together)
         let coin: F = offline_verifiers
             .iter()
-            .map(|(_, verifier)| {
-                let hash_correlation = verifier.0.prover_offline_material.hash();
-                let hash_correlation: [u8; 16] = core::array::from_fn(|i| hash_correlation[i]);
-                let mut rng = AesRng::from_seed(hash_correlation);
-                let mut sum = F::random(&mut rng);
-
-                let hash_correlation = *blake3::hash(verifier.0.s_i.as_bytes()).as_bytes();
-                let hash_correlation: [u8; 16] = core::array::from_fn(|i| hash_correlation[i]);
-                let mut rng = AesRng::from_seed(hash_correlation);
-                sum += F::random(&mut rng);
-
-                // This will be just one anyway for 2+1.
-                verifier.0.verifiers_offline_material.iter().for_each(|v| {
-                    let hash_correlation = v.1.hash();
-                    let hash_correlation: [u8; 16] = core::array::from_fn(|i| hash_correlation[i]);
-                    let mut rng = AesRng::from_seed(hash_correlation);
-                    sum += F::random(&mut rng);
-                });
-
-                sum
-            })
+            .map(|(_, verifier)| verifier.0.hash_for_coin())
             .sum();
-        let total_masks = pairwise_triples.get(&party_id).unwrap().0.len();
-        let round_count = compute_round_count(1 + 2 * total_masks, *log_folding_factor);
-        let single_fliop_size = total_masks
-            + 1
-            + internal_round_proof_length(*log_folding_factor) * (round_count - 1)
-            + last_round_proof_length(*log_folding_factor);
-        let large_statement = unsafe {
-            vec![MaybeUninit::<F>::uninit().assume_init(); 1 + single_fliop_size * sho.len()]
-        };
+        // remember each gate has two inputs and therefore two masks.
+        let total_masks = 2 * pairwise_triples.get(&party_id).unwrap().0[0].1.len() * PACKING;
+        let round_count =
+            compute_round_count(statement_length::<PACKING>(circuit), *log_folding_factor);
+        let single_fliop_size = 2
+            * (total_masks
+                + 1
+                + internal_round_proof_length(*log_folding_factor) * (round_count - 1)
+                + last_round_proof_length(*log_folding_factor));
+        let party_count = sho.len();
+        let mut parties: Vec<_> = sho.iter().map(|v| v.0).collect();
+        parties.sort();
+        let parties_statements: Vec<_> = sho
+            .iter()
+            .enumerate()
+            .map(|(idx, (pid, sho_corr))| {
+                let party_statement = construct_party_statement(
+                    coin,
+                    sho_corr,
+                    *log_folding_factor,
+                    &offline_verifiers.get(pid).unwrap().0,
+                    &parties,
+                    *pid,
+                );
+                (*pid, party_statement)
+            })
+            .collect();
+        let mut large_statement = parties_statements[0].1.clone();
+        // We sum all statements.
+        parties_statements.iter().skip(1).for_each(|s| {
+            s.1.iter()
+                .skip(1)
+                .zip(large_statement.iter_mut().skip(1))
+                .for_each(|(i, o)| {
+                    if o.is_zero() {
+                        *o = *i;
+                    }
+                });
+        });
+        large_statement[0] = parties_statements.iter().map(|v| v.1[0]).sum();
+        debug_assert_eq!(large_statement[0], g(&large_statement[1..]));
+        // At last, let's prove
+        let proof = prove(
+            parties_statements.iter().map(|v| &v.1),
+            large_statement,
+            prover_ctx,
+        );
         info!("Auth time: {}ms", auth_time.elapsed().as_millis());
+        parties_statements
+            .iter()
+            .zip(proof.into_iter())
+            .for_each(|(s, p)| {
+                offline_verifiers.get_mut(&s.0).unwrap().2 = Some(p);
+            });
         proofs.into_iter().for_each(|(pid, proofs)| {
             offline_verifiers.get_mut(&pid).unwrap().1 = Some(proofs);
         })
     };
     offline_verifiers
+}
+struct MasksIterator<
+    'a,
+    const N: usize,
+    PF: PackedField<F, N>,
+    F: FieldElement,
+    VF: FieldElement + IntermediateMulField + From<F>,
+> {
+    masks: &'a [((usize, usize), RegularBeaverTriple<PF>)],
+    masks_iter: Peekable<Rev<std::slice::Iter<'a, ((usize, usize), RegularBeaverTriple<PF>)>>>,
+    index_iter: Peekable<Rev<std::ops::Range<usize>>>,
+    is_a: bool,
+    _phantom: PhantomData<(VF, F)>,
+}
+impl<
+        'a,
+        const N: usize,
+        PF: PackedField<F, N>,
+        F: FieldElement,
+        VF: FieldElement + IntermediateMulField + From<F>,
+    > MasksIterator<'a, N, PF, F, VF>
+{
+    fn new(masks: &'a [((usize, usize), RegularBeaverTriple<PF>)]) -> Self {
+        let a = (0..9).into_iter().rev();
+        Self {
+            masks,
+            masks_iter: masks.iter().rev().peekable(),
+            index_iter: (0..N).into_iter().rev().peekable(),
+            is_a: false,
+            _phantom: PhantomData,
+        }
+    }
+}
+impl<
+        'a,
+        const N: usize,
+        PF: PackedField<F, N>,
+        F: FieldElement,
+        VF: FieldElement + IntermediateMulField + From<F>,
+    > Iterator for MasksIterator<'a, N, PF, F, VF>
+{
+    type Item = VF;
+    fn next(&mut self) -> Option<Self::Item> {
+        let output = match self.masks_iter.peek() {
+            None => return None,
+            Some(v) => *v,
+        };
+        let idx = *self.index_iter.peek().unwrap();
+        let output = if self.is_a {
+            self.index_iter.next();
+            if self.index_iter.peek().is_none() {
+                self.index_iter = (0..N).into_iter().rev().peekable();
+                self.masks_iter.next();
+            }
+            output.1 .0.get_element(idx)
+        } else {
+            output.1 .1.get_element(idx)
+        };
+        self.is_a = !self.is_a;
+        Some(VF::from(output))
+    }
+}
+
+pub fn construct_party_statement<
+    const PACKING: usize,
+    PF: PackedField<GF2, PACKING>,
+    F: IntermediateMulField + From<GF2>,
+    SHO: OfflineSemiHonestCorrelation<PF>,
+>(
+    coin: F,
+    sho_corr: &SHO,
+    log_folding_factor: usize,
+    verifier: &OfflineCircuitVerify<F>,
+    sorted_parties: &[PartyId],
+    my_party_id: PartyId,
+) -> Vec<F> {
+    let party_count = sorted_parties.len();
+    let round_count = verifier.prover_offline_material.get_round_count();
+    let idx = sorted_parties
+        .iter()
+        .enumerate()
+        .find(|(idx, v)| **v == my_party_id)
+        .unwrap()
+        .0;
+    let (prover_beaver_triples, _) = sho_corr.get_prepared_multiparty_beaver_triples();
+    let total_masks = prover_beaver_triples.len() * 2 * PACKING;
+    let single_fliop_size = 2
+        * (total_masks
+            + 1
+            + internal_round_proof_length(log_folding_factor) * (round_count - 1)
+            + last_round_proof_length(log_folding_factor));
+    let mut powers = PowersIterator::new(coin);
+    let mut party_statement = unsafe {
+        vec![MaybeUninit::<F>::uninit().assume_init(); 1 + single_fliop_size * party_count]
+    };
+    party_statement[0] = F::zero();
+    for i in 0..sorted_parties.len() {
+        if i == idx {
+            // If we're a prover.
+            let mut iterator = MasksIterator::new(prover_beaver_triples);
+            let prover = Some(&verifier.prover_offline_material);
+            let prover_s = Some(verifier.s_i);
+            zkfliop::verify_fliop_construct_statement(
+                Some(iterator),
+                prover,
+                prover_s,
+                None,
+                total_masks,
+                log_folding_factor,
+                &mut powers,
+                &mut party_statement
+                    [1 + single_fliop_size * (idx)..1 + single_fliop_size * (idx + 1)],
+            );
+            continue;
+        }
+        // Otherwise we're a verifier
+        let verifier = &verifier
+            .verifiers_offline_material
+            .iter()
+            .find(|v| v.0 == sorted_parties[i])
+            .unwrap()
+            .1;
+        let sum = zkfliop::verify_fliop_construct_statement::<MasksIterator<PACKING, PF, GF2, F>, F>(
+            None,
+            None,
+            None,
+            Some(verifier),
+            total_masks,
+            log_folding_factor,
+            &mut powers,
+            &mut party_statement[1 + single_fliop_size * i..1 + single_fliop_size * (i + 1)],
+        );
+        party_statement[0] += sum;
+    }
+    party_statement
+}
+
+pub async fn verify_fliop_correlation<
+    const PACKING: usize,
+    PF: PackedField<GF2, PACKING>,
+    F: IntermediateMulField + From<GF2>,
+    SHO: OfflineSemiHonestCorrelation<PF>,
+>(
+    engine: impl MultiPartyEngine,
+    verifier: &OfflineCircuitVerify<F>,
+    sho_corr: &SHO,
+    verifier_ctx: &mut VerifierCtx<F>,
+    proof: &ZkFliopProof<F>,
+) -> bool {
+    let coin_share = verifier.hash_for_coin();
+    let coin = StandardCommitReveal::commit(engine.sub_protocol("coin"), coin_share)
+        .await
+        .reveal()
+        .await
+        .into_iter()
+        .map(|v| v.1)
+        .sum::<F>()
+        + coin_share;
+    let statement_share = construct_party_statement(
+        coin,
+        sho_corr,
+        verifier_ctx.log_folding_factor(),
+        verifier,
+        engine.party_ids(),
+        engine.my_party_id(),
+    );
+    let (is_ok, chk) = obtain_check_value(statement_share, proof, verifier_ctx);
+    verify_check_value(engine, is_ok, chk).await
 }
