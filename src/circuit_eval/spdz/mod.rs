@@ -324,7 +324,7 @@ pub fn spdz_deal<
                 *o += *i;
             });
     }
-    assert_eq!(joint_statement[0], g(&joint_statement[1..]));
+    debug_assert_eq!(joint_statement[0], g(&joint_statement[1..]));
     let proof = zkfliop::ni::prove(
         parties_statements.iter().map(|v| &v.1),
         joint_statement,
@@ -385,6 +385,7 @@ pub async fn offline_spdz_verify<
     let mut statement = Vec::with_capacity(1 + 4 * N * triples.len());
     unsafe { statement.set_len(1 + 4 * N * triples.len()) };
     let mut powers = PowersIterator::new(coin);
+    info!("SPDZ Verify statement size: {}", statement.len());
     build_statement(&mut statement, &mut powers, triples, *mac_share);
     let check_value = zkfliop::ni::obtain_check_value(statement, proof, verifier_ctx);
     assert!(

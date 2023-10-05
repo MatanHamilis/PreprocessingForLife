@@ -151,11 +151,11 @@ fn bench_spdz_circuit<const N: usize, PF: PackedField<GF2, N>, CF: FieldContaine
                 let mut first_verify_engine = first_party.sub_protocol("verify");
                 let mut second_verify_engine = second_party.sub_protocol("verify");
                 let first_verify = runtime.spawn(async move {
-                    offline_spdz_verify(&mut first_verify_engine, &corr_first, &mut first_ctx);
+                    offline_spdz_verify(&mut first_verify_engine, &corr_first, &mut first_ctx).await;
                     corr_first
                 });
                 let second_verify = runtime.spawn(async move {
-                    offline_spdz_verify(&mut second_verify_engine, &corr_second, &mut second_ctx);
+                    offline_spdz_verify(&mut second_verify_engine, &corr_second, &mut second_ctx).await;
                     corr_second
                 });
                 let v = runtime.block_on(async { join!(first_verify, second_verify) });

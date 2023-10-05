@@ -483,7 +483,7 @@ pub fn bench_2p_semi_honest(c: &mut Criterion) {
     );
 }
 pub fn bench_2p_malicious(c: &mut Criterion) {
-    let is_authenticated = false;
+    let is_authenticated = true;
     pretty_env_logger::formatted_builder()
         .filter_level(log::LevelFilter::Info)
         .init();
