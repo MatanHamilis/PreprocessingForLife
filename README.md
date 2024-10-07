@@ -1,4 +1,4 @@
-# Distrusted Dealers: Efficient Secure (n+1)-Party Computation
+# Preprocessing for Life: Dishonest-Majority MPC with a Trusted or Untrusted Dealer
 
 In this repository we provide our implementation the paper.
 This code has been primarily tested on Linux system based on recent versions of Arch Linux.
